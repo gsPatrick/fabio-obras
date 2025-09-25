@@ -9,10 +9,6 @@ const headers = {
   'client-token': ZAPI_CLIENT_TOKEN,
 };
 
-/**
- * Verifica se as credenciais da Z-API estão configuradas.
- * @returns {boolean}
- */
 function checkCredentials() {
   if (!ZAPI_INSTANCE_ID || !ZAPI_TOKEN || !ZAPI_CLIENT_TOKEN) {
     logger.error('[WhatsAppService] Variáveis de ambiente da Z-API não configuradas.');
@@ -21,21 +17,13 @@ function checkCredentials() {
   return true;
 }
 
-/**
- * Envia uma mensagem de texto simples.
- * @param {string} phone - Número do destinatário ou ID do grupo.
- * @param {string} message - A mensagem a ser enviada.
- * @returns {Promise<object|null>}
- */
 async function sendWhatsappMessage(phone, message) {
   if (!checkCredentials() || !phone || !message) {
     logger.error('[WhatsAppService] Telefone e mensagem são obrigatórios.');
     return null;
   }
-
   const endpoint = `${BASE_URL}/send-text`;
   const payload = { phone, message };
-
   try {
     logger.info(`[WhatsAppService] Enviando mensagem de TEXTO para ${phone}`);
     const response = await axios.post(endpoint, payload, { headers });
@@ -48,22 +36,11 @@ async function sendWhatsappMessage(phone, message) {
   }
 }
 
-/**
- * Envia uma lista de opções (menu).
- * @param {string} phone - O ID do grupo ou número de telefone.
- * @param {string} messageText - A mensagem principal exibida acima da lista.
- * @param {object} optionListConfig - Configurações da lista.
- * @param {string} optionListConfig.title - Título do menu.
- * @param {string} optionListConfig.buttonLabel - Texto do botão para abrir o menu.
- * @param {Array<object>} optionListConfig.options - Array de opções.
- * @returns {Promise<object|null>}
- */
 async function sendOptionList(phone, messageText, optionListConfig) {
     if (!checkCredentials() || !phone || !messageText || !optionListConfig) {
         logger.error('[WhatsAppService] Parâmetros inválidos para sendOptionList.');
         return null;
     }
-
     const endpoint = `${BASE_URL}/send-option-list`;
     const payload = {
         phone,
@@ -71,10 +48,9 @@ async function sendOptionList(phone, messageText, optionListConfig) {
         optionList: {
             title: optionListConfig.title,
             buttonLabel: optionListConfig.buttonLabel,
-            options: optionListConfig.options, // [{ id, title, description }]
+            options: optionListConfig.options,
         },
     };
-
     try {
         logger.info(`[WhatsAppService] Enviando LISTA DE OPÇÕES para ${phone}.`);
         const response = await axios.post(endpoint, payload, { headers });
@@ -87,29 +63,52 @@ async function sendOptionList(phone, messageText, optionListConfig) {
     }
 }
 
+// ========================================================================
+// <<< INÍCIO DA CORREÇÃO >>>
+// ========================================================================
 
 /**
- * Obtém a lista de todos os chats (incluindo grupos) da instância.
+ * Obtém a lista de todos os grupos da instância, usando o endpoint correto e paginação.
  * @returns {Promise<Array|null>}
  */
-async function listChats() {
+async function listGroups() {
   if (!checkCredentials()) return null;
 
-  const endpoint = `${BASE_URL}/chats`;
+  // <<< MUDANÇA 1: Usando o endpoint /groups >>>
+  const endpoint = `${BASE_URL}/groups`;
+  
+  // <<< MUDANÇA 2: Adicionando os parâmetros de paginação obrigatórios >>>
+  // Vamos buscar um número grande para garantir que todos os grupos venham.
+  const params = {
+    page: 1,
+    pageSize: 100,
+  };
+
   try {
-    logger.info('[WhatsAppService] Buscando lista de chats...');
-    const response = await axios.get(endpoint, { headers });
-    logger.info(`[WhatsAppService] ${response.data.chats.length} chats encontrados.`);
-    return response.data.chats;
+    logger.info('[WhatsAppService] Buscando lista de grupos...');
+    
+    // <<< MUDANÇA 3: A chamada GET agora inclui os parâmetros >>>
+    const response = await axios.get(endpoint, { headers, params });
+    
+    // <<< MUDANÇA 4: A resposta é um array direto, não um objeto com a chave "chats" >>>
+    logger.info(`[WhatsAppService] ${response.data.length} grupos encontrados.`);
+    return response.data;
+
   } catch (error) {
+    // Tratamento de erro mais detalhado
+    const status = error.response ? error.response.status : 'N/A';
     const errorData = error.response ? error.response.data : error.message;
-    logger.error('[WhatsAppService] Erro ao listar chats:', errorData);
+    logger.error(`[WhatsAppService] Erro ao listar grupos (Status: ${status}):`, errorData);
     return null;
   }
 }
 
+// ========================================================================
+// <<< FIM DA CORREÇÃO >>>
+// ========================================================================
+
 module.exports = {
   sendWhatsappMessage,
   sendOptionList,
-  listChats,
+  listGroups, // <<< MUDANÇA 5: Exportando a função correta
 };

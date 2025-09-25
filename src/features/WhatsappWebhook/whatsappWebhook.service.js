@@ -42,13 +42,11 @@ class WebhookService {
    * ETAPA 1: Lida com a chegada de uma imagem/documento.
    * Cria um registro 'awaiting_context' e espera silenciosamente pelo contexto do mesmo usuário.
    */
-  async handleMediaArrival(payload) {
+async handleMediaArrival(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
-    logger.info(`[Webhook] Mídia recebida de ${participantPhone}. Aguardando contexto.`);
-    const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
-
-    // Limpa pendências antigas do mesmo usuário para evitar confusão.
+    const mediaType = payload.image ? 'imagem' : 'documento';
+    
     await PendingExpense.destroy({
       where: {
         participant_phone: participantPhone,
@@ -57,7 +55,7 @@ class WebhookService {
       }
     });
 
-    // Cria um novo registro de espera.
+    const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
     await PendingExpense.create({
       whatsapp_message_id: payload.messageId,
       whatsapp_group_id: groupId,
@@ -66,7 +64,56 @@ class WebhookService {
       status: 'awaiting_context',
       expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
     });
+
+    // --- MENSAGEM CURTA E DIRETA ---
+    const confirmationMessage = `📄👍 Documento recebido! Agora estou aguardando a descrição por texto ou áudio.`;
+    await whatsappService.sendWhatsappMessage(groupId, confirmationMessage);
+
+    logger.info(`[Webhook] Mídia de ${participantPhone} recebida. Mensagem de confirmação enviada.`);
   }
+
+  /**
+   * ETAPA 2: Lida com a chegada de texto/áudio.
+   */
+  async handleContextArrival(payload) {
+    const groupId = payload.phone;
+    const participantPhone = payload.participantPhone;
+
+    const pendingMedia = await PendingExpense.findOne({
+      where: {
+        participant_phone: participantPhone,
+        whatsapp_group_id: groupId,
+        status: 'awaiting_context',
+        expires_at: { [Op.gt]: new Date() }
+      },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (pendingMedia) {
+      logger.info(`[Webhook] Contexto de ${participantPhone} recebido. Iniciando análise...`);
+      let userContext = '';
+      if (payload.audio) {
+        const audioBuffer = await whatsappService.downloadZapiMedia(payload.audio.audioUrl);
+        userContext = audioBuffer ? await aiService.transcribeAudio(audioBuffer) : '';
+      } else {
+        userContext = payload.text.message;
+      }
+      
+      const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
+      if (mediaBuffer && userContext) {
+        const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext);
+        if (analysisResult) {
+          return this.startValidationFlow(pendingMedia, analysisResult, userContext);
+        }
+      }
+    } else {
+      const textMessage = payload.text ? payload.text.message : null;
+      if (textMessage && /^\d+$/.test(textMessage)) {
+        await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone);
+      }
+    }
+  }
+
 
   /**
    * ETAPA 2: Lida com a chegada de texto/áudio.

@@ -1,5 +1,8 @@
 const logger = require('../../utils/logger');
-const { MonitoredGroup, Category, PendingExpense, Expense, Op } = require('../../models');
+// <<< INÍCIO DA CORREÇÃO >>>
+const { MonitoredGroup, Category, PendingExpense, Expense } = require('../../models');
+const { Op } = require('sequelize');
+// <<< FIM DA CORREÇÃO >>>
 const aiService = require('../../utils/aiService');
 const whatsappService = require('../../utils/whatsappService');
 

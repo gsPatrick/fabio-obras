@@ -5,6 +5,14 @@ const whatsappService = require('../../utils/whatsappService');
 
 class WebhookService {
   async processIncomingMessage(payload) {
+    // ===================================================================
+    // <<< LOG DE DEPURAÇÃO ADICIONADO AQUI >>>
+    // Vamos inspecionar o objeto completo que a Z-API nos envia.
+    console.log('--- INÍCIO DO PAYLOAD BRUTO RECEBIDO ---');
+    console.log(JSON.stringify(payload, null, 2)); // Usando JSON.stringify para formatar e ver tudo.
+    console.log('--- FIM DO PAYLOAD BRUTO RECEBIDO ---');
+    // ===================================================================
+
     if (!payload.isGroup) return;
 
     const groupId = payload.phone;
@@ -16,15 +24,12 @@ class WebhookService {
 
     logger.info(`[WebhookService] >>> Mensagem recebida no grupo monitorado: ${isMonitored.name}`);
 
+    // Mantemos a lógica anterior por enquanto. Ela vai falhar, mas o log acima nos dará a resposta.
     const messageText = payload.text ? payload.text.message : (payload.caption || null);
     let analysisResult = null;
     let messageTypeForLog = 'desconhecido';
 
     try {
-      // <<< INÍCIO DA CORREÇÃO LÓGICA >>>
-      // Em vez de 'payload.type', verificamos a existência de chaves de mídia.
-      // A Z-API usa 'mimetype' ou chaves específicas como 'image', 'audio'.
-      
       if (payload.mimetype && payload.mimetype.startsWith('image')) {
         messageTypeForLog = 'imagem';
         logger.info(`[WebhookService] Mídia do tipo "${messageTypeForLog}" recebida. Iniciando análise...`);
@@ -47,26 +52,21 @@ class WebhookService {
         logger.info(`[WebhookService] Mídia do tipo "${messageTypeForLog}" recebida. Tratando como imagem.`);
         const docBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
         if (docBuffer) {
-            // A IA multimodal (gpt-4o) consegue ler PDFs como imagens.
             analysisResult = await aiService.analyzeExpenseWithImage(docBuffer, messageText);
         }
       }
-      // <<< FIM DA CORREÇÃO LÓGICA >>>
 
       if (analysisResult) {
         console.log('✅✅✅ ANÁLISE DA IA COMPLETA ✅✅✅');
         console.log(analysisResult);
         console.log('✅✅✅ PRÓXIMO PASSO: INICIAR FLUXO DE VALIDAÇÃO ✅✅✅');
-        // TODO: Salvar e enviar mensagem de validação.
       } else {
-        // Ignora mensagens de texto puro ou tipos não suportados
         if (messageTypeForLog === 'desconhecido') {
             logger.info('[WebhookService] Mensagem de texto puro ou tipo não processável recebida. Ignorando.');
         } else {
             logger.warn(`[WebhookService] Não foi possível obter um resultado da análise para a mensagem tipo "${messageTypeForLog}".`);
         }
       }
-
     } catch (error) {
       logger.error('[WebhookService] Ocorreu um erro no processamento do webhook:', error);
     }

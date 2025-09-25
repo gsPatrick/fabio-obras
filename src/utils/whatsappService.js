@@ -1,130 +1,76 @@
-const axios = require('axios');
-const logger = require('./logger');
+const logger = require('../../utils/logger');
+const { MonitoredGroup } = require('../../models');
+const aiService = require('../../utils/aiService');
+const whatsappService = require('../../utils/whatsappService');
 
-const { ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN } = process.env;
-const BASE_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}`;
+class WebhookService {
+  async processIncomingMessage(payload) {
+    // ===================================================================
+    // <<< LOG DE DEPURAÇÃO ADICIONADO AQUI >>>
+    // Vamos inspecionar o objeto completo que a Z-API nos envia.
+    console.log('--- INÍCIO DO PAYLOAD BRUTO RECEBIDO ---');
+    console.log(JSON.stringify(payload, null, 2)); // Usando JSON.stringify para formatar e ver tudo.
+    console.log('--- FIM DO PAYLOAD BRUTO RECEBIDO ---');
+    // ===================================================================
 
-const headers = {
-  'Content-Type': 'application/json',
-  'client-token': ZAPI_CLIENT_TOKEN,
-};
+    if (!payload.isGroup) return;
 
-function checkCredentials() {
-  if (!ZAPI_INSTANCE_ID || !ZAPI_TOKEN || !ZAPI_CLIENT_TOKEN) {
-    logger.error('[WhatsAppService] Variáveis de ambiente da Z-API não configuradas.');
-    return false;
-  }
-  return true;
-}
-
-/**
- * Envia uma mensagem de texto simples.
- * @param {string} phone - Número do destinatário ou ID do grupo.
- * @param {string} message - A mensagem a ser enviada.
- */
-async function sendWhatsappMessage(phone, message) {
-  if (!checkCredentials() || !phone || !message) {
-    logger.error('[WhatsAppService] Telefone e mensagem são obrigatórios.');
-    return null;
-  }
-  const endpoint = `${BASE_URL}/send-text`;
-  const payload = { phone, message };
-  try {
-    logger.info(`[WhatsAppService] Enviando mensagem de TEXTO para ${phone}`);
-    const response = await axios.post(endpoint, payload, { headers });
-    logger.info(`[WhatsAppService] Mensagem enviada com sucesso para ${phone}.`, response.data);
-    return response.data;
-  } catch (error) {
-    const errorData = error.response ? error.response.data : error.message;
-    logger.error(`[WhatsAppService] Erro ao enviar mensagem para ${phone}:`, errorData);
-    return null;
-  }
-}
-
-/**
- * Envia uma lista de opções (menu).
- * @param {string} phone - O ID do grupo ou número de telefone.
- * @param {string} messageText - A mensagem principal.
- * @param {object} optionListConfig - Configurações da lista.
- */
-async function sendOptionList(phone, messageText, optionListConfig) {
-    if (!checkCredentials() || !phone || !messageText || !optionListConfig) {
-        logger.error('[WhatsAppService] Parâmetros inválidos para sendOptionList.');
-        return null;
-    }
-    const endpoint = `${BASE_URL}/send-option-list`;
-    const payload = {
-        phone,
-        message: messageText,
-        optionList: {
-            title: optionListConfig.title,
-            buttonLabel: optionListConfig.buttonLabel,
-            options: optionListConfig.options,
-        },
-    };
-    try {
-        logger.info(`[WhatsAppService] Enviando LISTA DE OPÇÕES para ${phone}.`);
-        const response = await axios.post(endpoint, payload, { headers });
-        logger.info(`[WhatsAppService] Lista de opções enviada com sucesso para ${phone}.`, response.data);
-        return response.data;
-    } catch (error) {
-        const errorData = error.response ? error.response.data : error.message;
-        logger.error(`[WhatsAppService] Erro ao enviar lista de opções para ${phone}:`, errorData);
-        return null;
-    }
-}
-
-/**
- * Obtém a lista de todos os grupos da instância.
- */
-async function listGroups() {
-  if (!checkCredentials()) return null;
-  const endpoint = `${BASE_URL}/groups`;
-  const params = { page: 1, pageSize: 100 };
-  try {
-    logger.info('[WhatsAppService] Buscando lista de grupos...');
-    const response = await axios.get(endpoint, { headers, params });
-    logger.info(`[WhatsAppService] ${response.data.length} grupos encontrados.`);
-    return response.data;
-  } catch (error) {
-    const status = error.response ? error.response.status : 'N/A';
-    const errorData = error.response ? error.response.data : error.message;
-    logger.error(`[WhatsAppService] Erro ao listar grupos (Status: ${status}):`, errorData);
-    return null;
-  }
-}
-
-/**
- * Baixa uma mídia a partir de uma URL da Z-API.
- * @param {string} mediaUrl A URL da mídia.
- * @returns {Promise<Buffer|null>} O buffer do arquivo.
- */
-async function downloadZapiMedia(mediaUrl) {
-  if (!checkCredentials() || !mediaUrl) {
-    logger.error('[WhatsAppService] URL da mídia é necessária para download.');
-    return null;
-  }
-  try {
-    logger.info(`[WhatsAppService] Baixando mídia de: ${mediaUrl}`);
-    const response = await axios({
-      method: 'get',
-      url: mediaUrl,
-      headers: { 'client-token': ZAPI_CLIENT_TOKEN },
-      responseType: 'arraybuffer',
+    const groupId = payload.phone;
+    const isMonitored = await MonitoredGroup.findOne({
+      where: { group_id: groupId, is_active: true },
     });
-    logger.info(`[WhatsAppService] Mídia baixada com sucesso. Tamanho: ${response.data.length} bytes.`);
-    return Buffer.from(response.data);
-  } catch (error) {
-    const status = error.response ? error.response.status : 'N/A';
-    const errorData = error.response ? error.response.data : error.message;
-    logger.error(`[WhatsAppService] Erro ao baixar mídia (Status: ${status})`, { errorData });
-    return null;
+    
+    if (!isMonitored) return;
+
+    logger.info(`[WebhookService] >>> Mensagem recebida no grupo monitorado: ${isMonitored.name}`);
+
+    // Mantemos a lógica anterior por enquanto. Ela vai falhar, mas o log acima nos dará a resposta.
+    const messageText = payload.text ? payload.text.message : (payload.caption || null);
+    let analysisResult = null;
+    let messageTypeForLog = 'desconhecido';
+
+    try {
+      if (payload.mimetype && payload.mimetype.startsWith('image')) {
+        messageTypeForLog = 'imagem';
+        logger.info(`[WebhookService] Mídia do tipo "${messageTypeForLog}" recebida. Iniciando análise...`);
+        const imageBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
+        if (imageBuffer) {
+          analysisResult = await aiService.analyzeExpenseWithImage(imageBuffer, messageText);
+        }
+      } else if (payload.mimetype && payload.mimetype.startsWith('audio')) {
+        messageTypeForLog = 'áudio';
+        logger.info(`[WebhookService] Mensagem de "${messageTypeForLog}" recebida. Transcrevendo...`);
+        const audioBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
+        if (audioBuffer) {
+          const transcribedText = await aiService.transcribeAudio(audioBuffer);
+          if (transcribedText) {
+            analysisResult = await aiService.analyzeExpenseFromText(transcribedText);
+          }
+        }
+      } else if (payload.mimetype && payload.mimetype.includes('pdf')) {
+        messageTypeForLog = 'documento (PDF)';
+        logger.info(`[WebhookService] Mídia do tipo "${messageTypeForLog}" recebida. Tratando como imagem.`);
+        const docBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
+        if (docBuffer) {
+            analysisResult = await aiService.analyzeExpenseWithImage(docBuffer, messageText);
+        }
+      }
+
+      if (analysisResult) {
+        console.log('✅✅✅ ANÁLISE DA IA COMPLETA ✅✅✅');
+        console.log(analysisResult);
+        console.log('✅✅✅ PRÓXIMO PASSO: INICIAR FLUXO DE VALIDAÇÃO ✅✅✅');
+      } else {
+        if (messageTypeForLog === 'desconhecido') {
+            logger.info('[WebhookService] Mensagem de texto puro ou tipo não processável recebida. Ignorando.');
+        } else {
+            logger.warn(`[WebhookService] Não foi possível obter um resultado da análise para a mensagem tipo "${messageTypeForLog}".`);
+        }
+      }
+    } catch (error) {
+      logger.error('[WebhookService] Ocorreu um erro no processamento do webhook:', error);
+    }
   }
 }
 
-module.exports = {
-  sendWhatsappMessage,
-  sendOptionList,
-  listGroups,
-  downloadZapiMedia,
-};
+module.exports = new WebhookService();

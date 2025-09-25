@@ -36,7 +36,7 @@ class App {
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
       
       // Sincroniza os models com o banco de dados.
-      await db.sequelize.sync({ force: true });
+      await db.sequelize.sync({ force: false });
       console.log('🔄 Modelos sincronizados com o banco de dados.');
     } catch (error) {
       console.error('❌ Não foi possível conectar ou sincronizar com o banco de dados:', error);

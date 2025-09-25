@@ -16,46 +16,55 @@ class WebhookService {
 
     logger.info(`[WebhookService] >>> Mensagem recebida no grupo monitorado: ${isMonitored.name}`);
 
-    const messageType = payload.type;
-    const messageText = payload.text ? payload.text.message : null;
+    const messageText = payload.text ? payload.text.message : (payload.caption || null);
     let analysisResult = null;
+    let messageTypeForLog = 'desconhecido';
 
     try {
-      switch (messageType) {
-        case 'image':
-        case 'document':
-          logger.info(`[WebhookService] Mídia do tipo "${messageType}" recebida. Iniciando análise...`);
-          const imageBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
-          if (imageBuffer) {
-            // Usa a função de análise com imagem
-            analysisResult = await aiService.analyzeExpenseWithImage(imageBuffer, messageText);
+      // <<< INÍCIO DA CORREÇÃO LÓGICA >>>
+      // Em vez de 'payload.type', verificamos a existência de chaves de mídia.
+      // A Z-API usa 'mimetype' ou chaves específicas como 'image', 'audio'.
+      
+      if (payload.mimetype && payload.mimetype.startsWith('image')) {
+        messageTypeForLog = 'imagem';
+        logger.info(`[WebhookService] Mídia do tipo "${messageTypeForLog}" recebida. Iniciando análise...`);
+        const imageBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
+        if (imageBuffer) {
+          analysisResult = await aiService.analyzeExpenseWithImage(imageBuffer, messageText);
+        }
+      } else if (payload.mimetype && payload.mimetype.startsWith('audio')) {
+        messageTypeForLog = 'áudio';
+        logger.info(`[WebhookService] Mensagem de "${messageTypeForLog}" recebida. Transcrevendo...`);
+        const audioBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
+        if (audioBuffer) {
+          const transcribedText = await aiService.transcribeAudio(audioBuffer);
+          if (transcribedText) {
+            analysisResult = await aiService.analyzeExpenseFromText(transcribedText);
           }
-          break;
-
-        case 'audio':
-          logger.info('[WebhookService] Mensagem de áudio recebida. Transcrevendo...');
-          const audioBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
-          if (audioBuffer) {
-            const transcribedText = await aiService.transcribeAudio(audioBuffer);
-            if (transcribedText) {
-              // Usa a função de análise a partir do texto transcrito
-              analysisResult = await aiService.analyzeExpenseFromText(transcribedText);
-            }
-          }
-          break;
-        
-        // Podemos adicionar mais casos aqui no futuro (texto, etc.)
+        }
+      } else if (payload.mimetype && payload.mimetype.includes('pdf')) {
+        messageTypeForLog = 'documento (PDF)';
+        logger.info(`[WebhookService] Mídia do tipo "${messageTypeForLog}" recebida. Tratando como imagem.`);
+        const docBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
+        if (docBuffer) {
+            // A IA multimodal (gpt-4o) consegue ler PDFs como imagens.
+            analysisResult = await aiService.analyzeExpenseWithImage(docBuffer, messageText);
+        }
       }
+      // <<< FIM DA CORREÇÃO LÓGICA >>>
 
-      // Se a análise (de imagem ou áudio) foi bem-sucedida
       if (analysisResult) {
         console.log('✅✅✅ ANÁLISE DA IA COMPLETA ✅✅✅');
         console.log(analysisResult);
         console.log('✅✅✅ PRÓXIMO PASSO: INICIAR FLUXO DE VALIDAÇÃO ✅✅✅');
-
-        // TODO: Salvar na tabela `pending_expenses` e enviar mensagem de validação.
+        // TODO: Salvar e enviar mensagem de validação.
       } else {
-        logger.warn(`[WebhookService] Não foi possível obter um resultado da análise para a mensagem tipo "${messageType}".`);
+        // Ignora mensagens de texto puro ou tipos não suportados
+        if (messageTypeForLog === 'desconhecido') {
+            logger.info('[WebhookService] Mensagem de texto puro ou tipo não processável recebida. Ignorando.');
+        } else {
+            logger.warn(`[WebhookService] Não foi possível obter um resultado da análise para a mensagem tipo "${messageTypeForLog}".`);
+        }
       }
 
     } catch (error) {

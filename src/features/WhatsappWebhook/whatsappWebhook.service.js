@@ -1,12 +1,19 @@
 const logger = require('../../utils/logger');
-const { MonitoredGroup, Category, PendingExpense, Expense, Sequelize } = require('../../models');
+const { MonitoredGroup, Category, PendingExpense, Expense } = require('../../models');
 const aiService = require('../../utils/aiService');
 const whatsappService = require('../../utils/whatsappService');
 
 class WebhookService {
   async processIncomingMessage(payload) {
-    // --- LÓGICA DE CLIQUE EM BOTÃO / LISTA ---
-    // A Z-API envia um payload diferente para cliques, então tratamos primeiro.
+    // ===================================================================
+    // <<< LOG DE DEPURAÇÃO REATIVADO >>>
+    // Precisamos ver o que a Z-API envia QUANDO UM BOTÃO É CLICADO.
+    console.log('--- INÍCIO DO PAYLOAD BRUTO RECEBIDO ---');
+    console.log(JSON.stringify(payload, null, 2));
+    console.log('--- FIM DO PAYLOAD BRUTO RECEBIDO ---');
+    // ===================================================================
+
+    // A lógica anterior de detecção de clique
     if (payload.buttonResponseMessage) {
       return this.handleButtonResponse(payload);
     }
@@ -14,7 +21,6 @@ class WebhookService {
       return this.handleListResponse(payload);
     }
 
-    // --- LÓGICA DE RECEBIMENTO DE MENSAGEM (IMAGEM, ÁUDIO, ETC) ---
     if (!payload.isGroup) return;
 
     const groupId = payload.phone;
@@ -58,7 +64,6 @@ class WebhookService {
       }
 
       if (analysisResult) {
-        // Inicia o fluxo de validação
         await this.startValidationFlow(payload, analysisResult);
       }
     } catch (error) {
@@ -66,21 +71,15 @@ class WebhookService {
     }
   }
 
-  /**
-   * Salva a análise da IA como uma despesa pendente e envia a mensagem de validação.
-   */
+  // O resto do arquivo permanece o mesmo...
   async startValidationFlow(payload, analysisResult) {
     const { value, description, categoryName } = analysisResult;
     const groupId = payload.phone;
-
-    // 1. Encontrar a categoria no nosso banco de dados
     const category = await Category.findOne({ where: { name: categoryName } });
     if (!category) {
-      logger.error(`Categoria "${categoryName}" não encontrada no banco de dados.`);
+      logger.error(`Categoria "${categoryName}" não encontrada no banco.`);
       return;
     }
-
-    // 2. Criar a despesa pendente com validade de 5 minutos
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
     const pendingExpense = await PendingExpense.create({
       value,
@@ -91,42 +90,29 @@ class WebhookService {
       participant_phone: payload.participantPhone,
       expires_at: expiresAt,
     });
-
-    // 3. Enviar a mensagem de validação com o botão "Editar"
     const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
     const message = `Análise concluída! 🤖\n\nDespesa de *${formattedValue}* foi sugerida para a categoria: *${category.name}*.\n\nSe estiver correto, não precisa fazer nada. Para corrigir, clique no botão abaixo.`;
     const buttons = [{ id: `edit_expense_${pendingExpense.id}`, label: '✏️ Editar Categoria' }];
-    
     await whatsappService.sendButtonList(groupId, message, buttons);
     logger.info(`Fluxo de validação iniciado para a despesa pendente ID: ${pendingExpense.id}`);
   }
 
-  /**
-   * Lida com cliques no botão "Editar".
-   */
   async handleButtonResponse(payload) {
     const buttonId = payload.buttonResponseMessage.selectedButtonId;
     const groupId = payload.phone;
-
     if (buttonId && buttonId.startsWith('edit_expense_')) {
       const pendingExpenseId = buttonId.split('_')[2];
       const pendingExpense = await PendingExpense.findByPk(pendingExpenseId);
-
       if (!pendingExpense) {
         await whatsappService.sendWhatsappMessage(groupId, "Esta despesa não está mais pendente ou não foi encontrada.");
         return;
       }
-
-      // TODO: Adicionar verificação de expiração aqui
-
-      // Enviar a lista de categorias para o usuário escolher
       const allCategories = await Category.findAll({ order: [['type', 'ASC'], ['name', 'ASC']] });
       const options = allCategories.map(cat => ({
-        id: `sel_cat_${cat.id}_exp_${pendingExpense.id}`, // sel_cat_{ID_CATEGORIA}_exp_{ID_DESPESA}
+        id: `sel_cat_${cat.id}_exp_${pendingExpense.id}`,
         title: cat.name,
         description: `Tipo: ${cat.type}`
       }));
-
       await whatsappService.sendOptionList(groupId, "Selecione a categoria correta para a despesa:", {
         title: "Lista de Categorias",
         buttonLabel: "Ver Categorias",
@@ -135,38 +121,27 @@ class WebhookService {
     }
   }
 
-  /**
-   * Lida com a seleção de uma categoria da lista.
-   */
   async handleListResponse(payload) {
     const optionId = payload.listResponseMessage.selectedRowId;
     const groupId = payload.phone;
-
     if (optionId && optionId.startsWith('sel_cat_')) {
       const parts = optionId.split('_');
       const categoryId = parts[2];
       const pendingExpenseId = parts[4];
-
       const pendingExpense = await PendingExpense.findByPk(pendingExpenseId);
       const category = await Category.findByPk(categoryId);
-
       if (!pendingExpense || !category) {
         await whatsappService.sendWhatsappMessage(groupId, "Ocorreu um erro ao atualizar a despesa. Tente novamente.");
         return;
       }
-      
-      // Mover de pendente para confirmada
       await Expense.create({
         value: pendingExpense.value,
         description: pendingExpense.description,
         expense_date: pendingExpense.createdAt,
         whatsapp_message_id: pendingExpense.whatsapp_message_id,
-        category_id: category.id, // USA O ID DA CATEGORIA ESCOLHIDA
+        category_id: category.id,
       });
-
-      // Deletar a pendência
       await pendingExpense.destroy();
-
       await whatsappService.sendWhatsappMessage(groupId, `✅ Categoria atualizada com sucesso para: *${category.name}*`);
       logger.info(`Despesa ${pendingExpenseId} confirmada com a categoria ${category.name} pelo usuário.`);
     }

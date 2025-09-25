@@ -124,13 +124,14 @@ class AIService {
     }
   }
 
-  /**
+ /**
    * Valida o resultado da análise da IA, garantindo que a categoria é válida.
    * @private
    */
   _validateAnalysisResult(result, categoryList) {
-    if (!categoryList.includes(result.categoryName)) {
-      logger.warn(`[AIService] IA sugeriu categoria inválida ('${result.categoryName}'). Usando 'Outros'.`);
+    // CORREÇÃO: Verifica se a categoria é inválida OU VAZIA
+    if (!result.categoryName || !categoryList.includes(result.categoryName)) {
+      logger.warn(`[AIService] IA sugeriu categoria inválida/vazia ('${result.categoryName}'). Usando 'Outros'.`);
       result.categoryName = 'Outros';
     }
     return result;

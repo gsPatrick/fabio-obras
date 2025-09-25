@@ -10,48 +10,100 @@ class App {
   constructor() {
     this.server = express();
     
-    // Conectar ao banco ANTES de iniciar o servidor
-    this.connectDatabase();
+    // Conectar ao banco e popular dados essenciais ANTES de iniciar o servidor
+    this.connectAndSeedDatabase();
     
     this.middlewares();
     this.routes();
   }
 
   middlewares() {
-    // Habilita o CORS para todas as rotas e origens
     this.server.use(cors());
-
-    // Habilita o servidor a interpretar corpos de requisição no formato JSON.
     this.server.use(express.json());
   }
 
   routes() {
-    // Utiliza o router principal que contém todas as rotas da aplicação.
     this.server.use(mainRouter);
   }
 
-  async connectDatabase() {
+  async connectAndSeedDatabase() {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
       
-      // Sincroniza os models com o banco de dados.
       await db.sequelize.sync({ force: false });
       console.log('🔄 Modelos sincronizados com o banco de dados.');
+
+      // <<< INÍCIO DA LÓGICA DE SEEDER DAS CATEGORIAS >>>
+      await this.seedCategories();
+      // <<< FIM DA LÓGICA DE SEEDER DAS CATEGORIAS >>>
+
     } catch (error) {
       console.error('❌ Não foi possível conectar ou sincronizar com o banco de dados:', error);
       process.exit(1); 
     }
+  }
+
+  /**
+   * Garante que todas as categorias essenciais existam no banco de dados.
+   * Utiliza o método 'findOrCreate' para não criar duplicatas.
+   */
+  async seedCategories() {
+    const { Category } = db;
+    const categoriesToSeed = [
+        // Mão de Obra
+        { name: 'Mão de obra estrutural', type: 'Mão de Obra' },
+        { name: 'Mão de obra cinza', type: 'Mão de Obra' },
+        { name: 'Mão de obra acabamento', type: 'Mão de Obra' },
+        { name: 'Mão de obra gesso', type: 'Mão de Obra' },
+        { name: 'Mão de obra pintura', type: 'Mão de Obra' },
+        { name: 'Mão de obra vidro', type: 'Mão de Obra' },
+        { name: 'Mão de obra esquadrias', type: 'Mão de Obra' },
+        { name: 'Mão de obra hidráulica e elétrica', type: 'Mão de Obra' },
+        // Material
+        { name: 'Material ferro', type: 'Material' },
+        { name: 'Material concreto', type: 'Material' },
+        { name: 'Material bruto', type: 'Material' },
+        { name: 'Material piso', type: 'Material' },
+        { name: 'Material argamassa', type: 'Material' },
+        { name: 'Material gesso', type: 'Material' },
+        { name: 'Material esquadria', type: 'Material' },
+        { name: 'Material pintura', type: 'Material' },
+        { name: 'Material fios', type: 'Material' },
+        { name: 'Material iluminação', type: 'Material' },
+        { name: 'Material pedras granitos', type: 'Material' },
+        { name: 'Material louças e metais', type: 'Material' },
+        { name: 'Material equipamentos', type: 'Material' },
+        { name: 'Material ar condicionado', type: 'Material' },
+        { name: 'Material hidráulica', type: 'Material' },
+        // Serviços/Equipamentos
+        { name: 'Marcenaria', type: 'Serviços/Equipamentos' },
+        { name: 'Eletros', type: 'Serviços/Equipamentos' },
+        // Outros
+        { name: 'Outros', type: 'Outros' },
+    ];
+    
+    console.log('[SEEDER] Verificando e criando categorias essenciais...');
+    for (const categoryData of categoriesToSeed) {
+        // findOrCreate retorna [instância, created(boolean)]
+        const [category, created] = await Category.findOrCreate({
+            where: { name: categoryData.name },
+            defaults: categoryData,
+        });
+
+        if (created) {
+            console.log(`[SEEDER] Categoria '${category.name}' criada.`);
+        }
+    }
+    console.log('[SEEDER] Verificação de categorias concluída.');
   }
 }
 
 // Cria a instância da aplicação
 const app = new App().server;
 
-// Define a porta a partir das variáveis de ambiente ou usa 5000 como padrão
 const port = process.env.API_PORT || 5000;
 
-// Inicia o servidor
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
   const publicUrl = process.env.PUBLIC_URL || `http://localhost:${port}`;

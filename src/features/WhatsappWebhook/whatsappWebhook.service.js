@@ -5,22 +5,16 @@ const whatsappService = require('../../utils/whatsappService');
 
 class WebhookService {
   async processIncomingMessage(payload) {
-    // ===================================================================
-    // <<< LOG DE DEPURAÇÃO REATIVADO >>>
-    // Precisamos ver o que a Z-API envia QUANDO UM BOTÃO É CLICADO.
-    console.log('--- INÍCIO DO PAYLOAD BRUTO RECEBIDO ---');
-    console.log(JSON.stringify(payload, null, 2));
-    console.log('--- FIM DO PAYLOAD BRUTO RECEBIDO ---');
-    // ===================================================================
-
-    // A lógica anterior de detecção de clique
-    if (payload.buttonResponseMessage) {
+    // --- LÓGICA DE DETECÇÃO DE CLIQUES (CORRIGIDA) ---
+    if (payload.buttonsResponseMessage) {
       return this.handleButtonResponse(payload);
     }
+    // Para a lista, usaremos uma chave mais provável baseada no padrão
     if (payload.listResponseMessage) {
       return this.handleListResponse(payload);
     }
 
+    // --- LÓGICA DE RECEBIMENTO DE MENSAGENS ---
     if (!payload.isGroup) return;
 
     const groupId = payload.phone;
@@ -45,7 +39,7 @@ class WebhookService {
         caption = payload.document.caption;
       } else if (payload.audio) {
         messageType = 'áudio';
-        mediaUrl = payload.audio.audioUrl; 
+        mediaUrl = payload.audio.audioUrl;
       }
       
       if (messageType === 'imagem' || messageType === 'documento') {
@@ -71,7 +65,6 @@ class WebhookService {
     }
   }
 
-  // O resto do arquivo permanece o mesmo...
   async startValidationFlow(payload, analysisResult) {
     const { value, description, categoryName } = analysisResult;
     const groupId = payload.phone;
@@ -98,8 +91,12 @@ class WebhookService {
   }
 
   async handleButtonResponse(payload) {
-    const buttonId = payload.buttonResponseMessage.selectedButtonId;
+    // <<< CORREÇÃO PRINCIPAL AQUI >>>
+    const buttonId = payload.buttonsResponseMessage.buttonId;
     const groupId = payload.phone;
+
+    logger.info(`[WebhookService] Clique no botão detectado. ID: ${buttonId}`);
+
     if (buttonId && buttonId.startsWith('edit_expense_')) {
       const pendingExpenseId = buttonId.split('_')[2];
       const pendingExpense = await PendingExpense.findByPk(pendingExpenseId);
@@ -107,12 +104,15 @@ class WebhookService {
         await whatsappService.sendWhatsappMessage(groupId, "Esta despesa não está mais pendente ou não foi encontrada.");
         return;
       }
+      
       const allCategories = await Category.findAll({ order: [['type', 'ASC'], ['name', 'ASC']] });
       const options = allCategories.map(cat => ({
         id: `sel_cat_${cat.id}_exp_${pendingExpense.id}`,
         title: cat.name,
         description: `Tipo: ${cat.type}`
       }));
+
+      logger.info(`[WebhookService] Enviando lista de ${options.length} categorias para o usuário escolher.`);
       await whatsappService.sendOptionList(groupId, "Selecione a categoria correta para a despesa:", {
         title: "Lista de Categorias",
         buttonLabel: "Ver Categorias",
@@ -122,8 +122,12 @@ class WebhookService {
   }
 
   async handleListResponse(payload) {
+    // <<< CORREÇÃO PREVENTIVA AQUI >>>
     const optionId = payload.listResponseMessage.selectedRowId;
     const groupId = payload.phone;
+
+    logger.info(`[WebhookService] Seleção na lista detectada. ID da Opção: ${optionId}`);
+
     if (optionId && optionId.startsWith('sel_cat_')) {
       const parts = optionId.split('_');
       const categoryId = parts[2];

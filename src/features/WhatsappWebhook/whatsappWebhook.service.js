@@ -9,49 +9,47 @@ class WebhookService {
     if (payload.buttonsResponseMessage) {
       return this.handleEditButton(payload);
     }
-    if (payload.listResponseMessage) {
-      const selectedId = payload.listResponseMessage.selectedRowId;
-      // Roteia para a função correta dependendo do ID selecionado
-      if (selectedId.startsWith('show_submenu_')) {
-        return this.handleMainMenuSelection(payload);
-      }
-      if (selectedId.startsWith('sel_cat_')) {
-        return this.handleFinalCategorySelection(payload);
-      }
-    }
-
+    
     // --- LÓGICA DE RECEBIMENTO DE MENSAGENS ---
-    // (Esta parte permanece a mesma)
     if (!payload.isGroup) return;
+
     const groupId = payload.phone;
     const isMonitored = await MonitoredGroup.findOne({ where: { group_id: groupId, is_active: true } });
     if (!isMonitored) return;
+
     logger.info(`[WebhookService] >>> Mensagem recebida no grupo monitorado: ${isMonitored.name}`);
+
+    // --- NOVA LÓGICA: VERIFICAR SE É UMA RESPOSTA NUMÉRICA ---
+    const textMessage = payload.text ? payload.text.message : null;
+    if (textMessage && /^\d+$/.test(textMessage)) { // Verifica se a mensagem é apenas um número
+      const handled = await this.handleNumericReply(groupId, parseInt(textMessage, 10));
+      if (handled) return; // Se foi uma resposta de categoria, não faz mais nada
+    }
+
+    // --- LÓGICA PADRÃO DE ANÁLISE DE MÍDIA ---
     let analysisResult = null;
     let mediaUrl = null;
     let caption = null;
-    let messageType = 'desconhecido';
     try {
       if (payload.image) {
-        messageType = 'imagem';
         mediaUrl = payload.image.imageUrl;
         caption = payload.image.caption;
       } else if (payload.document) {
-        messageType = 'documento';
         mediaUrl = payload.document.documentUrl;
         caption = payload.document.caption;
       } else if (payload.audio) {
-        messageType = 'áudio';
         mediaUrl = payload.audio.audioUrl;
       }
-      if (messageType === 'imagem' || messageType === 'documento') {
+      
+      if (mediaUrl) {
         const mediaBuffer = await whatsappService.downloadZapiMedia(mediaUrl);
-        if (mediaBuffer) analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, caption);
-      } else if (messageType === 'áudio') {
-        const audioBuffer = await whatsappService.downloadZapiMedia(mediaUrl);
-        if (audioBuffer) {
-          const transcribedText = await aiService.transcribeAudio(audioBuffer);
-          if (transcribedText) analysisResult = await aiService.analyzeExpenseFromText(transcribedText);
+        if (mediaBuffer) {
+          if (payload.audio) {
+            const transcribedText = await aiService.transcribeAudio(mediaBuffer);
+            if (transcribedText) analysisResult = await aiService.analyzeExpenseFromText(transcribedText);
+          } else {
+            analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, caption);
+          }
         }
       }
       if (analysisResult) await this.startValidationFlow(payload, analysisResult);
@@ -60,16 +58,12 @@ class WebhookService {
     }
   }
 
-  // ETAPA 1: Inicia o fluxo
+  // ETAPA 1: Inicia o fluxo de validação (sem mudanças)
   async startValidationFlow(payload, analysisResult) {
     // ... (Esta função permanece a mesma)
     const { value, description, categoryName } = analysisResult;
     const groupId = payload.phone;
     const category = await Category.findOne({ where: { name: categoryName } });
-    if (!category) {
-      logger.error(`Categoria "${categoryName}" não encontrada no banco.`);
-      return;
-    }
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
     const pendingExpense = await PendingExpense.create({
       value,
@@ -79,6 +73,7 @@ class WebhookService {
       whatsapp_group_id: groupId,
       participant_phone: payload.participantPhone,
       expires_at: expiresAt,
+      status: 'awaiting_validation',
     });
     const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
     const message = `Análise concluída! 🤖\n\nDespesa de *${formattedValue}* foi sugerida para a categoria: *${category.name}*.\n\nSe estiver correto, não precisa fazer nada. Para corrigir, clique no botão abaixo.`;
@@ -87,11 +82,10 @@ class WebhookService {
     logger.info(`Fluxo de validação iniciado para a despesa pendente ID: ${pendingExpense.id}`);
   }
 
-  // ETAPA 2: Usuário clica em "Editar". Enviamos o MENU PRINCIPAL.
+  // ETAPA 2: Usuário clica em "Editar". Enviamos a LISTA NUMERADA.
   async handleEditButton(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const groupId = payload.phone;
-    logger.info(`[WebhookService] Clique no botão detectado. ID: ${buttonId}`);
     if (buttonId && buttonId.startsWith('edit_expense_')) {
       const pendingExpenseId = buttonId.split('_')[2];
       const pendingExpense = await PendingExpense.findByPk(pendingExpenseId);
@@ -100,87 +94,62 @@ class WebhookService {
         return;
       }
       
-      // Busca os TIPOS de categoria únicos do banco (Mão de Obra, Material, etc)
-      const mainCategories = await Category.findAll({
-        group: ['type'],
-        attributes: ['type'],
-        order: [['type', 'ASC']],
-      });
-
-      const options = mainCategories.map(cat => ({
-        id: `show_submenu_${cat.type.replace(/ /g, '_')}_exp_${pendingExpense.id}`, // ex: show_submenu_Mão_de_Obra_exp_2
-        title: cat.type.substring(0, 24), // Limite de caracteres do WhatsApp
-        description: `Ver opções de ${cat.type}`.substring(0, 72)
-      }));
-
-      logger.info(`[WebhookService] Enviando menu principal de categorias.`);
-      await whatsappService.sendOptionList(groupId, "Selecione o tipo principal da despesa:", {
-        title: "Tipos de Categoria",
-        buttonLabel: "Ver Tipos",
-        options: options,
-      });
+      const allCategories = await Category.findAll({ order: [['id', 'ASC']] });
+      
+      // Cria a mensagem de texto com a lista numerada
+      const categoryListText = allCategories
+        .map((cat, index) => `${index + 1} - ${cat.name}`)
+        .join('\n');
+      
+      const message = `Ok! Para qual categoria você quer alterar?\n\n*Responda com o número correspondente:*\n\n${categoryListText}`;
+      
+      // Atualiza o status para indicar que estamos esperando um número
+      pendingExpense.status = 'awaiting_category_reply';
+      await pendingExpense.save();
+      
+      await whatsappService.sendWhatsappMessage(groupId, message);
+      logger.info(`Enviada lista de categorias numeradas para a despesa pendente ID: ${pendingExpenseId}`);
     }
   }
 
-  // ETAPA 3: Usuário seleciona um TIPO. Enviamos o SUBMENU.
-  async handleMainMenuSelection(payload) {
-    const optionId = payload.listResponseMessage.selectedRowId;
-    const groupId = payload.phone;
-    logger.info(`[WebhookService] Seleção no menu principal: ${optionId}`);
-
-    const parts = optionId.split('_');
-    const categoryType = parts[2].replace(/_/g, ' '); // ex: Mão de Obra
-    const pendingExpenseId = parts[4];
-
-    // Busca todas as categorias DENTRO do tipo selecionado
-    const subCategories = await Category.findAll({
-      where: { type: categoryType },
-      order: [['name', 'ASC']],
+  // ETAPA 3: Usuário responde com um número.
+  async handleNumericReply(groupId, selectedNumber) {
+    // Procura por UMA despesa que esteja esperando a resposta neste grupo
+    const pendingExpense = await PendingExpense.findOne({
+      where: {
+        whatsapp_group_id: groupId,
+        status: 'awaiting_category_reply',
+      },
     });
-    
-    const options = subCategories.map(cat => ({
-      id: `sel_cat_${cat.id}_exp_${pendingExpenseId}`, // ID para seleção final
-      title: cat.name.substring(0, 24),
-      description: `Tipo: ${cat.type}`.substring(0, 72)
-    }));
 
-    logger.info(`[WebhookService] Enviando submenu para o tipo "${categoryType}".`);
-    await whatsappService.sendOptionList(groupId, `Agora selecione a categoria específica para *${categoryType}*:`, {
-      title: `Categorias de ${categoryType}`,
-      buttonLabel: "Ver Opções",
-      options: options.slice(0, 10), // Garante o limite de 10 por lista
-    });
-    
-    // TODO: Adicionar lógica de paginação se um tipo tiver mais de 10 categorias.
-    // Por agora, sua lista se encaixa perfeitamente.
-  }
-
-  // ETAPA 4: Usuário faz a seleção FINAL. Salvamos e confirmamos.
-  async handleFinalCategorySelection(payload) {
-    const optionId = payload.listResponseMessage.selectedRowId;
-    const groupId = payload.phone;
-    logger.info(`[WebhookService] Seleção final de categoria: ${optionId}`);
-    
-    const parts = optionId.split('_');
-    const categoryId = parts[2];
-    const pendingExpenseId = parts[4];
-    const pendingExpense = await PendingExpense.findByPk(pendingExpenseId);
-    const category = await Category.findByPk(categoryId);
-    
-    if (!pendingExpense || !category) {
-      await whatsappService.sendWhatsappMessage(groupId, "Ocorreu um erro ao atualizar. Tente novamente.");
-      return;
+    if (!pendingExpense) {
+      return false; // Não era uma resposta de categoria, continua o fluxo normal.
     }
+
+    const allCategories = await Category.findAll({ order: [['id', 'ASC']] });
+    // O número - 1 corresponde ao índice do array (ex: número 1 é o índice 0)
+    const selectedCategory = allCategories[selectedNumber - 1];
+
+    if (!selectedCategory) {
+      await whatsappService.sendWhatsappMessage(groupId, `O número "${selectedNumber}" não é uma opção válida. Por favor, tente novamente.`);
+      return true; // A mensagem foi tratada (como um erro)
+    }
+
+    // Sucesso! Movemos a despesa para a tabela final.
     await Expense.create({
       value: pendingExpense.value,
       description: pendingExpense.description,
       expense_date: pendingExpense.createdAt,
       whatsapp_message_id: pendingExpense.whatsapp_message_id,
-      category_id: category.id,
+      category_id: selectedCategory.id, // USA O ID DA CATEGORIA ESCOLHIDA
     });
-    await pendingExpense.destroy();
-    await whatsappService.sendWhatsappMessage(groupId, `✅ Categoria atualizada com sucesso para: *${category.name}*`);
-    logger.info(`Despesa ${pendingExpenseId} confirmada com a categoria ${category.name} pelo usuário.`);
+
+    await pendingExpense.destroy(); // Limpa a pendência
+
+    await whatsappService.sendWhatsappMessage(groupId, `✅ Categoria atualizada com sucesso para: *${selectedCategory.name}*`);
+    logger.info(`Despesa ${pendingExpense.id} confirmada com a categoria ${selectedCategory.name} via resposta numérica.`);
+    
+    return true; // A mensagem foi tratada com sucesso
   }
 }
 

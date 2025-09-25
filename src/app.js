@@ -36,7 +36,7 @@ class App {
       // Sincroniza os models com o banco de dados.
       // { alter: true } tenta alterar as tabelas existentes para corresponder aos modelos.
       // Em produção, o ideal é usar Migrations.
-      await db.sequelize.sync({ alter: true });
+      await db.sequelize.sync({ force: true });
       console.log('🔄 Modelos sincronizados com o banco de dados.');
     } catch (error) {
       console.error('❌ Não foi possível conectar ou sincronizar com o banco de dados:', error);

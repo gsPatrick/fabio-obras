@@ -116,40 +116,46 @@ class WebhookService {
   /**
    * ETAPA 3: Monta e envia a mensagem rica de validação após a análise da IA.
    */
-  async startValidationFlow(pendingExpense, analysisResult, userContext) {
+async startValidationFlow(pendingExpense, analysisResult, userContext) {
     const { value, documentType, payer, receiver, baseDescription, categoryName } = analysisResult;
+    
+    // A descrição para o banco de dados continua sendo a junção completa
     const finalDescriptionForDB = `${baseDescription} (${userContext})`;
+
     const category = await Category.findOne({ where: { name: categoryName } });
     if (!category) return;
 
-    // Atualiza o registro pendente com os dados da IA.
     pendingExpense.value = value;
     pendingExpense.description = finalDescriptionForDB;
     pendingExpense.suggested_category_id = category.id;
     pendingExpense.status = 'awaiting_validation';
-    pendingExpense.expires_at = new Date(Date.now() + 5 * 60 * 1000); // Novo timer de 5 mins para edição.
+    pendingExpense.expires_at = new Date(Date.now() + 5 * 60 * 1000);
     await pendingExpense.save();
     
     const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
     
+    // <<< CORREÇÃO PRINCIPAL: Adicionando a "Descrição da IA" de volta >>>
     let analysisText = `\n\n*🔬 Análise do Documento:*\n` +
                        `-----------------------------------\n` +
                        `*Tipo:* ${documentType}\n` +
                        `*Valor:* ${formattedValue}\n` +
                        `*Pagador:* ${payer}\n` +
                        `*Recebedor:* ${receiver}\n` +
+                       `*Descrição (IA):* ${baseDescription}\n` + // <-- LINHA ADICIONADA
                        `-----------------------------------`;
 
-    const message = `🧾 *Novo Registro de Custo* 🧾\n\n` +
+    const message = `🧾 *Novo Custo Registrado* 🧾\n\n` +
                     `👤 *Enviado por:* ${pendingExpense.participant_phone}\n` +
-                    `💬 *Contexto:* _${userContext}_\n` +
+                    `💬 *Contexto do Usuário:* _${userContext}_\n` +
                     `${analysisText}\n\n` +
-                    `🤖 *Sugestão de Categoria:* *${category.name}*\n\n` +
-                    `Correto? Nenhuma ação necessária. Para alterar, clique em *Editar*.`;
+                    `✅ *Categoria Definida:* \n` +
+                    `*➡️ ${category.name} ⬅️*\n\n` +
+                    `Se a categoria estiver incorreta, clique em *Corrigir*. Caso contrário, nenhuma ação é necessária.`;
 
-    const buttons = [{ id: `edit_expense_${pendingExpense.id}`, label: '✏️ Editar Categoria' }];
+    const buttons = [{ id: `edit_expense_${pendingExpense.id}`, label: '✏️ Corrigir Categoria' }];
     await whatsappService.sendButtonList(pendingExpense.whatsapp_group_id, message, buttons);
   }
+
 
   /**
    * ETAPA 4: Usuário clica no botão "Editar".
@@ -169,6 +175,7 @@ class WebhookService {
         return;
       }
 
+      // Validação: Apenas quem registrou pode editar.
       if (pendingExpense.participant_phone !== clickerPhone) {
         const warningMessage = `🤚 *Atenção, ${clickerPhone}!* \n\nApenas a pessoa que registrou a despesa (${pendingExpense.participant_phone}) pode editá-la.`;
         await whatsappService.sendWhatsappMessage(groupId, warningMessage);
@@ -177,8 +184,16 @@ class WebhookService {
       
       const allCategories = await Category.findAll({ order: [['id', 'ASC']] });
       const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name}`).join('\n');
-      const message = `📋 *Olá, ${clickerPhone}!* \n\nPara qual categoria você quer alterar sua despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pendingExpense.value)}*?\n\nResponda apenas com o *número* da opção. 👇\n\n${categoryListText}`;
       
+      // Mensagem rica com o contexto da despesa que está sendo editada.
+      const message = `📋 *Olá, ${clickerPhone}!* \n\n` +
+                      `Você está editando a despesa:\n` +
+                      `*Valor:* ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pendingExpense.value)}\n` +
+                      `*Descrição:* ${pendingExpense.description}\n\n` +
+                      `Para qual categoria você quer alterar? Responda apenas com o *número* da opção. 👇\n\n` +
+                      `${categoryListText}`;
+      
+      // Prepara o sistema para receber a resposta numérica deste usuário.
       pendingExpense.status = 'awaiting_category_reply';
       await pendingExpense.save();
       

@@ -122,9 +122,41 @@ async function downloadZapiMedia(mediaUrl) {
   }
 }
 
+/**
+ * Envia uma mensagem com botões simples.
+ * @param {string} phone - O ID do grupo.
+ * @param {string} messageText - A mensagem principal.
+ * @param {Array<{id: string, label: string}>} buttons - Um array de objetos de botão.
+ */
+async function sendButtonList(phone, messageText, buttons) {
+  if (!checkCredentials() || !phone || !messageText || !buttons) {
+    logger.error('[WhatsAppService] Parâmetros inválidos para sendButtonList.');
+    return null;
+  }
+  const endpoint = `${BASE_URL}/send-button-list`;
+  const payload = {
+    phone,
+    message: messageText,
+    buttonList: {
+      buttons: buttons,
+    },
+  };
+  try {
+    logger.info(`[WhatsAppService] Enviando MENSAGEM COM BOTÕES para ${phone}.`);
+    const response = await axios.post(endpoint, payload, { headers });
+    logger.info(`[WhatsAppService] Mensagem com botões enviada com sucesso para ${phone}.`, response.data);
+    return response.data;
+  } catch (error) {
+    const errorData = error.response ? error.response.data : error.message;
+    logger.error(`[WhatsAppService] Erro ao enviar mensagem com botões para ${phone}:`, errorData);
+    return null;
+  }
+}
+
 module.exports = {
   sendWhatsappMessage,
   sendOptionList,
   listGroups,
   downloadZapiMedia,
+  sendButtonList
 };

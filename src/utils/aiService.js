@@ -1,3 +1,6 @@
+// src/utils/aiService.js
+'use strict';
+
 require('dotenv').config();
 const OpenAI = require('openai');
 const logger = require('./logger');
@@ -5,6 +8,7 @@ const { Category } = require('../models');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { pdf } = require('pdf-to-img');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -12,8 +16,14 @@ const openai = new OpenAI({
 
 class AIService {
 
+  /**
+   * Transcreve um buffer de áudio para texto usando o Whisper.
+   * @param {Buffer} audioBuffer - O buffer do arquivo de áudio.
+   * @returns {Promise<string|null>} O texto transcrito.
+   */
   async transcribeAudio(audioBuffer) {
     if (!audioBuffer) return null;
+    logger.info('[AIService] Iniciando transcrição de áudio com Whisper...');
     try {
       const tempFilePath = path.join(os.tmpdir(), `audio-${Date.now()}.ogg`);
       fs.writeFileSync(tempFilePath, audioBuffer);
@@ -31,40 +41,58 @@ class AIService {
   }
 
   /**
-   * Analisa um comprovante (imagem) e um texto de contexto para extrair dados detalhados.
-   * @param {Buffer} imageBuffer - O buffer da imagem.
-   * @param {string | null} userText - O texto de contexto do usuário.
+   * Converte um buffer de PDF na primeira página como um buffer de imagem JPEG.
+   * @private
+   * @param {Buffer} pdfBuffer - O buffer do arquivo PDF.
+   * @returns {Promise<Buffer|null>} O buffer da imagem JPEG.
+   */
+  async _convertPdfToImage(pdfBuffer) {
+    logger.info('[AIService] PDF detectado. Iniciando conversão para imagem...');
+    try {
+      const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
+      fs.writeFileSync(tempPdfPath, pdfBuffer);
+      const document = await pdf(tempPdfPath, { page: 1 }); // Converte apenas a primeira página
+      const imageBuffer = document[0];
+      fs.unlinkSync(tempPdfPath);
+      logger.info('[AIService] PDF convertido para imagem com sucesso.');
+      return imageBuffer;
+    } catch (error) {
+      logger.error('[AIService] Erro ao converter PDF para imagem:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
+   * @param {Buffer} mediaBuffer - O buffer da imagem ou PDF.
+   * @param {string} userText - O texto de contexto do usuário.
+   * @param {string} mimeType - O tipo do arquivo (ex: 'image/jpeg' ou 'application/pdf').
    * @returns {Promise<object|null>} Um objeto com a análise detalhada.
    */
-  async analyzeExpenseWithImage(imageBuffer, userText) {
-    logger.info('[AIService] Iniciando análise detalhada de despesa com imagem e contexto.');
-    const categories = await Category.findAll({ attributes: ['name'] });
-    const categoryList = categories.map(c => c.name).join('", "');
-    const base64Image = imageBuffer.toString('base64');
+  async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg') {
+    logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);
+    
+    let finalImageBuffer = mediaBuffer;
 
-    // <<< PROMPT APRIMORADO PARA EXTRAÇÃO DETALHADA >>>
+    if (mimeType.includes('pdf')) {
+      const convertedImage = await this._convertPdfToImage(mediaBuffer);
+      if (!convertedImage) {
+        logger.error('[AIService] Falha na conversão de PDF, cancelando análise.');
+        return null;
+      }
+      finalImageBuffer = convertedImage;
+    }
+    
+    const categories = await Category.findAll({ attributes: ['name'] });
+    const categoryList = `"${categories.map(c => c.name).join('", "')}"`;
+    const base64Image = finalImageBuffer.toString('base64');
+    
     const prompt = `
       Sua tarefa é analisar a imagem de um documento financeiro e um texto complementar fornecido pelo usuário.
-      Extraia as seguintes informações e retorne APENAS um objeto JSON válido com as seguintes chaves:
-
-      1.  "value": (Número) O valor monetário total da transação. Ex: 150.75. Se não encontrar, retorne 0.
-      2.  "documentType": (String) O tipo de documento. Ex: "Comprovante PIX", "Nota Fiscal", "Recibo".
-      3.  "payer": (String) O nome da pessoa ou empresa que pagou. Se não encontrar, retorne "Não identificado".
-      4.  "receiver": (String) O nome da pessoa ou empresa que recebeu o pagamento. Se não encontrar, retorne "Não identificado".
-      5.  "baseDescription": (String) Uma descrição curta e objetiva do que a IA extraiu da imagem. Ex: "Pagamento para Loja de Ferramentas ABC".
-      6.  "categoryName": (String) A categoria MAIS APROPRIADA para esta despesa, baseando-se TANTO na imagem quanto no texto do usuário. Escolha UMA das seguintes opções: ["${categoryList}"].
-
-      Texto complementar do usuário (use como contexto principal para a categoria): "${userText || 'Nenhum'}"
-
-      Exemplo de resposta JSON:
-      {
-        "value": 150.75,
-        "documentType": "Comprovante PIX",
-        "payer": "João da Silva",
-        "receiver": "Marcenaria Mãos de Ouro",
-        "baseDescription": "Transferência via PIX",
-        "categoryName": "Marcenaria"
-      }
+      Extraia as informações e retorne APENAS um objeto JSON válido com as chaves:
+      "value" (Número), "documentType" (String), "payer" (String), "receiver" (String), "baseDescription" (String), "categoryName" (String).
+      A "categoryName" DEVE ser uma das seguintes opções: [${categoryList}].
+      Contexto do usuário (use para definir a categoria): "${userText || 'Nenhum'}"
     `;
 
     try {
@@ -82,21 +110,15 @@ class AIService {
 
       const result = JSON.parse(response.choices[0].message.content);
       logger.info('[AIService] Análise detalhada concluída.', result);
-      return this._validateAnalysisResult(result, categoryList);
+      return this._validateAnalysisResult(result, categories.map(c => c.name));
     } catch (error) {
       logger.error('[AIService] Erro na análise detalhada:', error);
       return null;
     }
   }
 
-  // Função para análise apenas de texto (não precisa de alteração)
-  async analyzeExpenseFromText(expenseText) {
-    // ... (esta função pode permanecer a mesma, pois já retorna um JSON simples)
-    return null; // Por ora, vamos focar no fluxo principal com imagem
-  }
-
-  _validateAnalysisResult(result, categoryList) {
-    if (!result.categoryName || !categoryList.includes(result.categoryName)) {
+  _validateAnalysisResult(result, categoryArray) {
+    if (!result.categoryName || !categoryArray.includes(result.categoryName)) {
       logger.warn(`[AIService] IA sugeriu categoria inválida/vazia ('${result.categoryName}'). Usando 'Outros'.`);
       result.categoryName = 'Outros';
     }

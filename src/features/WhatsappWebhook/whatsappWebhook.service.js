@@ -1,61 +1,67 @@
-    const logger = require('../../utils/logger');
-    const { MonitoredGroup } = require('../../models');
+const logger = require('../../utils/logger');
+const { MonitoredGroup } = require('../../models');
+const aiService = require('../../utils/aiService');
+const whatsappService = require('../../utils/whatsappService');
 
-    class WebhookService {
-    async processIncomingMessage(payload) {
-        // logger.info('-------------------------------------------');
-        // logger.info('[WebhookService] Novo webhook recebido!', payload);
+class WebhookService {
+  async processIncomingMessage(payload) {
+    if (!payload.isGroup) return;
 
-        // 1. Verificamos se é uma mensagem de um grupo
-        if (!payload.isGroup) {
-        //logger.warn('[WebhookService] Mensagem ignorada: Não é de um grupo.');
-        return;
-        }
+    const groupId = payload.phone;
+    const isMonitored = await MonitoredGroup.findOne({
+      where: { group_id: groupId, is_active: true },
+    });
+    
+    if (!isMonitored) return;
 
-        const groupId = payload.phone;
+    logger.info(`[WebhookService] >>> Mensagem recebida no grupo monitorado: ${isMonitored.name}`);
 
-        // 2. Verificamos se o grupo está na nossa lista de monitoramento no BANCO DE DADOS
-        const isMonitored = await MonitoredGroup.findOne({
-        where: { group_id: groupId, is_active: true },
-        });
-        
-        if (!isMonitored) {
-        logger.warn(`[WebhookService] Mensagem ignorada: Grupo ${groupId} não está sendo monitorado.`);
-        return;
-        }
+    const messageType = payload.type;
+    const messageText = payload.text ? payload.text.message : null;
+    let analysisResult = null;
 
-        // SE CHEGOU ATÉ AQUI, A MENSAGEM É DE UM GRUPO QUE QUEREMOS PROCESSAR!
-        logger.info(`[WebhookService] >>> Mensagem recebida no grupo monitorado: ${isMonitored.name} (${groupId})`);
-
-        const participant = payload.participantPhone;
-        const messageType = payload.type;
-        const messageText = payload.text ? payload.text.message : null;
-        const messageId = payload.messageId;
-        
-        if (payload.buttonId) {
-            logger.info(`[WebhookService] Detectado clique no botão com ID: ${payload.buttonId}`);
-            // TODO: Lógica para cliques em botões
-            return;
-        }
-
-        switch (messageType) {
+    try {
+      switch (messageType) {
         case 'image':
         case 'document':
-        case 'audio':
-            logger.info(`[WebhookService] Mensagem do tipo "${messageType}" de ${participant}. URL: ${payload.mediaUrl}`);
-            // TODO: Iniciar o fluxo de análise com IA.
-            break;
-        
-        case 'text':
-            logger.info(`[WebhookService] Mensagem de texto "${messageText}" de ${participant}.`);
-            // TODO: Verificar se é um complemento de mídia.
-            break;
-        
-        default:
-            logger.warn(`[WebhookService] Tipo de mensagem "${messageType}" não processado.`);
-            break;
-        }
-    }
-    }
+          logger.info(`[WebhookService] Mídia do tipo "${messageType}" recebida. Iniciando análise...`);
+          const imageBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
+          if (imageBuffer) {
+            // Usa a função de análise com imagem
+            analysisResult = await aiService.analyzeExpenseWithImage(imageBuffer, messageText);
+          }
+          break;
 
-    module.exports = new WebhookService();
+        case 'audio':
+          logger.info('[WebhookService] Mensagem de áudio recebida. Transcrevendo...');
+          const audioBuffer = await whatsappService.downloadZapiMedia(payload.mediaUrl);
+          if (audioBuffer) {
+            const transcribedText = await aiService.transcribeAudio(audioBuffer);
+            if (transcribedText) {
+              // Usa a função de análise a partir do texto transcrito
+              analysisResult = await aiService.analyzeExpenseFromText(transcribedText);
+            }
+          }
+          break;
+        
+        // Podemos adicionar mais casos aqui no futuro (texto, etc.)
+      }
+
+      // Se a análise (de imagem ou áudio) foi bem-sucedida
+      if (analysisResult) {
+        console.log('✅✅✅ ANÁLISE DA IA COMPLETA ✅✅✅');
+        console.log(analysisResult);
+        console.log('✅✅✅ PRÓXIMO PASSO: INICIAR FLUXO DE VALIDAÇÃO ✅✅✅');
+
+        // TODO: Salvar na tabela `pending_expenses` e enviar mensagem de validação.
+      } else {
+        logger.warn(`[WebhookService] Não foi possível obter um resultado da análise para a mensagem tipo "${messageType}".`);
+      }
+
+    } catch (error) {
+      logger.error('[WebhookService] Ocorreu um erro no processamento do webhook:', error);
+    }
+  }
+}
+
+module.exports = new WebhookService();

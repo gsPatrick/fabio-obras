@@ -5,7 +5,7 @@ class PendingExpense extends Model {
     super.init({
       value: {
         type: DataTypes.DECIMAL(10, 2),
-        allowNull: false,
+        allowNull: true, // Será nulo até a análise final
       },
       description: {
         type: DataTypes.TEXT,
@@ -28,12 +28,16 @@ class PendingExpense extends Model {
         type: DataTypes.DATE,
         allowNull: false,
       },
-      // <<< CAMPO NOVO ADICIONADO >>>
+      // <<< CAMPOS NOVOS E MODIFICADOS >>>
+      attachment_url: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        comment: 'URL da mídia que está aguardando contexto.',
+      },
       status: {
-        type: DataTypes.ENUM('awaiting_validation', 'awaiting_category_reply'),
-        defaultValue: 'awaiting_validation',
+        type: DataTypes.ENUM('awaiting_context', 'awaiting_validation', 'awaiting_category_reply'),
+        defaultValue: 'awaiting_context', // O novo estado inicial
         allowNull: false,
-        comment: 'Controla o estado do fluxo de edição.',
       },
     }, {
       sequelize,

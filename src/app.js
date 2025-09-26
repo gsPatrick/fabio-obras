@@ -37,7 +37,7 @@ class App {
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
 
       // Sincroniza todos os modelos de forma segura
-      await db.sequelize.sync({ alter: true });
+      await db.sequelize.sync({ force: true });
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       
       // Chama os "seeders" após a sincronização

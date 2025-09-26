@@ -32,7 +32,6 @@ class App {
   }
 
   middlewares() {
-    // Libera CORS de forma mais ampla para desenvolvimento e webhooks
     this.server.use(cors({
       origin: true,
       credentials: true,
@@ -108,7 +107,7 @@ class App {
         { name: 'Material hidráulica', type: 'Material' },
         { name: 'Marcenaria', type: 'Serviços/Equipamentos' },
         { name: 'Eletros', type: 'Serviços/Equipamentos' },
-        { name: 'Outros', type: 'Outros' }, // Garante que a categoria "Outros" exista, importante para o fallback da IA
+        { name: 'Outros', type: 'Outros' },
     ];
     console.log('[SEEDER] Verificando e criando categorias essenciais...');
     for (const categoryData of categoriesToSeed) {
@@ -121,11 +120,9 @@ class App {
   }
 
   startPendingExpenseWorker() {
-    // MUDANÇA: Importar os modelos da forma correta para o worker
     const { PendingExpense, Expense, Category } = db;
     const whatsappService = require('./utils/whatsappService');
 
-    // MUDANÇA: Constantes para o tempo de expiração do worker, consistentes com o serviço
     const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1; 
     const CONTEXT_WAIT_TIME_MINUTES = 2; 
 
@@ -139,7 +136,6 @@ class App {
             status: 'awaiting_validation', 
             expires_at: { [Op.lte]: now } 
           },
-          // MUDANÇA: Incluir 'expense' e 'suggestedCategory' para a mensagem
           include: [{ model: Category, as: 'suggestedCategory' }, { model: Expense, as: 'expense' }]
         });
 
@@ -147,10 +143,10 @@ class App {
           console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
           
           const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
-          // MUDANÇA: Mensagem mais concisa e consistente
-          const successMessage = `✅ *Custo Salvo Automaticamente*\n\nA despesa de *${formattedValue}* foi confirmada na categoria *${pending.suggestedCategory.name}*.`;
+          // MUDANÇA: Mensagem mais explícita
+          const successMessage = `✅ *Custo Salvo Automaticamente*\n\nA despesa *já salva* de *${formattedValue}* foi confirmada na categoria *${pending.suggestedCategory.name}*.`;
           await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, successMessage);
-          await pending.destroy(); // A despesa já está salva, apenas limpamos a pendência
+          await pending.destroy();
         }
 
         // 2. TIMEOUT DE EDIÇÃO (usuário não respondeu à solicitação de nova categoria)
@@ -159,20 +155,17 @@ class App {
             status: 'awaiting_category_reply', 
             expires_at: { [Op.lte]: now } 
           },
-          // MUDANÇA: Incluir 'expense' e 'suggestedCategory' para a mensagem
           include: [{ model: Category, as: 'suggestedCategory' }, { model: Expense, as: 'expense' }]
         });
 
         for (const pending of expiredReplies) {
           console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
-          // A despesa já foi salva com a categoria sugerida, então não precisamos atualizá-la novamente
-          // se o timeout ocorrer. A categoria que prevalece é a original da IA.
 
           const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
-          // MUDANÇA: Mensagem mais concisa e consistente
-          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa de *${formattedValue}* foi mantida com a categoria original: *${pending.suggestedCategory.name}*.`;
+          // MUDANÇA: Mensagem mais explícita
+          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa *já salva* de *${formattedValue}* foi mantida com a categoria original: *${pending.suggestedCategory.name}*.`;
           await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
-          await pending.destroy(); // Limpamos a pendência
+          await pending.destroy();
         }
 
         // 3. LIMPEZA DE CONTEXTOS (após N minutos esperando descrição)
@@ -185,7 +178,6 @@ class App {
       }
     };
     
-    // O worker continua rodando a cada 30 segundos para verificar expirações
     setInterval(runWorker, 30000); 
   }
 }

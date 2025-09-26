@@ -20,7 +20,8 @@ class ExcelService {
     worksheet.columns = [
       { header: 'ID', key: 'id', width: 10 },
       { header: 'Valor', key: 'value', width: 15 },
-      { header: 'Descrição', key: 'description', width: 40 },
+      // MUDANÇA: Aumentar largura e habilitar quebra de texto para a descrição
+      { header: 'Descrição', key: 'description', width: 60, style: { alignment: { wrapText: true } } },
       { header: 'Data', key: 'expense_date', width: 20 },
       { header: 'Categoria', key: 'category_name', width: 25 },
     ];
@@ -29,9 +30,9 @@ class ExcelService {
     expenses.forEach(expense => {
       worksheet.addRow({
         id: expense.id,
-        value: parseFloat(expense.value), // Garante que seja um número para formatação
+        value: parseFloat(expense.value),
         description: expense.description,
-        expense_date: new Date(expense.expense_date).toLocaleString('pt-BR'), // Formata a data
+        expense_date: new Date(expense.expense_date).toLocaleString('pt-BR'),
         category_name: expense.category ? expense.category.name : 'N/A',
       });
     });
@@ -45,7 +46,6 @@ class ExcelService {
     // Opcional: formatação da coluna de valor
     worksheet.getColumn('value').numFmt = '"R$"#,##0.00';
 
-    // Salva o workbook em um arquivo temporário
     const tempFilePath = path.join(os.tmpdir(), `relatorio_despesas_${Date.now()}.xlsx`);
     await workbook.xlsx.writeFile(tempFilePath);
     

@@ -7,8 +7,9 @@ const { Op } = require('sequelize');
 const aiService = require('../../utils/aiService');
 const whatsappService = require('../../utils/whatsappService');
 const dashboardService = require('../../features/Dashboard/dashboard.service');
-const excelService = require('../../utils/excelService'); // MUDANÇA: Importar excelService
-const fs = require('fs'); // MUDANÇA: Importar fs para deletar arquivo temporário
+const excelService = require('../../utils/excelService');
+const fs = require('fs');
+const path = require('path'); // Para extrair a extensão do arquivo
 const { startOfMonth, format } = require('date-fns');
 const ptBR = require('date-fns/locale/pt-BR');
 
@@ -68,18 +69,16 @@ class WebhookService {
       }
     });
 
-    // Cria um novo registro de espera.
     await PendingExpense.create({
       whatsapp_message_id: payload.messageId,
       whatsapp_group_id: groupId,
       participant_phone: participantPhone,
       attachment_url: mediaUrl,
-      attachment_mimetype: mimeType, // Salva o tipo do arquivo
+      attachment_mimetype: mimeType,
       status: 'awaiting_context',
       expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
     });
 
-    // Mensagem mais concisa
     const confirmationMessage = `📄 Qual a descrição para este documento?`;
     await whatsappService.sendWhatsappMessage(groupId, confirmationMessage);
 
@@ -95,14 +94,12 @@ class WebhookService {
     const participantPhone = payload.participantPhone;
     const textMessage = payload.text ? payload.text.message : null;
 
-    // MUDANÇA: Handle #Relatorio command
     if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
         logger.info(`[Webhook] Comando #Relatorio recebido de ${participantPhone}.`);
         await this.sendSpendingReport(groupId, participantPhone);
         return;
     }
 
-    // MUDANÇA: Handle #ExportarDespesas command
     if (textMessage && textMessage.toLowerCase().trim() === '#exportardespesas') {
         logger.info(`[Webhook] Comando #ExportarDespesas recebido de ${participantPhone}.`);
         await this.sendExpensesExcelReport(groupId, participantPhone);
@@ -120,7 +117,18 @@ class WebhookService {
     });
 
     if (pendingMedia) {
-      await whatsappService.sendWhatsappMessage(payload.phone, `🤖 Analisando...`);
+      // MUDANÇA: Verifica o mimetype antes de tentar análise de IA
+      const allowedMimeTypesForAI = ['image/jpeg', 'image/png', 'application/pdf'];
+      if (!allowedMimeTypesForAI.includes(pendingMedia.attachment_mimetype)) {
+        logger.warn(`[Webhook] Mídia de tipo '${pendingMedia.attachment_mimetype}' não suportada para análise de IA. Ignorando.`);
+        const fileExtension = path.extname(pendingMedia.attachment_url).substring(1);
+        const errorMessage = `⚠️ O tipo de arquivo que você enviou (*.${fileExtension}*) não é suportado para análise de despesas com a IA. Por favor, envie uma imagem (JPEG/PNG) ou um PDF.`;
+        await whatsappService.sendWhatsappMessage(groupId, errorMessage);
+        await pendingMedia.destroy();
+        return; // Interrompe o processamento
+      }
+
+      await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando...`);
 
       logger.info(`[Webhook] Contexto de ${participantPhone} recebido. Iniciando análise...`);
       let userContext = '';
@@ -141,19 +149,18 @@ class WebhookService {
         } else {
           logger.error(`[Webhook] A análise da IA falhou para a mídia de ${participantPhone}.`);
           const errorMessage = `❌ Desculpe, não consegui analisar o documento. Por favor, tente enviar o documento e a descrição novamente.`;
-          await whatsappService.sendWhatsappMessage(groupId, errorMessage); // Usar groupId
+          await whatsappService.sendWhatsappMessage(groupId, errorMessage);
           await pendingMedia.destroy();
         }
 
       } else {
           logger.error(`[Webhook] Falha ao baixar mídia ou transcrever áudio para ${participantPhone}.`);
           const errorMessage = `❌ Ocorreu um erro ao processar o arquivo ou o áudio. Por favor, tente novamente.`;
-          await whatsappService.sendWhatsappMessage(groupId, errorMessage); // Usar groupId
+          await whatsappService.sendWhatsappMessage(groupId, errorMessage);
           await pendingMedia.destroy();
       }
 
     } else {
-      // Se não era um contexto de mídia, pode ser uma resposta para edição.
       if (textMessage && /^\d+$/.test(textMessage)) {
         await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone);
       }
@@ -191,7 +198,7 @@ class WebhookService {
     pendingExpense.description = finalDescriptionForDB;
     pendingExpense.suggested_category_id = category.id;
     pendingExpense.expense_id = newExpense.id;
-    pendingExpense.status = 'awaiting_validation';
+    pendingExpense.status = 'awaiting_validation'; // Significa "salvo, aguardando possível edição de categoria"
     pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
     await pendingExpense.save();
     
@@ -200,12 +207,13 @@ class WebhookService {
     const totalExpenses = await Expense.sum('value');
     const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
 
-    const message = `💸 *Custo:* ${formattedValue}
+    // MUDANÇA: Mensagem mais explícita sobre o salvamento e o prazo para edição
+    const message = `💸 *Custo Registrado:* ${formattedValue}
 *Cat. Sugerida:* ${category.name}
 *Desc.:* ${baseDescription}
 *Total de Despesas:* ${formattedTotalExpenses}
 
-Despesa salva! Para alterar a categoria, clique *Corrigir*. Caso contrário, esta categoria será mantida em ${EXPENSE_EDIT_WAIT_TIME_MINUTES} min.`;
+Despesa *já* salva no sistema! Para alterar a categoria, clique *Corrigir*. Caso contrário, esta categoria será mantida em ${EXPENSE_EDIT_WAIT_TIME_MINUTES} min.`;
 
     const buttons = [{ id: `edit_expense_${pendingExpense.id}`, label: '✏️ Corrigir Categoria' }];
     await whatsappService.sendButtonList(pendingExpense.whatsapp_group_id, message, buttons);
@@ -243,7 +251,7 @@ Despesa salva! Para alterar a categoria, clique *Corrigir*. Caso contrário, est
       const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name}`).join('\n');
       
       const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pendingExpense.expense.value);
-      const message = `📋 *Editar Categoria* \n\nVocê está editando a despesa de *${formattedValue}* (${pendingExpense.expense.description}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
+      const message = `📋 *Editar Categoria* \n\nVocê está editando a despesa *já salva* de *${formattedValue}* (${pendingExpense.expense.description}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
       
       pendingExpense.status = 'awaiting_category_reply';
       pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
@@ -291,16 +299,17 @@ Despesa salva! Para alterar a categoria, clique *Corrigir*. Caso contrário, est
     const totalExpenses = await Expense.sum('value');
     const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
 
-    const successMessage = `✅ *Custo Atualizado!* \n\nNova categoria: *${selectedCategory.name}*\n*Total de Despesas:* ${formattedTotalExpenses}`;
+    // MUDANÇA: Mensagem de confirmação de atualização mais explícita
+    const successMessage = `✅ *Custo Atualizado!* 
+Despesa #${pendingExpense.expense.id}
+Nova categoria: *${selectedCategory.name}*
+*Total de Despesas:* ${formattedTotalExpenses}`;
     await whatsappService.sendWhatsappMessage(groupId, successMessage);
     
     logger.info(`[Webhook] Despesa #${pendingExpense.expense_id} atualizada para categoria ${selectedCategory.name} por ${participantPhone}.`);
     return true;
   }
 
-  /**
-   * MUDANÇA: Função para enviar relatório de gastos (sem receitas).
-   */
   async sendSpendingReport(groupId, recipientPhone) {
     try {
         const now = new Date();
@@ -345,9 +354,6 @@ _Este relatório é referente aos dados registrados até o momento._`;
     }
   }
 
-  /**
-   * MUDANÇA: NOVA FUNÇÃO PARA ENVIAR RELATÓRIO DE DESPESAS EM EXCEL
-   */
   async sendExpensesExcelReport(groupId, recipientPhone) {
     let filePath = null;
     try {
@@ -373,7 +379,7 @@ _Este relatório é referente aos dados registrados até o momento._`;
       await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao gerar ou enviar seu relatório Excel. Por favor, tente novamente.`);
     } finally {
       if (filePath && fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath); // Garante que o arquivo temporário seja deletado
+        fs.unlinkSync(filePath);
         logger.info(`[Webhook] Arquivo temporário ${filePath} deletado.`);
       }
     }

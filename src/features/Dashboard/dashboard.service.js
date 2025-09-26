@@ -11,15 +11,12 @@ class DashboardService {
   async getKPIs(filters) {
     const { whereClause: expenseWhere } = this._buildWhereClause(filters);
 
-    // Crie uma cláusula 'where' específica para receitas, traduzindo o campo de data.
     const revenueWhere = {};
     if (expenseWhere.expense_date) {
         revenueWhere.revenue_date = expenseWhere.expense_date;
     }
-    // Se houver outros filtros que também se aplicam a receitas, copie-os aqui.
 
     const totalExpenses = await Expense.sum('value', { where: expenseWhere });
-    // Use a cláusula correta para a consulta de receitas (mantido para compatibilidade, mas não usado no relatório do WhatsApp)
     const totalRevenues = await Revenue.sum('value', { where: revenueWhere });
 
     const expensesByCategory = await Expense.findAll({
@@ -54,7 +51,6 @@ class DashboardService {
   async getChartData(filters) {
     const { whereClause, startDate, endDate } = this._buildWhereClause(filters);
 
-    // DADOS PARA GRÁFICO DE PIZZA (Gastos por Categoria)
     const expensesByCategory = await Expense.findAll({
       where: whereClause,
       attributes: [
@@ -66,7 +62,6 @@ class DashboardService {
       raw: true,
     });
 
-    // DADOS PARA GRÁFICO DE LINHA (Evolução de Gastos no Tempo)
     const dailyExpenses = await Expense.findAll({
       where: whereClause,
       attributes: [
@@ -78,7 +73,6 @@ class DashboardService {
       raw: true
     });
 
-    // Preenche os dias sem gastos para um gráfico contínuo
     const evolution = this._fillMissingDays(dailyExpenses, startDate, endDate);
 
     return {
@@ -112,7 +106,6 @@ class DashboardService {
     };
   }
 
-  // MUDANÇA: NOVA FUNÇÃO PARA PEGAR TODAS AS DESPESAS SEM PAGINAÇÃO
   async getAllExpenses() {
     return Expense.findAll({
       include: [{ model: Category, as: 'category', attributes: ['name'] }],
@@ -140,7 +133,6 @@ class DashboardService {
   async createRevenue(data) {
     return Revenue.create(data);
   }
-  // (Funções para editar/deletar receitas podem ser adicionadas aqui)
 
   // ===================================================================
   // LÓGICA INTERNA DE FILTROS (MUITO PODEROSA)
@@ -149,7 +141,6 @@ class DashboardService {
     const whereClause = {};
     let startDate, endDate;
 
-    // Filtro por Período de Tempo
     if (filters.period) {
       const now = new Date();
       switch (filters.period) {
@@ -160,7 +151,7 @@ class DashboardService {
         case 'yearly': startDate = startOfYear(now); endDate = endOfYear(now); break;
         case 'last7days': startDate = startOfDay(subDays(now, 6)); endDate = endOfDay(now); break;
         case 'last30days': startDate = startOfDay(subDays(now, 29)); endDate = endOfDay(now); break;
-        default: startDate = startOfMonth(now); endDate = endOfMonth(now); // Padrão para mensal se não especificado
+        default: startDate = startOfMonth(now); endDate = endOfMonth(now);
       }
     } else if (filters.startDate && filters.endDate) {
       startDate = parseISO(filters.startDate);
@@ -171,25 +162,21 @@ class DashboardService {
       whereClause.expense_date = { [Op.between]: [startDate, endDate] };
     }
 
-    // Filtro por Categoria
     if (filters.categoryId) {
       whereClause.category_id = filters.categoryId;
     }
 
-    // Filtro por Descrição (Busca textual)
     if (filters.description) {
-      whereClause.description = { [Op.iLike]: `%${filters.description}%` }; // Case-insensitive
+      whereClause.description = { [Op.iLike]: `%${filters.description}%` };
     }
 
-    // Filtro por Faixa de Valor
     if (filters.minValue) {
-      whereClause.value = { ...whereClause.value, [Op.gte]: filters.minValue }; // gte = >=
+      whereClause.value = { ...whereClause.value, [Op.gte]: filters.minValue };
     }
     if (filters.maxValue) {
-      whereClause.value = { ...whereClause.value, [Op.lte]: filters.maxValue }; // lte = <=
+      whereClause.value = { ...whereClause.value, [Op.lte]: filters.maxValue };
     }
 
-    // Paginação
     const page = parseInt(filters.page, 10) || 1;
     const limit = parseInt(filters.limit, 10) || 20;
     const offset = (page - 1) * limit;

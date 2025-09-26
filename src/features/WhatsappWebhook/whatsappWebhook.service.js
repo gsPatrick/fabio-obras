@@ -11,8 +11,8 @@ const excelService = require('../../utils/excelService');
 const fs = require('fs');
 const path = require('path');
 const { startOfMonth, format } = require('date-fns');
-// MUDANÇA CORRIGIDA: Importa diretamente o objeto de localidade ptBR
-const ptBR = require('date-fns/locale/pt-BR');
+// NOVA TENTATIVA DE CORREÇÃO: Força a importação da propriedade .default
+const ptBR = require('date-fns/locale/pt-BR').default;
 
 
 // Tempo em minutos que o bot esperará pelo contexto (áudio/texto) após receber uma imagem.

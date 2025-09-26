@@ -8,36 +8,46 @@ class DashboardService {
   // 1. ENDPOINT DE KPIs (NÚMEROS PRINCIPAIS)
   // ===================================================================
   async getKPIs(filters) {
-    const { whereClause } = this._buildWhereClause(filters);
+    const { whereClause: expenseWhere } = this._buildWhereClause(filters);
 
-    const totalExpenses = await Expense.sum('value', { where: whereClause });
-    const totalRevenues = await Revenue.sum('value', { where: whereClause }); // Assumindo que o filtro de data se aplique a receitas também
+    // <<< INÍCIO DA CORREÇÃO >>>
+    // Crie uma cláusula 'where' específica para receitas, traduzindo o campo de data.
+    const revenueWhere = {};
+    if (expenseWhere.expense_date) {
+        revenueWhere.revenue_date = expenseWhere.expense_date;
+    }
+    // Se houver outros filtros que também se aplicam a receitas, copie-os aqui.
+    // <<< FIM DA CORREÇÃO >>>
+
+    const totalExpenses = await Expense.sum('value', { where: expenseWhere });
+    // Use a cláusula correta para a consulta de receitas
+    const totalRevenues = await Revenue.sum('value', { where: revenueWhere });
 
     const expensesByCategory = await Expense.findAll({
-      where: whereClause,
-      attributes: [
-        [sequelize.fn('SUM', sequelize.col('value')), 'total'],
-      ],
-      include: [{ model: Category, as: 'category', attributes: ['name'] }],
-      group: ['category.id', 'category.name'],
-      order: [[sequelize.fn('SUM', sequelize.col('value')), 'DESC']],
-      limit: 1,
-      raw: true
+        where: expenseWhere,
+        attributes: [
+            [sequelize.fn('SUM', sequelize.col('value')), 'total'],
+        ],
+        include: [{ model: Category, as: 'category', attributes: ['name'] }],
+        group: ['category.id', 'category.name'],
+        order: [[sequelize.fn('SUM', sequelize.col('value')), 'DESC']],
+        limit: 1,
+        raw: true
     });
 
     const highestCategory = expensesByCategory.length > 0 ? {
-      name: expensesByCategory[0]['category.name'],
-      total: parseFloat(expensesByCategory[0].total)
+        name: expensesByCategory[0]['category.name'],
+        total: parseFloat(expensesByCategory[0].total)
     } : { name: 'N/A', total: 0 };
     
     return {
-      totalExpenses: totalExpenses || 0,
-      totalRevenues: totalRevenues || 0,
-      balance: (totalRevenues || 0) - (totalExpenses || 0),
-      expenseCount: await Expense.count({ where: whereClause }),
-      highestCategory,
+        totalExpenses: totalExpenses || 0,
+        totalRevenues: totalRevenues || 0,
+        balance: (totalRevenues || 0) - (totalExpenses || 0),
+        expenseCount: await Expense.count({ where: expenseWhere }),
+        highestCategory,
     };
-  }
+}
 
   // ===================================================================
   // 2. ENDPOINT PARA GRÁFICOS

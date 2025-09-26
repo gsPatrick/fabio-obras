@@ -142,11 +142,9 @@ class App {
         for (const pending of expiredValidations) {
           console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
           
-          const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
-          // MUDANÇA: Mensagem mais explícita
-          const successMessage = `✅ *Custo Salvo Automaticamente*\n\nA despesa *já salva* de *${formattedValue}* foi confirmada na categoria *${pending.suggestedCategory.name}*.`;
-          await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, successMessage);
-          await pending.destroy();
+          // MUDANÇA: A mensagem de confirmação final foi removida.
+          // A despesa já está salva, apenas limpamos a pendência.
+          await pending.destroy(); 
         }
 
         // 2. TIMEOUT DE EDIÇÃO (usuário não respondeu à solicitação de nova categoria)
@@ -162,7 +160,6 @@ class App {
           console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
 
           const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
-          // MUDANÇA: Mensagem mais explícita
           const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa *já salva* de *${formattedValue}* foi mantida com a categoria original: *${pending.suggestedCategory.name}*.`;
           await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
           await pending.destroy();

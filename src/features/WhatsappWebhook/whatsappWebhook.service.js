@@ -11,7 +11,10 @@ const excelService = require('../../utils/excelService');
 const fs = require('fs');
 const path = require('path');
 const { startOfMonth, format } = require('date-fns');
-const ptBR = require('date-fns/locale/pt-BR');
+// MUDANÇA: Importar ptBR de forma mais robusta para lidar com exports CommonJS/ESM
+const ptBRModule = require('date-fns/locale/pt-BR');
+const ptBR = ptBRModule.default || ptBRModule;
+
 
 // Tempo em minutos que o bot esperará pelo contexto (áudio/texto) após receber uma imagem.
 const CONTEXT_WAIT_TIME_MINUTES = 2;
@@ -20,21 +23,14 @@ const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1;
 
 class WebhookService {
   async processIncomingMessage(payload) {
-    // MUDANÇA: Lógica para IGNORAR APENAS o documento Excel enviado pelo PRÓPRIO BOT.
-    // Outras mensagens 'fromMe' (como textos de confirmação) podem passar para processamento futuro,
-    // mas o documento Excel não deve ser re-processado como uma despesa.
+    // Lógica para IGNORAR APENAS o documento Excel enviado pelo PRÓPRIO BOT.
     if (payload.fromMe && payload.document && 
         payload.document.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
       logger.debug('[Webhook] Ignorando documento Excel enviado pelo próprio bot.');
       return;
     }
-    // IMPORTANTE: Se você quisesse ignorar TODAS as mensagens do próprio bot (textos, imagens, etc.),
-    // a linha `if (payload.fromMe) return;` seria adequada. Mas como o requisito é específico para o Excel,
-    // mantemos as outras mensagens `fromMe` para serem processadas normalmente abaixo, se houver lógica para elas.
-
 
     // Roteador de Ações: primeiro verifica cliques em botões.
-    // Esta é uma interação 'fromMe' (bot envia botão, usuário clica), então não deve ser ignorada pelo filtro acima.
     if (payload.buttonsResponseMessage) {
       return this.handleEditButton(payload);
     }
@@ -375,8 +371,6 @@ _Este relatório é referente aos dados registrados até o momento._`;
   async sendExpensesExcelReport(groupId, recipientPhone) {
     let filePath = null;
     try {
-      await whatsappService.sendWhatsappMessage(groupId, `Preparando seu relatório Excel de despesas... isso pode levar um momento! ⏳`);
-
       const expenses = await dashboardService.getAllExpenses();
 
       if (!expenses || expenses.length === 0) {
@@ -390,7 +384,6 @@ _Este relatório é referente aos dados registrados até o momento._`;
       await whatsappService.sendDocument(groupId, filePath, caption);
       
       logger.info(`[Webhook] Relatório Excel de despesas enviado para ${recipientPhone}.`);
-      await whatsappService.sendWhatsappMessage(groupId, `✅ Relatório Excel enviado com sucesso!`);
 
     } catch (error) {
       logger.error('[Webhook] Erro ao gerar e enviar relatório Excel de despesas:', error);

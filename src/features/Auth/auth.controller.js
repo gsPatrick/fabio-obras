@@ -20,15 +20,11 @@ class AuthController {
       });
 
       // Envia o token em um cookie httpOnly, que é mais seguro
-      res.cookie('token', token, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: 24 * 60 * 60 * 1000, // 1 dia
-        path: '/',
-      });
+  res.status(200).json({ 
+  message: 'Login bem-sucedido.', 
+  token: token 
+});
 
-      res.status(200).json({ message: 'Login bem-sucedido.' });
     } catch (error) {
       res.status(500).json({ error: 'Erro interno do servidor.' });
     }

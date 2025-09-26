@@ -22,28 +22,13 @@ class App {
     this.startPendingExpenseWorker();
   }
 
- middlewares() {
-    // Lista de origens permitidas
-    const allowedOrigins = [
-      'http://localhost:3004', // A origem do seu frontend de desenvolvimento
-      // 'https://seu-frontend-em-producao.com' // Adicione a URL do seu frontend quando for para produção
-    ];
-
-    // Libera CORS de forma mais segura e permite o envio de cookies
+  middlewares() {
+    // Libera CORS de forma mais ampla para desenvolvimento e webhooks
     this.server.use(cors({
-      origin: function (origin, callback) {
-        // Permite requisições sem 'origin' (como apps mobile ou Postman)
-        if (!origin) return callback(null, true);
-
-        if (allowedOrigins.indexOf(origin) === -1) {
-          const msg = 'A política de CORS para este site não permite acesso da origem especificada.';
-          return callback(new Error(msg), false);
-        }
-        return callback(null, true);
-      },
+      origin: true,       // <<< MUDANÇA PRINCIPAL: Reflete a origem da requisição
+      credentials: true,  // Permite o envio de cookies/tokens de autorização
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization'],
-      credentials: true // <<< MUITO IMPORTANTE: alterado para true
     }));
 
     this.server.use(express.json());

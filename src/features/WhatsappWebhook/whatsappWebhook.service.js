@@ -9,7 +9,7 @@ const whatsappService = require('../../utils/whatsappService');
 const dashboardService = require('../../features/Dashboard/dashboard.service');
 const excelService = require('../../utils/excelService');
 const fs = require('fs');
-const path = require('path'); // Para extrair a extensão do arquivo
+const path = require('path');
 const { startOfMonth, format } = require('date-fns');
 const ptBR = require('date-fns/locale/pt-BR');
 
@@ -20,13 +20,30 @@ const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1;
 
 class WebhookService {
   async processIncomingMessage(payload) {
+    // MUDANÇA: Lógica para IGNORAR APENAS o documento Excel enviado pelo PRÓPRIO BOT.
+    // Outras mensagens 'fromMe' (como textos de confirmação) podem passar para processamento futuro,
+    // mas o documento Excel não deve ser re-processado como uma despesa.
+    if (payload.fromMe && payload.document && 
+        payload.document.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+      logger.debug('[Webhook] Ignorando documento Excel enviado pelo próprio bot.');
+      return;
+    }
+    // IMPORTANTE: Se você quisesse ignorar TODAS as mensagens do próprio bot (textos, imagens, etc.),
+    // a linha `if (payload.fromMe) return;` seria adequada. Mas como o requisito é específico para o Excel,
+    // mantemos as outras mensagens `fromMe` para serem processadas normalmente abaixo, se houver lógica para elas.
+
+
     // Roteador de Ações: primeiro verifica cliques em botões.
+    // Esta é uma interação 'fromMe' (bot envia botão, usuário clica), então não deve ser ignorada pelo filtro acima.
     if (payload.buttonsResponseMessage) {
       return this.handleEditButton(payload);
     }
     
     // Ignora mensagens que não são de grupos.
-    if (!payload.isGroup) return;
+    if (!payload.isGroup) {
+      logger.debug('[Webhook] Ignorando mensagem que não é de grupo.');
+      return;
+    }
 
     // Ignora eventos sem um remetente identificado (ex: alguém entrou no grupo).
     const participantPhone = payload.participantPhone;
@@ -37,7 +54,10 @@ class WebhookService {
 
     // Verifica se o grupo está sendo monitorado.
     const isMonitored = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
-    if (!isMonitored) return;
+    if (!isMonitored) {
+      logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado.`);
+      return;
+    }
     
     // Direciona para a função correta com base no tipo de conteúdo.
     if (payload.image || payload.document) {
@@ -117,7 +137,7 @@ class WebhookService {
     });
 
     if (pendingMedia) {
-      // MUDANÇA: Verifica o mimetype antes de tentar análise de IA
+      // Verifica o mimetype antes de tentar análise de IA
       const allowedMimeTypesForAI = ['image/jpeg', 'image/png', 'application/pdf'];
       if (!allowedMimeTypesForAI.includes(pendingMedia.attachment_mimetype)) {
         logger.warn(`[Webhook] Mídia de tipo '${pendingMedia.attachment_mimetype}' não suportada para análise de IA. Ignorando.`);
@@ -207,7 +227,6 @@ class WebhookService {
     const totalExpenses = await Expense.sum('value');
     const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
 
-    // MUDANÇA: Mensagem mais explícita sobre o salvamento e o prazo para edição
     const message = `💸 *Custo Registrado:* ${formattedValue}
 *Cat. Sugerida:* ${category.name}
 *Desc.:* ${baseDescription}
@@ -299,7 +318,6 @@ Despesa *já* salva no sistema! Para alterar a categoria, clique *Corrigir*. Cas
     const totalExpenses = await Expense.sum('value');
     const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
 
-    // MUDANÇA: Mensagem de confirmação de atualização mais explícita
     const successMessage = `✅ *Custo Atualizado!* 
 Despesa #${pendingExpense.expense.id}
 Nova categoria: *${selectedCategory.name}*

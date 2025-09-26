@@ -35,6 +35,10 @@ middlewares() {
   this.server.use(cookieParser());
 }
 
+  routes() {
+    this.server.use(mainRouter);
+  }
+
   async connectAndSeedDatabase() {
     try {
       await db.sequelize.authenticate();

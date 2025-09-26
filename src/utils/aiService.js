@@ -8,9 +8,8 @@ const { Category } = require('../models');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-
-// <<< MUDANÇA 1: A LINHA ABAIXO FOI REMOVIDA >>>
-// const { pdf } = require('pdf-to-img');
+// <<< MUDANÇA 1: Importamos a nova biblioteca >>>
+const Poppler = require('node-poppler');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -42,40 +41,50 @@ class AIService {
 
   /**
    * Converte um buffer de PDF na primeira página como um buffer de imagem JPEG.
+   * <<< MUDANÇA 2: Lógica totalmente reescrita para usar node-poppler >>>
    */
   async _convertPdfToImage(pdfBuffer) {
-    // <<< MUDANÇA 2: Importamos a biblioteca dinamicamente AQUI >>>
-    const { pdf } = await import('pdf-to-img');
-
-    logger.info('[AIService] PDF detectado. Iniciando conversão para imagem...');
+    logger.info('[AIService] PDF detectado. Iniciando conversão com node-poppler...');
+    const poppler = new Poppler();
     const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
+    const tempOutputPath = path.join(os.tmpdir(), `img-${Date.now()}`);
+
     try {
+      // 1. Salva o buffer do PDF em um arquivo temporário
       fs.writeFileSync(tempPdfPath, pdfBuffer);
-      const document = await pdf(tempPdfPath, { page: 1 }); // Converte apenas a primeira página
 
-      // Validação robusta do resultado da conversão
-      if (!document || document.length === 0 || !document[0]) {
-        logger.error('[AIService] A conversão do PDF não gerou nenhuma imagem. Verifique se a dependência de sistema "Poppler" está instalada no ambiente de execução.');
-        return null;
-      }
+      // 2. Opções para a conversão: JPEG, apenas a primeira página
+      const options = {
+        firstPageToConvert: 1,
+        lastPageToConvert: 1,
+        jpegFile: true,
+      };
 
-      const imageBuffer = document[0];
+      // 3. Executa a conversão
+      await poppler.pdfToCairo(tempPdfPath, tempOutputPath, options);
+      
+      // 4. O nome do arquivo de saída será "tempOutputPath-1.jpg"
+      const imagePath = `${tempOutputPath}-1.jpg`;
+
+      // 5. Lê o arquivo de imagem gerado de volta para um buffer
+      const imageBuffer = fs.readFileSync(imagePath);
       logger.info('[AIService] PDF convertido para imagem com sucesso.');
       return imageBuffer;
       
     } catch (error) {
-      logger.error('[AIService] Erro crítico durante a conversão do PDF. Verifique a instalação da dependência "Poppler".', error);
+      logger.error('[AIService] Erro crítico durante a conversão do PDF com node-poppler.', error);
       return null;
     } finally {
-      // Garante que o arquivo temporário seja sempre deletado
-      if (fs.existsSync(tempPdfPath)) {
-        fs.unlinkSync(tempPdfPath);
-      }
+      // 6. Garante que todos os arquivos temporários sejam deletados
+      if (fs.existsSync(tempPdfPath)) fs.unlinkSync(tempPdfPath);
+      const imagePath = `${tempOutputPath}-1.jpg`;
+      if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
     }
   }
 
   /**
    * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
+   * (O restante do arquivo permanece o mesmo)
    */
   async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg') {
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);

@@ -21,10 +21,13 @@
   "license": "ISC",
   "dependencies": {
     "axios": "^1.7.2",
+    "bcryptjs": "^3.0.2",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "date-fns": "^4.1.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
     "node-cron": "^4.2.1",
     "node-poppler": "^8.0.4",
     "openai": "^5.23.0",

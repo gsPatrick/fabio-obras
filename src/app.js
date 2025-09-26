@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const db = require('./models');
 const mainRouter = require('./routes');
+const cookieParser = require('cookie-parser'); // <<< IMPORTAR
 
 class App {
   constructor() {
@@ -17,22 +18,44 @@ class App {
   middlewares() {
     this.server.use(cors());
     this.server.use(express.json());
+        this.server.use(cookieParser()); // <<< USAR O MIDDLEWARE
+
   }
 
   routes() {
     this.server.use(mainRouter);
   }
 
-  async connectAndSeedDatabase() {
+ async connectAndSeedDatabase() {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: true });
+      await db.sequelize.sync({ alter: true }); // Mantenha o alter: true
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedCategories();
+      await this.seedAdminUser(); // <<< ADICIONAR CHAMADA
     } catch (error) {
       console.error('❌ Não foi possível conectar ou sincronizar com o banco de dados:', error);
       process.exit(1); 
+    }
+  }
+
+  // <<< ADICIONAR NOVA FUNÇÃO ABAIXO DE connectAndSeedDatabase >>>
+  async seedAdminUser() {
+    const { User } = db;
+    const adminEmail = 'admin@admin.com';
+
+    console.log('[SEEDER] Verificando usuário administrador...');
+    const adminUser = await User.findOne({ where: { email: adminEmail } });
+
+    if (!adminUser) {
+      await User.create({
+        email: adminEmail,
+        password: 'admin', // O hook no modelo irá criptografar isso automaticamente
+      });
+      console.log('[SEEDER] Usuário administrador padrão criado com sucesso.');
+    } else {
+      console.log('[SEEDER] Usuário administrador já existe.');
     }
   }
 

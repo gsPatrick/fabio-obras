@@ -160,3 +160,73 @@ module.exports = {
   downloadZapiMedia,
   sendButtonList
 };
+
+
+
+async function runPendingExpenseWorker() {
+  console.log('[WORKER] ⚙️ Verificando despesas pendentes expiradas...');
+  const now = new Date();
+
+  try {
+    // 1. CONFIRMAÇÃO AUTOMÁTICA (após 3 minutos de validação)
+    const expiredValidations = await PendingExpense.findAll({
+      where: {
+        status: 'awaiting_validation',
+        expires_at: { [Op.lte]: now }
+      },
+      include: [{ model: Category, as: 'suggestedCategory' }]
+    });
+
+    for (const pending of expiredValidations) {
+      console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.id}`);
+      await Expense.create({
+        value: pending.value,
+        description: pending.description,
+        expense_date: pending.createdAt,
+        whatsapp_message_id: pending.whatsapp_message_id,
+        category_id: pending.suggested_category_id,
+      });
+      const successMessage = `✅ *Custo Confirmado Automaticamente*\n\n` +
+                             `A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.value)}* ` +
+                             `foi registrada na categoria *${pending.suggestedCategory.name}*.`;
+      await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, successMessage);
+      await pending.destroy();
+    }
+
+    // 2. TIMEOUT DE EDIÇÃO (após 3 minutos esperando resposta numérica)
+    const expiredReplies = await PendingExpense.findAll({
+      where: {
+        status: 'awaiting_category_reply',
+        expires_at: { [Op.lte]: now }
+      },
+      include: [{ model: Category, as: 'suggestedCategory' }]
+    });
+
+    for (const pending of expiredReplies) {
+      console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.id}`);
+      await Expense.create({
+        value: pending.value,
+        description: pending.description,
+        expense_date: pending.createdAt,
+        whatsapp_message_id: pending.whatsapp_message_id,
+        category_id: pending.suggested_category_id,
+      });
+      const timeoutMessage = `⏰ *Edição Expirada*\n\n` +
+                             `O tempo para selecionar uma nova categoria expirou. A despesa foi confirmada com a categoria original: *${pending.suggestedCategory.name}*.`;
+      await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
+      await pending.destroy();
+    }
+
+    // 3. LIMPEZA DE CONTEXTOS (após 2 minutos esperando descrição)
+    await PendingExpense.destroy({
+      where: {
+        status: 'awaiting_context',
+        expires_at: { [Op.lte]: now }
+      }
+    });
+
+  } catch (error) {
+    console.error('[WORKER] ❌ Erro ao processar despesas pendentes:', error);
+  }
+}
+

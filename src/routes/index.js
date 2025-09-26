@@ -17,8 +17,8 @@ router.use('/auth', authRoutes);
 router.use('/webhook', webhookRoutes);
 
 // Rotas protegidas
-router.use('/groups', authMiddleware, groupRoutes);
+router.use('/groups',  groupRoutes);
 router.use('/dashboard', authMiddleware, dashboardRoutes);
-router.use('/categories', authMiddleware, categoryRoutes);
+router.use('/categories', categoryRoutes);
 router.use('/users', authMiddleware, userRoutes); // <<< ADICIONAR
 module.exports = router;

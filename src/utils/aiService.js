@@ -8,7 +8,9 @@ const { Category } = require('../models');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { pdf } = require('pdf-to-img');
+
+// <<< MUDANÇA 1: A LINHA ABAIXO FOI REMOVIDA >>>
+// const { pdf } = require('pdf-to-img');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -18,8 +20,6 @@ class AIService {
 
   /**
    * Transcreve um buffer de áudio para texto usando o Whisper.
-   * @param {Buffer} audioBuffer - O buffer do arquivo de áudio.
-   * @returns {Promise<string|null>} O texto transcrito.
    */
   async transcribeAudio(audioBuffer) {
     if (!audioBuffer) return null;
@@ -42,11 +42,11 @@ class AIService {
 
   /**
    * Converte um buffer de PDF na primeira página como um buffer de imagem JPEG.
-   * @private
-   * @param {Buffer} pdfBuffer - O buffer do arquivo PDF.
-   * @returns {Promise<Buffer|null>} O buffer da imagem JPEG.
    */
- async _convertPdfToImage(pdfBuffer) {
+  async _convertPdfToImage(pdfBuffer) {
+    // <<< MUDANÇA 2: Importamos a biblioteca dinamicamente AQUI >>>
+    const { pdf } = await import('pdf-to-img');
+
     logger.info('[AIService] PDF detectado. Iniciando conversão para imagem...');
     const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
     try {
@@ -76,10 +76,6 @@ class AIService {
 
   /**
    * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
-   * @param {Buffer} mediaBuffer - O buffer da imagem ou PDF.
-   * @param {string} userText - O texto de contexto do usuário.
-   * @param {string} mimeType - O tipo do arquivo (ex: 'image/jpeg' ou 'application/pdf').
-   * @returns {Promise<object|null>} Um objeto com a análise detalhada.
    */
   async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg') {
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);

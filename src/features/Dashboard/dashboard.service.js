@@ -1,3 +1,4 @@
+// src/features/Dashboard/dashboard.service.js
 const { Expense, Category, Revenue, sequelize } = require('../../models');
 const { Op } = require('sequelize');
 const { parseISO, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfQuarter, endOfQuarter, startOfYear, endOfYear, subDays, eachDayOfInterval, format } = require('date-fns');
@@ -10,17 +11,15 @@ class DashboardService {
   async getKPIs(filters) {
     const { whereClause: expenseWhere } = this._buildWhereClause(filters);
 
-    // <<< INÍCIO DA CORREÇÃO >>>
     // Crie uma cláusula 'where' específica para receitas, traduzindo o campo de data.
     const revenueWhere = {};
     if (expenseWhere.expense_date) {
         revenueWhere.revenue_date = expenseWhere.expense_date;
     }
     // Se houver outros filtros que também se aplicam a receitas, copie-os aqui.
-    // <<< FIM DA CORREÇÃO >>>
 
     const totalExpenses = await Expense.sum('value', { where: expenseWhere });
-    // Use a cláusula correta para a consulta de receitas
+    // Use a cláusula correta para a consulta de receitas (mantido para compatibilidade, mas não usado no relatório do WhatsApp)
     const totalRevenues = await Revenue.sum('value', { where: revenueWhere });
 
     const expensesByCategory = await Expense.findAll({
@@ -112,6 +111,14 @@ class DashboardService {
       data: rows,
     };
   }
+
+  // MUDANÇA: NOVA FUNÇÃO PARA PEGAR TODAS AS DESPESAS SEM PAGINAÇÃO
+  async getAllExpenses() {
+    return Expense.findAll({
+      include: [{ model: Category, as: 'category', attributes: ['name'] }],
+      order: [['expense_date', 'DESC']],
+    });
+  }
   
   // ===================================================================
   // 4. ENDPOINTS CRUD (CRIAR, ATUALIZAR, DELETAR)
@@ -148,8 +155,12 @@ class DashboardService {
       switch (filters.period) {
         case 'daily': startDate = startOfDay(now); endDate = endOfDay(now); break;
         case 'weekly': startDate = startOfWeek(now, { weekStartsOn: 1 }); endDate = endOfWeek(now, { weekStartsOn: 1 }); break;
-        // ... (adicionar outros períodos como antes)
-        default: startDate = startOfMonth(now); endDate = endOfMonth(now);
+        case 'monthly': startDate = startOfMonth(now); endDate = endOfMonth(now); break;
+        case 'quarterly': startDate = startOfQuarter(now); endDate = endOfQuarter(now); break;
+        case 'yearly': startDate = startOfYear(now); endDate = endOfYear(now); break;
+        case 'last7days': startDate = startOfDay(subDays(now, 6)); endDate = endOfDay(now); break;
+        case 'last30days': startDate = startOfDay(subDays(now, 29)); endDate = endOfDay(now); break;
+        default: startDate = startOfMonth(now); endDate = endOfMonth(now); // Padrão para mensal se não especificado
       }
     } else if (filters.startDate && filters.endDate) {
       startDate = parseISO(filters.startDate);

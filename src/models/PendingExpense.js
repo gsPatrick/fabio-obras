@@ -7,7 +7,7 @@ class PendingExpense extends Model {
     super.init({
       value: {
         type: DataTypes.DECIMAL(10, 2),
-        allowNull: true, // Será nulo até a análise final
+        allowNull: true, // Será nulo até a análise final, mas depois a despesa real terá
       },
       description: {
         type: DataTypes.TEXT,
@@ -35,13 +35,18 @@ class PendingExpense extends Model {
         allowNull: true,
         comment: 'URL da mídia que está aguardando contexto.',
       },
-      // ===================================================================
-      // <<< ADICIONE ESTE CAMPO >>>
-      // ===================================================================
       attachment_mimetype: {
         type: DataTypes.STRING,
         allowNull: true, // Pode ser nulo para pendências antigas ou sem anexo
         comment: 'O mimeType do anexo (ex: application/pdf).',
+      },
+      // ===================================================================
+      // <<< ADICIONE ESTE CAMPO para vincular à despesa real >>>
+      // ===================================================================
+      expense_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true, // Será nulo apenas no estado 'awaiting_context'
+        comment: 'ID da despesa já criada no sistema.',
       },
       // ===================================================================
       status: {
@@ -58,6 +63,8 @@ class PendingExpense extends Model {
 
   static associate(models) {
     this.belongsTo(models.Category, { foreignKey: 'suggested_category_id', as: 'suggestedCategory' });
+    // <<< NOVA ASSOCIAÇÃO: Para a despesa real já criada >>>
+    this.belongsTo(models.Expense, { foreignKey: 'expense_id', as: 'expense' });
   }
 }
 

@@ -108,7 +108,7 @@ class App {
         { name: 'Material hidráulica', type: 'Material' },
         { name: 'Marcenaria', type: 'Serviços/Equipamentos' },
         { name: 'Eletros', type: 'Serviços/Equipamentos' },
-        { name: 'Outros', type: 'Outros' },
+        { name: 'Outros', type: 'Outros' }, // Garante que a categoria "Outros" exista, importante para o fallback da IA
     ];
     console.log('[SEEDER] Verificando e criando categorias essenciais...');
     for (const categoryData of categoriesToSeed) {
@@ -121,51 +121,61 @@ class App {
   }
 
   startPendingExpenseWorker() {
-    const { PendingExpense, Expense, Category } = require('./models');
+    // MUDANÇA: Importar os modelos da forma correta para o worker
+    const { PendingExpense, Expense, Category } = db;
     const whatsappService = require('./utils/whatsappService');
+
+    // MUDANÇA: Constantes para o tempo de expiração do worker, consistentes com o serviço
+    const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1; 
+    const CONTEXT_WAIT_TIME_MINUTES = 2; 
 
     const runWorker = async () => {
       console.log('[WORKER] ⚙️ Verificando despesas pendentes expiradas...');
       const now = new Date();
       try {
+        // 1. TIMEOUT DE VALIDAÇÃO (despesa salva, mas o prazo para edição de categoria expirou)
         const expiredValidations = await PendingExpense.findAll({
-          where: { status: 'awaiting_validation', expires_at: { [Op.lte]: now } },
-          include: [{ model: Category, as: 'suggestedCategory' }]
+          where: { 
+            status: 'awaiting_validation', 
+            expires_at: { [Op.lte]: now } 
+          },
+          // MUDANÇA: Incluir 'expense' e 'suggestedCategory' para a mensagem
+          include: [{ model: Category, as: 'suggestedCategory' }, { model: Expense, as: 'expense' }]
         });
 
         for (const pending of expiredValidations) {
-          console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.id}`);
-          await Expense.create({
-            value: pending.value,
-            description: pending.description,
-            expense_date: pending.createdAt,
-            whatsapp_message_id: pending.whatsapp_message_id,
-            category_id: pending.suggested_category_id,
-          });
-          const successMessage = `✅ *Custo Confirmado Automaticamente*\n\nA despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.value)}* foi registrada na categoria *${pending.suggestedCategory.name}*.`;
+          console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
+          
+          const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
+          // MUDANÇA: Mensagem mais concisa e consistente
+          const successMessage = `✅ *Custo Salvo Automaticamente*\n\nA despesa de *${formattedValue}* foi confirmada na categoria *${pending.suggestedCategory.name}*.`;
           await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, successMessage);
-          await pending.destroy();
+          await pending.destroy(); // A despesa já está salva, apenas limpamos a pendência
         }
 
+        // 2. TIMEOUT DE EDIÇÃO (usuário não respondeu à solicitação de nova categoria)
         const expiredReplies = await PendingExpense.findAll({
-          where: { status: 'awaiting_category_reply', expires_at: { [Op.lte]: now } },
-          include: [{ model: Category, as: 'suggestedCategory' }]
+          where: { 
+            status: 'awaiting_category_reply', 
+            expires_at: { [Op.lte]: now } 
+          },
+          // MUDANÇA: Incluir 'expense' e 'suggestedCategory' para a mensagem
+          include: [{ model: Category, as: 'suggestedCategory' }, { model: Expense, as: 'expense' }]
         });
 
         for (const pending of expiredReplies) {
-          console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.id}`);
-          await Expense.create({
-            value: pending.value,
-            description: pending.description,
-            expense_date: pending.createdAt,
-            whatsapp_message_id: pending.whatsapp_message_id,
-            category_id: pending.suggested_category_id,
-          });
-          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa foi confirmada com a categoria original: *${pending.suggestedCategory.name}*.`;
+          console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
+          // A despesa já foi salva com a categoria sugerida, então não precisamos atualizá-la novamente
+          // se o timeout ocorrer. A categoria que prevalece é a original da IA.
+
+          const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
+          // MUDANÇA: Mensagem mais concisa e consistente
+          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa de *${formattedValue}* foi mantida com a categoria original: *${pending.suggestedCategory.name}*.`;
           await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
-          await pending.destroy();
+          await pending.destroy(); // Limpamos a pendência
         }
 
+        // 3. LIMPEZA DE CONTEXTOS (após N minutos esperando descrição)
         await PendingExpense.destroy({
           where: { status: 'awaiting_context', expires_at: { [Op.lte]: now } }
         });
@@ -175,7 +185,8 @@ class App {
       }
     };
     
-    setInterval(runWorker, 30000);
+    // O worker continua rodando a cada 30 segundos para verificar expirações
+    setInterval(runWorker, 30000); 
   }
 }
 

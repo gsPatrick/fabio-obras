@@ -1,5 +1,9 @@
+// src/utils/whatsappService.js
 const axios = require('axios');
 const logger = require('./logger');
+const fs = require('fs');
+const path = require('path');
+const mime = require('mime-types'); // MUDANÇA: Importar mime-types
 
 const { ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN } = process.env;
 const BASE_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}`;
@@ -153,80 +157,56 @@ async function sendButtonList(phone, messageText, buttons) {
   }
 }
 
+/**
+ * MUDANÇA: NOVA FUNÇÃO PARA ENVIAR DOCUMENTOS (corrigida)
+ * Envia um documento (arquivo) via WhatsApp.
+ * @param {string} phone - O número do destinatário ou ID do grupo.
+ * @param {string} filePath - O caminho completo para o arquivo local a ser enviado.
+ * @param {string} caption - A legenda (texto) que acompanha o documento.
+ * @returns {Promise<object|null>} O resultado da API ou null em caso de erro.
+ */
+async function sendDocument(phone, filePath, caption = '') {
+  if (!checkCredentials() || !phone || !filePath || !fs.existsSync(filePath)) {
+    logger.error('[WhatsAppService] Parâmetros inválidos para sendDocument ou arquivo não encontrado.');
+    return null;
+  }
+
+  // MUDANÇA: Extrair extensão e mimetype do arquivo para o endpoint e payload
+  const fileExtension = path.extname(filePath).substring(1); // Ex: 'xlsx'
+  const filename = path.basename(filePath);
+  const mimeType = mime.lookup(filePath) || 'application/octet-stream'; // Ex: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  
+  const fileBuffer = fs.readFileSync(filePath);
+  const base64File = fileBuffer.toString('base64');
+  
+  // MUDANÇA: Ajustar payload conforme a documentação da Z-API
+  const payload = {
+    phone,
+    document: `data:${mimeType};base64,${base64File}`, // Data URI completo no atributo 'document'
+    fileName: filename,
+    caption: caption, // Usar 'caption' para a legenda
+  };
+
+  try {
+    // MUDANÇA: Construir o endpoint com a extensão do arquivo
+    const fullEndpoint = `${BASE_URL}/send-document/${fileExtension}`;
+    logger.info(`[WhatsAppService] Enviando documento '${filename}' para ${phone} via ${fullEndpoint}...`);
+    const response = await axios.post(fullEndpoint, payload, { headers });
+    logger.info(`[WhatsAppService] Documento enviado com sucesso para ${phone}.`, response.data);
+    return response.data;
+  } catch (error) {
+    const errorData = error.response ? error.response.data : error.message;
+    logger.error(`[WhatsAppService] Erro ao enviar documento '${filename}' para ${phone}:`, errorData);
+    return null;
+  }
+}
+
+
 module.exports = {
   sendWhatsappMessage,
   sendOptionList,
   listGroups,
   downloadZapiMedia,
-  sendButtonList
+  sendButtonList,
+  sendDocument, // MUDANÇA: Exportar a função sendDocument corrigida
 };
-
-
-
-async function runPendingExpenseWorker() {
-  console.log('[WORKER] ⚙️ Verificando despesas pendentes expiradas...');
-  const now = new Date();
-
-  try {
-    // 1. CONFIRMAÇÃO AUTOMÁTICA (após 3 minutos de validação)
-    const expiredValidations = await PendingExpense.findAll({
-      where: {
-        status: 'awaiting_validation',
-        expires_at: { [Op.lte]: now }
-      },
-      include: [{ model: Category, as: 'suggestedCategory' }]
-    });
-
-    for (const pending of expiredValidations) {
-      console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.id}`);
-      await Expense.create({
-        value: pending.value,
-        description: pending.description,
-        expense_date: pending.createdAt,
-        whatsapp_message_id: pending.whatsapp_message_id,
-        category_id: pending.suggested_category_id,
-      });
-      const successMessage = `✅ *Custo Confirmado Automaticamente*\n\n` +
-                             `A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.value)}* ` +
-                             `foi registrada na categoria *${pending.suggestedCategory.name}*.`;
-      await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, successMessage);
-      await pending.destroy();
-    }
-
-    // 2. TIMEOUT DE EDIÇÃO (após 3 minutos esperando resposta numérica)
-    const expiredReplies = await PendingExpense.findAll({
-      where: {
-        status: 'awaiting_category_reply',
-        expires_at: { [Op.lte]: now }
-      },
-      include: [{ model: Category, as: 'suggestedCategory' }]
-    });
-
-    for (const pending of expiredReplies) {
-      console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.id}`);
-      await Expense.create({
-        value: pending.value,
-        description: pending.description,
-        expense_date: pending.createdAt,
-        whatsapp_message_id: pending.whatsapp_message_id,
-        category_id: pending.suggested_category_id,
-      });
-      const timeoutMessage = `⏰ *Edição Expirada*\n\n` +
-                             `O tempo para selecionar uma nova categoria expirou. A despesa foi confirmada com a categoria original: *${pending.suggestedCategory.name}*.`;
-      await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
-      await pending.destroy();
-    }
-
-    // 3. LIMPEZA DE CONTEXTOS (após 2 minutos esperando descrição)
-    await PendingExpense.destroy({
-      where: {
-        status: 'awaiting_context',
-        expires_at: { [Op.lte]: now }
-      }
-    });
-
-  } catch (error) {
-    console.error('[WORKER] ❌ Erro ao processar despesas pendentes:', error);
-  }
-}
-

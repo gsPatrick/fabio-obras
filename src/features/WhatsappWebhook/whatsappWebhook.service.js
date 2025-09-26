@@ -11,8 +11,8 @@ const excelService = require('../../utils/excelService');
 const fs = require('fs');
 const path = require('path');
 const { startOfMonth, format } = require('date-fns');
-// NOVA TENTATIVA DE CORREÇÃO: Força a importação da propriedade .default
-const ptBR = require('date-fns/locale/pt-BR').default;
+// Mantemos a importação do ptBR, embora para o cabeçalho do relatório, usaremos Intl.DateTimeFormat
+const ptBR = require('date-fns/locale/pt-BR');
 
 
 // Tempo em minutos que o bot esperará pelo contexto (áudio/texto) após receber uma imagem.
@@ -348,8 +348,14 @@ Nova categoria: *${selectedCategory.name}*
                 .join('\n');
         }
 
+        // --- INÍCIO DA MUDANÇA PARA O CABEÇALHO DO RELATÓRIO ---
+        const currentMonth = new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(now);
+        const currentYear = now.getFullYear();
+        // Capitaliza a primeira letra do mês e combina com o ano
+        const formattedReportHeaderMonth = `${currentMonth.charAt(0).toUpperCase() + currentMonth.slice(1)}/${currentYear}`;
+
         const reportMessage = `📊 *Relatório Mensal de Despesas* 📊
-(${format(startOfMonth(now), 'MMMM/yyyy', { locale: ptBR })})
+(${formattedReportHeaderMonth}) 
 
 *Despesas Totais:* ${formattedTotalExpenses}
 
@@ -357,6 +363,7 @@ Nova categoria: *${selectedCategory.name}*
 ${categorySummary}
 
 _Este relatório é referente aos dados registrados até o momento._`;
+        // --- FIM DA MUDANÇA PARA O CABEÇALHO DO RELATÓRIO ---
 
         await whatsappService.sendWhatsappMessage(groupId, reportMessage);
         logger.info(`[Webhook] Relatório de gastos enviado para ${recipientPhone}.`);

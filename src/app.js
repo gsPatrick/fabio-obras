@@ -22,18 +22,33 @@ class App {
     this.startPendingExpenseWorker();
   }
 
-middlewares() {
-  // Libera CORS para qualquer origem e permite envio de cookies/headers
-  this.server.use(cors({
-    origin: '*',         // <<< Permite todas as origens
-    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-    allowedHeaders: ['Content-Type','Authorization'],
-    credentials: false    // se precisar enviar cookies, troque para true
-  }));
+ middlewares() {
+    // Lista de origens permitidas
+    const allowedOrigins = [
+      'http://localhost:3004', // A origem do seu frontend de desenvolvimento
+      // 'https://seu-frontend-em-producao.com' // Adicione a URL do seu frontend quando for para produção
+    ];
 
-  this.server.use(express.json());
-  this.server.use(cookieParser());
-}
+    // Libera CORS de forma mais segura e permite o envio de cookies
+    this.server.use(cors({
+      origin: function (origin, callback) {
+        // Permite requisições sem 'origin' (como apps mobile ou Postman)
+        if (!origin) return callback(null, true);
+
+        if (allowedOrigins.indexOf(origin) === -1) {
+          const msg = 'A política de CORS para este site não permite acesso da origem especificada.';
+          return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+      },
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization'],
+      credentials: true // <<< MUITO IMPORTANTE: alterado para true
+    }));
+
+    this.server.use(express.json());
+    this.server.use(cookieParser());
+  }
 
   routes() {
     this.server.use(mainRouter);

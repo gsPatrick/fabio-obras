@@ -46,19 +46,31 @@ class AIService {
    * @param {Buffer} pdfBuffer - O buffer do arquivo PDF.
    * @returns {Promise<Buffer|null>} O buffer da imagem JPEG.
    */
-  async _convertPdfToImage(pdfBuffer) {
+ async _convertPdfToImage(pdfBuffer) {
     logger.info('[AIService] PDF detectado. Iniciando conversão para imagem...');
+    const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
     try {
-      const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
       fs.writeFileSync(tempPdfPath, pdfBuffer);
       const document = await pdf(tempPdfPath, { page: 1 }); // Converte apenas a primeira página
+
+      // Validação robusta do resultado da conversão
+      if (!document || document.length === 0 || !document[0]) {
+        logger.error('[AIService] A conversão do PDF não gerou nenhuma imagem. Verifique se a dependência de sistema "Poppler" está instalada no ambiente de execução.');
+        return null;
+      }
+
       const imageBuffer = document[0];
-      fs.unlinkSync(tempPdfPath);
       logger.info('[AIService] PDF convertido para imagem com sucesso.');
       return imageBuffer;
+      
     } catch (error) {
-      logger.error('[AIService] Erro ao converter PDF para imagem:', error);
+      logger.error('[AIService] Erro crítico durante a conversão do PDF. Verifique a instalação da dependência "Poppler".', error);
       return null;
+    } finally {
+      // Garante que o arquivo temporário seja sempre deletado
+      if (fs.existsSync(tempPdfPath)) {
+        fs.unlinkSync(tempPdfPath);
+      }
     }
   }
 

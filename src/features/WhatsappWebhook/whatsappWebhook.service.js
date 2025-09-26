@@ -12,8 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { startOfMonth, format } = require('date-fns');
 // MUDANÇA: Importar ptBR de forma mais robusta para lidar com exports CommonJS/ESM
-const ptBRModule = require('date-fns/locale/pt-BR');
-const ptBR = ptBRModule.default || ptBRModule;
+const ptBR = require('date-fns/locale/pt-BR');
 
 
 // Tempo em minutos que o bot esperará pelo contexto (áudio/texto) após receber uma imagem.

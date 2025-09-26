@@ -1,37 +1,27 @@
-// src/features/WhatsappWebhook/whatsappWebhook.service.js
-'use strict';
-
 const logger = require('../../utils/logger');
 const { MonitoredGroup, Category, PendingExpense, Expense } = require('../../models');
 const { Op } = require('sequelize');
 const aiService = require('../../utils/aiService');
 const whatsappService = require('../../utils/whatsappService');
 
-// Tempo em minutos que o bot esperará pelo contexto (áudio/texto) após receber uma imagem.
+// Define os tempos de expiração em minutos
 const CONTEXT_WAIT_TIME_MINUTES = 2;
+const VALIDATION_TIMEOUT_MINUTES = 3;
+const EDIT_REPLY_TIMEOUT_MINUTES = 3;
 
 class WebhookService {
   async processIncomingMessage(payload) {
-    // Roteador de Ações: primeiro verifica cliques em botões.
     if (payload.buttonsResponseMessage) {
       return this.handleEditButton(payload);
     }
-    
-    // Ignora mensagens que não são de grupos.
     if (!payload.isGroup) return;
 
-    // Ignora eventos sem um remetente identificado (ex: alguém entrou no grupo).
     const participantPhone = payload.participantPhone;
-    if (!participantPhone) {
-        logger.warn('[Webhook] Ignorando evento sem identificação do participante.');
-        return;
-    }
+    if (!participantPhone) return;
 
-    // Verifica se o grupo está sendo monitorado.
     const isMonitored = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
     if (!isMonitored) return;
     
-    // Direciona para a função correta com base no tipo de conteúdo.
     if (payload.image || payload.document) {
       return this.handleMediaArrival(payload);
     }
@@ -41,18 +31,10 @@ class WebhookService {
     }
   }
 
-  /**
-   * ETAPA 1: Lida com a chegada de uma imagem/documento.
-   * Cria um registro 'awaiting_context' e envia uma confirmação curta para o usuário.
-   */
   async handleMediaArrival(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
     
-    const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
-    const mimeType = payload.image ? payload.image.mimeType : payload.document.mimeType;
-    
-    // Limpa pendências antigas do mesmo usuário para evitar confusão.
     await PendingExpense.destroy({
       where: {
         participant_phone: participantPhone,
@@ -61,32 +43,25 @@ class WebhookService {
       }
     });
 
-    // Cria um novo registro de espera.
+    const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
     await PendingExpense.create({
       whatsapp_message_id: payload.messageId,
       whatsapp_group_id: groupId,
       participant_phone: participantPhone,
       attachment_url: mediaUrl,
-      attachment_mimetype: mimeType, // Salva o tipo do arquivo
       status: 'awaiting_context',
       expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
     });
 
     const confirmationMessage = `📄👍 Documento recebido! Agora estou aguardando a descrição por texto ou áudio.`;
     await whatsappService.sendWhatsappMessage(groupId, confirmationMessage);
-
-    logger.info(`[Webhook] Mídia (${mimeType}) de ${participantPhone} recebida. Mensagem de confirmação enviada.`);
+    logger.info(`[Webhook] Mídia de ${participantPhone} recebida. Mensagem de confirmação enviada.`);
   }
 
-  /**
-   * ETAPA 2: Lida com a chegada de texto/áudio.
-   * Verifica se é um contexto para uma mídia pendente ou uma resposta numérica para edição.
-   */
   async handleContextArrival(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
 
-    // Procura por uma mídia deste usuário que está aguardando contexto.
     const pendingMedia = await PendingExpense.findOne({
       where: {
         participant_phone: participantPhone,
@@ -100,8 +75,8 @@ class WebhookService {
     if (pendingMedia) {
       const workingMessage = `Ok, recebi a descrição! Analisando tudo agora... 🤖`;
       await whatsappService.sendWhatsappMessage(payload.phone, workingMessage);
-
       logger.info(`[Webhook] Contexto de ${participantPhone} recebido. Iniciando análise...`);
+      
       let userContext = '';
       if (payload.audio) {
         const audioBuffer = await whatsappService.downloadZapiMedia(payload.audio.audioUrl);
@@ -112,13 +87,12 @@ class WebhookService {
       
       const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
       if (mediaBuffer && userContext) {
-        const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype);
+        const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext);
         if (analysisResult) {
           return this.startValidationFlow(pendingMedia, analysisResult, userContext);
         }
       }
     } else {
-      // Se não era um contexto, pode ser uma resposta para edição.
       const textMessage = payload.text ? payload.text.message : null;
       if (textMessage && /^\d+$/.test(textMessage)) {
         await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone);
@@ -126,21 +100,17 @@ class WebhookService {
     }
   }
 
-  /**
-   * ETAPA 3: Monta e envia a mensagem rica de validação após a análise da IA.
-   */
   async startValidationFlow(pendingExpense, analysisResult, userContext) {
     const { value, documentType, payer, receiver, baseDescription, categoryName } = analysisResult;
     const finalDescriptionForDB = `${baseDescription} (${userContext})`;
     const category = await Category.findOne({ where: { name: categoryName } });
     if (!category) return;
 
-    // Atualiza o registro pendente com os dados da IA.
     pendingExpense.value = value;
     pendingExpense.description = finalDescriptionForDB;
     pendingExpense.suggested_category_id = category.id;
     pendingExpense.status = 'awaiting_validation';
-    pendingExpense.expires_at = new Date(Date.now() + 3 * 60 * 1000); // 3 minutos para validar/editar
+    pendingExpense.expires_at = new Date(Date.now() + VALIDATION_TIMEOUT_MINUTES * 60 * 1000);
     await pendingExpense.save();
     
     const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
@@ -166,9 +136,6 @@ class WebhookService {
     await whatsappService.sendButtonList(pendingExpense.whatsapp_group_id, message, buttons);
   }
 
-  /**
-   * ETAPA 4: Usuário clica no botão "Corrigir".
-   */
   async handleEditButton(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const groupId = payload.phone;
@@ -201,16 +168,13 @@ class WebhookService {
                       `${categoryListText}`;
       
       pendingExpense.status = 'awaiting_category_reply';
-      pendingExpense.expires_at = new Date(Date.now() + 3 * 60 * 1000); // 3 minutos para responder
+      pendingExpense.expires_at = new Date(Date.now() + EDIT_REPLY_TIMEOUT_MINUTES * 60 * 1000);
       await pendingExpense.save();
       
       await whatsappService.sendWhatsappMessage(groupId, message);
     }
   }
 
-  /**
-   * ETAPA 5: Usuário responde com um número para finalizar a edição.
-   */
   async handleNumericReply(groupId, selectedNumber, participantPhone) {
     const pendingExpense = await PendingExpense.findOne({
       where: {

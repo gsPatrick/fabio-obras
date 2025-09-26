@@ -23,7 +23,7 @@ class User extends Model {
       tableName: 'users',
     });
 
-    // Hook para criptografar a senha antes de salvar
+    // Hook para criptografar a senha antes de salvar/criar
     this.addHook('beforeSave', async (user) => {
       if (user.changed('password')) {
         user.password = await bcrypt.hash(user.password, 10);
@@ -31,7 +31,7 @@ class User extends Model {
     });
   }
 
-  // Método para verificar a senha
+  // Método para verificar a senha durante o login
   checkPassword(password) {
     return bcrypt.compare(password, this.password);
   }

@@ -36,11 +36,11 @@ class App {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
 
-      // Sincroniza todos os modelos de forma segura
+      // Sincroniza todos os modelos de forma segura, sem apagar dados
       await db.sequelize.sync({ force: true });
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       
-      // Chama os "seeders" após a sincronização
+      // Chama as rotinas de "seeding" após a sincronização ter certeza de que as tabelas existem
       await this.seedAdminUser();
       await this.seedCategories();
       
@@ -68,7 +68,7 @@ class App {
             console.log('[SEEDER] Usuário administrador não encontrado. Criando...');
             await User.create({
                 email: adminEmail,
-                password: 'admin' // O hook no modelo irá criptografar a senha
+                password: 'admin' // O hook no modelo User irá criptografar a senha automaticamente
             });
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' criado com sucesso.`);
         } else {
@@ -80,7 +80,7 @@ class App {
   }
 
   /**
-   * Verifica e cria as categorias essenciais da aplicação.
+   * Verifica e cria as categorias essenciais da aplicação, se não existirem.
    */
   async seedCategories() {
     const { Category } = db;
@@ -115,7 +115,6 @@ class App {
     
     console.log('[SEEDER] Verificando e criando categorias essenciais...');
     for (const categoryData of categoriesToSeed) {
-        // Usando findOrCreate aqui por ser a melhor prática para múltiplos itens
         const [category, created] = await Category.findOrCreate({
             where: { name: categoryData.name },
             defaults: categoryData,
@@ -137,6 +136,74 @@ const app = instance.server;
 const { PendingExpense, Expense, Category } = require('./models');
 const { Op } = require('sequelize');
 const whatsappService = require('./utils/whatsappService');
+
+async function runPendingExpenseWorker() {
+  console.log('[WORKER] ⚙️ Verificando despesas pendentes expiradas...');
+  const now = new Date();
+
+  try {
+    // 1. CONFIRMAÇÃO AUTOMÁTICA (após 3 minutos de validação)
+    const expiredValidations = await PendingExpense.findAll({
+      where: {
+        status: 'awaiting_validation',
+        expires_at: { [Op.lte]: now }
+      },
+      include: [{ model: Category, as: 'suggestedCategory' }]
+    });
+
+    for (const pending of expiredValidations) {
+      console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.id}`);
+      await Expense.create({
+        value: pending.value,
+        description: pending.description,
+        expense_date: pending.createdAt,
+        whatsapp_message_id: pending.whatsapp_message_id,
+        category_id: pending.suggested_category_id,
+      });
+      const successMessage = `✅ *Custo Confirmado Automaticamente*\n\n` +
+                             `A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.value)}* ` +
+                             `foi registrada na categoria *${pending.suggestedCategory.name}*.`;
+      await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, successMessage);
+      await pending.destroy();
+    }
+
+    // 2. TIMEOUT DE EDIÇÃO (após 3 minutos esperando resposta numérica)
+    const expiredReplies = await PendingExpense.findAll({
+      where: {
+        status: 'awaiting_category_reply',
+        expires_at: { [Op.lte]: now }
+      },
+      include: [{ model: Category, as: 'suggestedCategory' }]
+    });
+
+    for (const pending of expiredReplies) {
+      console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.id}`);
+      await Expense.create({
+        value: pending.value,
+        description: pending.description,
+        expense_date: pending.createdAt,
+        whatsapp_message_id: pending.whatsapp_message_id,
+        category_id: pending.suggested_category_id,
+      });
+      const timeoutMessage = `⏰ *Edição Expirada*\n\n` +
+                             `O tempo para selecionar uma nova categoria expirou. A despesa foi confirmada com a categoria original: *${pending.suggestedCategory.name}*.`;
+      await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
+      await pending.destroy();
+    }
+
+    // 3. LIMPEZA DE CONTEXTOS (após 2 minutos esperando descrição)
+    await PendingExpense.destroy({
+      where: {
+        status: 'awaiting_context',
+        expires_at: { [Op.lte]: now }
+      }
+    });
+
+  } catch (error) {
+    console.error('[WORKER] ❌ Erro ao processar despesas pendentes:', error);
+  }
+}
+
 setInterval(runPendingExpenseWorker, 30000);
 // ===================================================================
 

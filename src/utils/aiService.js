@@ -1,12 +1,6 @@
 // src/utils/aiService.js
 'use strict';
 
-// ===================================================================
-// <<< ADIÇÃO IMPORTANTE PARA CORRIGIR O ERRO DE TRANSCRIÇÃO >>>
-// Esta linha importa a classe 'File' que a biblioteca da OpenAI precisa.
-// ===================================================================
-const { File } = require('node:buffer');
-
 require('dotenv').config();
 const OpenAI = require('openai');
 const logger = require('./logger');
@@ -14,6 +8,8 @@ const { Category } = require('../models');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+// <<< MUDANÇA: Corrigimos a forma de importar a biblioteca >>>
 const { Poppler } = require('node-poppler');
 
 const openai = new OpenAI({
@@ -31,13 +27,10 @@ class AIService {
     try {
       const tempFilePath = path.join(os.tmpdir(), `audio-${Date.now()}.ogg`);
       fs.writeFileSync(tempFilePath, audioBuffer);
-
-      // A biblioteca da OpenAI agora pode encontrar a classe 'File' importada acima
       const transcription = await openai.audio.transcriptions.create({
         file: fs.createReadStream(tempFilePath),
         model: 'whisper-1',
       });
-
       fs.unlinkSync(tempFilePath);
       logger.info(`[AIService] Áudio transcrito: "${transcription.text}"`);
       return transcription.text;
@@ -48,101 +41,77 @@ class AIService {
   }
 
   /**
-   * Converte TODAS as páginas de um buffer de PDF em um array de buffers de imagem JPEG.
+   * Converte um buffer de PDF na primeira página como um buffer de imagem JPEG.
    */
   async _convertPdfToImage(pdfBuffer) {
-    logger.info('[AIService] PDF detectado. Iniciando conversão de TODAS as páginas...');
-    const poppler = new Poppler();
+    logger.info('[AIService] PDF detectado. Iniciando conversão com node-poppler...');
+    // Agora que a importação está correta, esta linha vai funcionar
+    const poppler = new Poppler(); 
     const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
     const tempOutputPath = path.join(os.tmpdir(), `img-${Date.now()}`);
-    const generatedImagePaths = [];
 
     try {
+      // 1. Salva o buffer do PDF em um arquivo temporário
       fs.writeFileSync(tempPdfPath, pdfBuffer);
 
-      const fileInfo = await poppler.pdfInfo(tempPdfPath);
-      const totalPages = fileInfo.pages;
-      if (!totalPages || totalPages === 0) {
-        logger.error('[AIService] PDF parece estar vazio ou corrompido. Nenhuma página encontrada.');
-        return [];
-      }
-      logger.info(`[AIService] O PDF tem ${totalPages} página(s). Convertendo todas...`);
-
+      // 2. Opções para a conversão: JPEG, apenas a primeira página
       const options = {
         firstPageToConvert: 1,
-        lastPageToConvert: totalPages,
+        lastPageToConvert: 1,
         jpegFile: true,
       };
 
+      // 3. Executa a conversão
       await poppler.pdfToCairo(tempPdfPath, tempOutputPath, options);
       
-      const imageBuffers = [];
-      for (let i = 1; i <= totalPages; i++) {
-        const imagePath = `${tempOutputPath}-${i}.jpg`;
-        if (fs.existsSync(imagePath)) {
-          imageBuffers.push(fs.readFileSync(imagePath));
-          generatedImagePaths.push(imagePath);
-        }
-      }
-      
-      logger.info(`[AIService] ${imageBuffers.length} página(s) convertida(s) para imagem com sucesso.`);
-      return imageBuffers;
+      // 4. O nome do arquivo de saída será "tempOutputPath-1.jpg"
+      const imagePath = `${tempOutputPath}-1.jpg`;
+
+      // 5. Lê o arquivo de imagem gerado de volta para um buffer
+      const imageBuffer = fs.readFileSync(imagePath);
+      logger.info('[AIService] PDF convertido para imagem com sucesso.');
+      return imageBuffer;
       
     } catch (error) {
       logger.error('[AIService] Erro crítico durante a conversão do PDF com node-poppler.', error);
-      return [];
+      return null;
     } finally {
+      // 6. Garante que todos os arquivos temporários sejam deletados
       if (fs.existsSync(tempPdfPath)) fs.unlinkSync(tempPdfPath);
-      for (const path of generatedImagePaths) {
-        if (fs.existsSync(path)) fs.unlinkSync(path);
-      }
+      const imagePath = `${tempOutputPath}-1.jpg`;
+      if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
     }
   }
 
   /**
-   * Analisa um comprovante (imagem ou PDF de múltiplas páginas) e um texto de contexto.
+   * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
    */
   async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg') {
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);
     
-    let imageContent = [];
-    let prompt;
-
-    const categories = await Category.findAll({ attributes: ['name'] });
-    const categoryList = `"${categories.map(c => c.name).join('", "')}"`;
+    let finalImageBuffer = mediaBuffer;
 
     if (mimeType.includes('pdf')) {
-      const convertedImages = await this._convertPdfToImage(mediaBuffer);
-      if (!convertedImages || convertedImages.length === 0) {
+      const convertedImage = await this._convertPdfToImage(mediaBuffer);
+      if (!convertedImage) {
         logger.error('[AIService] Falha na conversão de PDF, cancelando análise.');
         return null;
       }
-      imageContent = convertedImages.map(buffer => ({
-        type: 'image_url',
-        image_url: { url: `data:image/jpeg;base64,${buffer.toString('base64')}` },
-      }));
-      prompt = `
-        Sua tarefa é analisar as SEGUINTES IMAGENS, que compõem um único documento de várias páginas.
-        Analise todas as páginas para extrair as informações consolidadas e retorne APENAS um objeto JSON válido com as chaves:
-        "value" (Número, o valor total ou principal), "documentType" (String), "payer" (String), "receiver" (String), "baseDescription" (String, um resumo curto e objetivo da transação, como "Pagamento PIX para [Nome do Recebedor]"), "categoryName" (String).
-        A "categoryName" DEVE ser uma das seguintes opções: [${categoryList}].
-        Contexto do usuário (use para definir a categoria E para enriquecer a descrição, se relevante): "${userText || 'Nenhum'}"
-      `;
-    } else {
-      const base64Image = mediaBuffer.toString('base64');
-      imageContent.push({
-        type: 'image_url',
-        image_url: { url: `data:image/jpeg;base64,${base64Image}` },
-      });
-      prompt = `
-        Sua tarefa é analisar a IMAGEM de um documento financeiro e um texto complementar fornecido pelo usuário.
-        Extraia as informações e retorne APENAS um objeto JSON válido com as chaves:
-        "value" (Número), "documentType" (String), "payer" (String), "receiver" (String), "baseDescription" (String, um resumo curto e objetivo da transação, como "Pagamento PIX para [Nome do Recebedor]"), "categoryName" (String).
-        A "categoryName" DEVE ser uma das seguintes opções: [${categoryList}].
-        Contexto do usuário (use para definir a categoria E para enriquecer a descrição, se relevante): "${userText || 'Nenhum'}"
-      `;
+      finalImageBuffer = convertedImage;
     }
     
+    const categories = await Category.findAll({ attributes: ['name'] });
+    const categoryList = `"${categories.map(c => c.name).join('", "')}"`;
+    const base64Image = finalImageBuffer.toString('base64');
+    
+    const prompt = `
+      Sua tarefa é analisar a imagem de um documento financeiro e um texto complementar fornecido pelo usuário.
+      Extraia as informações e retorne APENAS um objeto JSON válido com as chaves:
+      "value" (Número), "documentType" (String), "payer" (String), "receiver" (String), "baseDescription" (String), "categoryName" (String).
+      A "categoryName" DEVE ser uma das seguintes opções: [${categoryList}].
+      Contexto do usuário (use para definir a categoria): "${userText || 'Nenhum'}"
+    `;
+
     try {
       const response = await openai.chat.completions.create({
         model: 'gpt-4o',
@@ -150,14 +119,14 @@ class AIService {
           role: 'user',
           content: [
             { type: 'text', text: prompt },
-            ...imageContent
+            { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${base64Image}` } },
           ],
         }],
         response_format: { type: "json_object" },
       });
 
       const result = JSON.parse(response.choices[0].message.content);
-      logger.info(`[AIService] Análise detalhada concluída. Páginas analisadas: ${imageContent.length}.`, result);
+      logger.info('[AIService] Análise detalhada concluída.', result);
       return this._validateAnalysisResult(result, categories.map(c => c.name));
     } catch (error) {
       logger.error('[AIService] Erro na análise detalhada:', error);

@@ -21,5 +21,4 @@ router.use('/groups', authMiddleware, groupRoutes);
 router.use('/dashboard', authMiddleware, dashboardRoutes);
 router.use('/categories', authMiddleware, categoryRoutes);
 router.use('/users', authMiddleware, userRoutes); // <<< ADICIONAR
-
 module.exports = router;

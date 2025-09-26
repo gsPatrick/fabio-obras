@@ -30,7 +30,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ alter: true }); // Mantenha o alter: true
+      await db.sequelize.sync({ force: true }); // Mantenha o alter: true
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedCategories();
       await this.seedAdminUser(); // <<< ADICIONAR CHAMADA

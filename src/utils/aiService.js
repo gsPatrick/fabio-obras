@@ -8,8 +8,9 @@ const { Category } = require('../models');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-// <<< MUDANÇA 1: Importamos a nova biblioteca >>>
-const Poppler = require('node-poppler');
+
+// <<< MUDANÇA: Corrigimos a forma de importar a biblioteca >>>
+const { Poppler } = require('node-poppler');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -41,11 +42,11 @@ class AIService {
 
   /**
    * Converte um buffer de PDF na primeira página como um buffer de imagem JPEG.
-   * <<< MUDANÇA 2: Lógica totalmente reescrita para usar node-poppler >>>
    */
   async _convertPdfToImage(pdfBuffer) {
     logger.info('[AIService] PDF detectado. Iniciando conversão com node-poppler...');
-    const poppler = new Poppler();
+    // Agora que a importação está correta, esta linha vai funcionar
+    const poppler = new Poppler(); 
     const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
     const tempOutputPath = path.join(os.tmpdir(), `img-${Date.now()}`);
 
@@ -84,7 +85,6 @@ class AIService {
 
   /**
    * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
-   * (O restante do arquivo permanece o mesmo)
    */
   async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg') {
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);

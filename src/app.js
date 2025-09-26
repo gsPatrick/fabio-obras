@@ -27,7 +27,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: false });
+      await db.sequelize.sync({ force: true });
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedCategories();
     } catch (error) {

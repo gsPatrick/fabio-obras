@@ -22,18 +22,18 @@ class App {
     this.startPendingExpenseWorker();
   }
 
-  middlewares() {
-    this.server.use(cors({
-        origin: process.env.FRONTEND_URL || 'http://localhost:3000', 
-        credentials: true
-    }));
-    this.server.use(express.json());
-    this.server.use(cookieParser());
-  }
+middlewares() {
+  // Libera CORS para qualquer origem e permite envio de cookies/headers
+  this.server.use(cors({
+    origin: '*',         // <<< Permite todas as origens
+    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+    allowedHeaders: ['Content-Type','Authorization'],
+    credentials: false    // se precisar enviar cookies, troque para true
+  }));
 
-  routes() {
-    this.server.use(mainRouter);
-  }
+  this.server.use(express.json());
+  this.server.use(cookieParser());
+}
 
   async connectAndSeedDatabase() {
     try {

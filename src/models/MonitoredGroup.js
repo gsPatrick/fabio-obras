@@ -1,3 +1,4 @@
+// src/models/MonitoredGroup.js
 const { Model, DataTypes } = require('sequelize');
 
 class MonitoredGroup extends Model {
@@ -6,7 +7,7 @@ class MonitoredGroup extends Model {
       group_id: {
         type: DataTypes.STRING,
         allowNull: false,
-        unique: true,
+        // <<< MUDANÇA: A linha 'unique: true' foi movida para o objeto de opções abaixo >>>
         comment: 'ID do grupo no formato da Z-API (ex: 120363...@g.us)'
       },
       name: {
@@ -21,6 +22,14 @@ class MonitoredGroup extends Model {
       sequelize,
       modelName: 'MonitoredGroup',
       tableName: 'monitored_groups',
+      // <<< MUDANÇA: Adicionamos um índice para garantir a unicidade >>>
+      // Isso gera um SQL mais compatível com o PostgreSQL durante o 'sync'
+      indexes: [
+        {
+          unique: true,
+          fields: ['group_id']
+        }
+      ]
     });
   }
 }

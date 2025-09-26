@@ -11,7 +11,7 @@ const excelService = require('../../utils/excelService');
 const fs = require('fs');
 const path = require('path');
 const { startOfMonth, format } = require('date-fns');
-// MUDANÇA: Importar ptBR de forma mais robusta para lidar com exports CommonJS/ESM
+// MUDANÇA CORRIGIDA: Importa diretamente o objeto de localidade ptBR
 const ptBR = require('date-fns/locale/pt-BR');
 
 

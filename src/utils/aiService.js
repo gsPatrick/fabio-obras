@@ -8,6 +8,7 @@ const { Category } = require('../models');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { File } = require('node:buffer'); // <<< ADICIONE ESTA LINHA
 
 // <<< MUDANÇA: Corrigimos a forma de importar a biblioteca >>>
 const { Poppler } = require('node-poppler');

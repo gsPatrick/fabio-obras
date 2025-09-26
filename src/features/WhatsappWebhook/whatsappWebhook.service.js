@@ -82,11 +82,10 @@ class WebhookService {
    * ETAPA 2: Lida com a chegada de texto/áudio.
    * Verifica se é um contexto para uma mídia pendente ou uma resposta numérica para edição.
    */
-  async handleContextArrival(payload) {
+ async handleContextArrival(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
 
-    // Procura por uma mídia deste usuário que está aguardando contexto.
     const pendingMedia = await PendingExpense.findOne({
       where: {
         participant_phone: participantPhone,
@@ -111,12 +110,32 @@ class WebhookService {
       }
       
       const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
+
       if (mediaBuffer && userContext) {
         const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype);
+        
+        // <<< INÍCIO DA CORREÇÃO >>>
         if (analysisResult) {
+          // Se a análise deu certo, continua o fluxo normal.
           return this.startValidationFlow(pendingMedia, analysisResult, userContext);
+        } else {
+          // Se a análise falhou (retornou null), informa o usuário e limpa a pendência.
+          logger.error(`[Webhook] A análise da IA falhou para a mídia de ${participantPhone}.`);
+          const errorMessage = `❌ Desculpe, não consegui analisar o documento. Por favor, tente enviar a imagem/PDF e a descrição novamente.`;
+          await whatsappService.sendWhatsappMessage(payload.phone, errorMessage);
+          await pendingMedia.destroy(); // Limpa a pendência para permitir uma nova tentativa
         }
+        // <<< FIM DA CORREÇÃO >>>
+
       }
+      // Adicionado um 'else' para o caso de um dos buffers falhar
+      else {
+          logger.error(`[Webhook] Falha ao baixar mídia ou transcrever áudio para ${participantPhone}.`);
+          const errorMessage = `❌ Ocorreu um erro ao processar o arquivo ou o áudio. Por favor, tente novamente.`;
+          await whatsappService.sendWhatsappMessage(payload.phone, errorMessage);
+          await pendingMedia.destroy();
+      }
+
     } else {
       // Se não era um contexto, pode ser uma resposta para edição.
       const textMessage = payload.text ? payload.text.message : null;

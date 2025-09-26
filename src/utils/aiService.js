@@ -2,10 +2,10 @@
 'use strict';
 
 // ===================================================================
-// <<< ADIÇÃO IMPORTANTE PARA CORRIGIR O ERRO DE TRANSCRIÇÃO >>>
-// Esta linha importa a classe 'File' que a biblioteca da OpenAI precisa.
+// <<< SOLUÇÃO DEFINITIVA PARA O ERRO DE TRANSCRIÇÃO >>>
+// Define a classe 'File' no escopo global para a biblioteca da OpenAI.
 // ===================================================================
-const { File } = require('node:buffer');
+globalThis.File = require('node:buffer').File;
 
 require('dotenv').config();
 const OpenAI = require('openai');
@@ -32,7 +32,6 @@ class AIService {
       const tempFilePath = path.join(os.tmpdir(), `audio-${Date.now()}.ogg`);
       fs.writeFileSync(tempFilePath, audioBuffer);
 
-      // A biblioteca da OpenAI agora pode encontrar a classe 'File' importada acima
       const transcription = await openai.audio.transcriptions.create({
         file: fs.createReadStream(tempFilePath),
         model: 'whisper-1',

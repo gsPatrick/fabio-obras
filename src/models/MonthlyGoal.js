@@ -1,6 +1,7 @@
 // src/models/MonthlyGoal.js
 
 const { Model, DataTypes } = require('sequelize');
+const { Op } = require('sequelize'); // <<< IMPORTAÇÃO NECESSÁRIA
 
 class MonthlyGoal extends Model {
   static init(sequelize) {
@@ -37,7 +38,7 @@ class MonthlyGoal extends Model {
           fields: ['profile_id', 'category_id'],
           where: {
             // Aplica a unicidade da meta por categoria apenas se category_id for não nulo
-            category_id: { [require('sequelize').Op.ne]: null }
+            category_id: { [Op.ne]: null }
           }
         }
       ]

@@ -7,7 +7,6 @@ class MonitoredGroup extends Model {
       group_id: {
         type: DataTypes.STRING,
         allowNull: false,
-        // <<< MUDANÇA: A linha 'unique: true' foi movida para o objeto de opções abaixo >>>
         comment: 'ID do grupo no formato da Z-API (ex: 120363...@g.us)'
       },
       name: {
@@ -22,15 +21,20 @@ class MonitoredGroup extends Model {
       sequelize,
       modelName: 'MonitoredGroup',
       tableName: 'monitored_groups',
-      // <<< MUDANÇA: Adicionamos um índice para garantir a unicidade >>>
-      // Isso gera um SQL mais compatível com o PostgreSQL durante o 'sync'
+      // MUDANÇA: O índice de unicidade será no par (group_id, profile_id)
       indexes: [
         {
           unique: true,
-          fields: ['group_id']
+          fields: ['group_id', 'profile_id'] // Adicionando profile_id
         }
       ]
     });
+  }
+  
+  static associate(models) {
+    // MUDANÇA: Associação 1:1 com Profile (o Profile tem 1 grupo monitorado)
+    // O Profile vai ser o 'dono' do MonitoredGroup.
+    this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' }); 
   }
 }
 

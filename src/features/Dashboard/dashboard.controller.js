@@ -4,7 +4,8 @@ class DashboardController {
   // GET /dashboard/kpis?period=monthly&...
   async getKPIs(req, res) {
     try {
-      const data = await dashboardService.getKPIs(req.query);
+      // Passa req.profileId para o service para filtrar os dados
+      const data = await dashboardService.getKPIs(req.query, req.profileId);
       res.status(200).json(data);
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -14,7 +15,8 @@ class DashboardController {
   // GET /dashboard/charts?period=monthly&...
   async getChartData(req, res) {
     try {
-      const data = await dashboardService.getChartData(req.query);
+      // Passa req.profileId para o service para filtrar os dados
+      const data = await dashboardService.getChartData(req.query, req.profileId);
       res.status(200).json(data);
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -24,7 +26,8 @@ class DashboardController {
   // GET /dashboard/expenses?page=1&limit=20&...
   async getDetailedExpenses(req, res) {
     try {
-      const data = await dashboardService.getDetailedExpenses(req.query);
+      // Passa req.profileId para o service para filtrar os dados
+      const data = await dashboardService.getDetailedExpenses(req.query, req.profileId);
       res.status(200).json(data);
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -34,7 +37,8 @@ class DashboardController {
   // PUT /dashboard/expenses/:id
   async updateExpense(req, res) {
     try {
-      const expense = await dashboardService.updateExpense(req.params.id, req.body);
+      // Passa req.profileId para o service para garantir que a despesa pertence ao perfil
+      const expense = await dashboardService.updateExpense(req.params.id, req.body, req.profileId);
       res.status(200).json(expense);
     } catch (error) {
       res.status(404).json({ error: error.message });
@@ -44,7 +48,8 @@ class DashboardController {
   // DELETE /dashboard/expenses/:id
   async deleteExpense(req, res) {
     try {
-      const result = await dashboardService.deleteExpense(req.params.id);
+      // Passa req.profileId para o service para garantir que a despesa pertence ao perfil
+      const result = await dashboardService.deleteExpense(req.params.id, req.profileId);
       res.status(200).json(result);
     } catch (error) {
       res.status(404).json({ error: error.message });
@@ -54,7 +59,8 @@ class DashboardController {
   // POST /dashboard/revenues
   async createRevenue(req, res) {
     try {
-      const revenue = await dashboardService.createRevenue(req.body);
+      // Passa req.profileId para o service para associar a receita ao perfil
+      const revenue = await dashboardService.createRevenue(req.body, req.profileId);
       res.status(201).json(revenue);
     } catch (error) {
       res.status(400).json({ error: error.message });

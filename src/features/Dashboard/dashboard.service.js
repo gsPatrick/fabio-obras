@@ -1,17 +1,32 @@
 // src/features/Dashboard/dashboard.service.js
-const { Expense, Category, Revenue, sequelize } = require('../../models');
+const { Expense, Category, Revenue, MonthlyGoal, sequelize } = require('../../models');
 const { Op } = require('sequelize');
 const { parseISO, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfQuarter, endOfQuarter, startOfYear, endOfYear, subDays, eachDayOfInterval, format } = require('date-fns');
 
 class DashboardService {
 
   // ===================================================================
-  // 1. ENDPOINT DE KPIs (NÚMEROS PRINCIPAIS)
+  // 1. ENDPOINT DE KPIs (NÚMEROS PRINCIPAIS) - COM ALERTA DE META
   // ===================================================================
-  async getKPIs(filters) {
+  async getKPIs(filters, profileId) {
+    if (!profileId) throw new Error('ID do Perfil é obrigatório.');
+      
     const { whereClause: expenseWhere } = this._buildWhereClause(filters);
+    
+    // Sobrescreve o período para o MÊS CORRENTE para o cálculo da meta
+    const now = new Date();
+    const startOfCurrentMonth = startOfMonth(now);
+    const endOfCurrentMonth = endOfMonth(now);
+    
+    const monthlyExpenseWhere = { 
+        profile_id: profileId,
+        expense_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } 
+    };
+    
+    // --- Cálculo de KPIs (baseado no filtro fornecido) ---
+    expenseWhere.profile_id = profileId;
 
-    const revenueWhere = {};
+    const revenueWhere = { profile_id: profileId };
     if (expenseWhere.expense_date) {
         revenueWhere.revenue_date = expenseWhere.expense_date;
     }
@@ -36,20 +51,68 @@ class DashboardService {
         total: parseFloat(expensesByCategory[0].total)
     } : { name: 'N/A', total: 0 };
     
+    // --- Lógica de Meta Mensal (baseado no MÊS CORRENTE) ---
+    const currentMonthExpenses = await Expense.sum('value', { where: monthlyExpenseWhere });
+    const totalGoal = await MonthlyGoal.findOne({ where: { profile_id: profileId, is_total_goal: true, category_id: null } });
+
+    const goalAlert = this._calculateGoalAlert(currentMonthExpenses, totalGoal);
+    
     return {
         totalExpenses: totalExpenses || 0,
         totalRevenues: totalRevenues || 0,
         balance: (totalRevenues || 0) - (totalExpenses || 0),
         expenseCount: await Expense.count({ where: expenseWhere }),
         highestCategory,
+        goalAlert, // NOVO CAMPO
     };
 }
 
   // ===================================================================
+  // LÓGICA INTERNA: CÁLCULO DE ALERTA DE META
+  // ===================================================================
+  _calculateGoalAlert(currentExpenses, totalGoal) {
+    if (!totalGoal) return null;
+
+    const goalValue = parseFloat(totalGoal.value);
+    if (goalValue <= 0) return null;
+    
+    const percentage = (currentExpenses / goalValue) * 100;
+    
+    // Define os limites de alerta conforme pedido (70, 80, 90, 100, 110)
+    const limits = [70, 80, 90, 100, 110];
+    let alertMessage = null;
+    
+    for (const limit of limits) {
+        if (percentage >= limit && percentage < limit + 10) { // Verifica o intervalo 70-79.99, 80-89.99 etc.
+            alertMessage = `Atenção: Você atingiu ${limit}% da sua meta mensal de custo total!`;
+            break; 
+        } else if (percentage >= 110) {
+            alertMessage = `ALERTA CRÍTICO: Você excedeu em mais de 10% a sua meta mensal de custo total!`;
+            break;
+        }
+    }
+    
+    if (alertMessage) {
+        return {
+            message: alertMessage,
+            percentage: parseFloat(percentage.toFixed(2)),
+            currentExpenses: currentExpenses,
+            goalValue: goalValue,
+            status: percentage < 100 ? 'warning' : 'critical'
+        };
+    }
+    
+    return null;
+  }
+  
+  // ===================================================================
   // 2. ENDPOINT PARA GRÁFICOS
   // ===================================================================
-  async getChartData(filters) {
+  async getChartData(filters, profileId) {
+    if (!profileId) throw new Error('ID do Perfil é obrigatório.');
+
     const { whereClause, startDate, endDate } = this._buildWhereClause(filters);
+    whereClause.profile_id = profileId; // FILTRO POR PERFIL
 
     const expensesByCategory = await Expense.findAll({
       where: whereClause,
@@ -87,8 +150,11 @@ class DashboardService {
   // ===================================================================
   // 3. ENDPOINT PARA RELATÓRIOS (LISTA DETALHADA COM FILTROS)
   // ===================================================================
-  async getDetailedExpenses(filters) {
+  async getDetailedExpenses(filters, profileId) {
+    if (!profileId) throw new Error('ID do Perfil é obrigatório.');
+      
     const { whereClause, limit, offset } = this._buildWhereClause(filters);
+    whereClause.profile_id = profileId; // FILTRO POR PERFIL
 
     const { count, rows } = await Expense.findAndCountAll({
       where: whereClause,
@@ -106,8 +172,11 @@ class DashboardService {
     };
   }
 
-  async getAllExpenses() {
+  async getAllExpenses(profileId) {
+    if (!profileId) throw new Error('ID do Perfil é obrigatório.');
+      
     return Expense.findAll({
+      where: { profile_id: profileId }, // FILTRO POR PERFIL
       include: [{ model: Category, as: 'category', attributes: ['name'] }],
       order: [['expense_date', 'DESC']],
     });
@@ -116,22 +185,23 @@ class DashboardService {
   // ===================================================================
   // 4. ENDPOINTS CRUD (CRIAR, ATUALIZAR, DELETAR)
   // ===================================================================
-  async updateExpense(id, data) {
-    const expense = await Expense.findByPk(id);
-    if (!expense) throw new Error('Despesa não encontrada');
+  async updateExpense(id, data, profileId) {
+    const expense = await Expense.findOne({ where: { id, profile_id: profileId } }); // FILTRO POR PERFIL
+    if (!expense) throw new Error('Despesa não encontrada ou não pertence ao perfil');
     await expense.update(data);
     return expense;
   }
   
-  async deleteExpense(id) {
-    const expense = await Expense.findByPk(id);
-    if (!expense) throw new Error('Despesa não encontrada');
+  async deleteExpense(id, profileId) {
+    const expense = await Expense.findOne({ where: { id, profile_id: profileId } }); // FILTRO POR PERFIL
+    if (!expense) throw new Error('Despesa não encontrada ou não pertence ao perfil');
     await expense.destroy();
     return { message: 'Despesa deletada com sucesso' };
   }
   
-  async createRevenue(data) {
-    return Revenue.create(data);
+  async createRevenue(data, profileId) {
+    if (!profileId) throw new Error('ID do Perfil é obrigatório.');
+    return Revenue.create({ ...data, profile_id: profileId }); // INSERIR profile_id
   }
 
   // ===================================================================

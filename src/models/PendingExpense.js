@@ -40,15 +40,11 @@ class PendingExpense extends Model {
         allowNull: true, // Pode ser nulo para pendências antigas ou sem anexo
         comment: 'O mimeType do anexo (ex: application/pdf).',
       },
-      // ===================================================================
-      // <<< ADICIONE ESTE CAMPO para vincular à despesa real >>>
-      // ===================================================================
       expense_id: {
         type: DataTypes.INTEGER,
         allowNull: true, // Será nulo apenas no estado 'awaiting_context'
         comment: 'ID da despesa já criada no sistema.',
       },
-      // ===================================================================
       status: {
         type: DataTypes.ENUM('awaiting_context', 'awaiting_validation', 'awaiting_category_reply'),
         defaultValue: 'awaiting_context', // O novo estado inicial
@@ -63,8 +59,8 @@ class PendingExpense extends Model {
 
   static associate(models) {
     this.belongsTo(models.Category, { foreignKey: 'suggested_category_id', as: 'suggestedCategory' });
-    // <<< NOVA ASSOCIAÇÃO: Para a despesa real já criada >>>
     this.belongsTo(models.Expense, { foreignKey: 'expense_id', as: 'expense' });
+    this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' }); // <<< NOVO: Associação ao Perfil
   }
 }
 

@@ -1,3 +1,5 @@
+// src/models/Expense.js
+
 const { Model, DataTypes } = require('sequelize');
 
 class Expense extends Model {
@@ -30,6 +32,7 @@ class Expense extends Model {
   static associate(models) {
     this.belongsTo(models.Category, { foreignKey: 'category_id', as: 'category' });
     this.hasMany(models.Attachment, { foreignKey: 'expense_id', as: 'attachments' });
+    this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' }); // <<< NOVO: Associação ao Perfil
   }
 }
 

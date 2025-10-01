@@ -9,7 +9,6 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// <<< MUDANÇA: Corrigimos a forma de importar a biblioteca >>>
 const { Poppler } = require('node-poppler');
 
 const openai = new OpenAI({
@@ -45,7 +44,6 @@ class AIService {
    */
   async _convertPdfToImage(pdfBuffer) {
     logger.info('[AIService] PDF detectado. Iniciando conversão com node-poppler...');
-    // Agora que a importação está correta, esta linha vai funcionar
     const poppler = new Poppler(); 
     const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
     const tempOutputPath = path.join(os.tmpdir(), `img-${Date.now()}`);
@@ -80,6 +78,68 @@ class AIService {
       if (fs.existsSync(tempPdfPath)) fs.unlinkSync(tempPdfPath);
       const imagePath = `${tempOutputPath}-1.jpg`;
       if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
+    }
+  }
+
+  /**
+   * Analisa um arquivo XLSX (em formato CSV String) para extrair despesas e categorizá-las.
+   * @param {string} csvString - O conteúdo da planilha em formato CSV String (Separador: |).
+   * @param {Array<string>} categoryList - Lista de nomes de categorias válidas.
+   * @returns {Promise<string>} - String JSON com os dados normalizados ou motivo da falha.
+   */
+  async analyzeExcelStructureAndExtractData(csvString, categoryList) {
+    logger.info('[AIService] Iniciando análise de estrutura de planilha...');
+    
+    const categoryNames = categoryList.map(c => c.trim()).filter(c => c.length > 0);
+    const categoryOptions = `"${categoryNames.join('", "')}"`;
+
+    const prompt = `
+      Sua tarefa é analisar a planilha CSV (separada por pipe '|') fornecida, identificar a estrutura (quais colunas representam Valor, Data, Descrição e Categoria) e extrair os dados de despesa.
+      
+      Regras CRÍTICAS:
+      1.  A "categoryName" DEVE ser mapeada para uma das categorias existentes: [${categoryOptions}]. Se não houver correspondência clara, use "Outros".
+      2.  A "value" deve ser um número (ex: 150.50), sem símbolos de moeda.
+      3.  A "date" deve ser convertida para o formato 'YYYY-MM-DD' ou 'YYYY-MM-DDTHH:MM:SSZ' (formato ISO 8601).
+      4.  Retorne APENAS um objeto JSON.
+      
+      Estrutura do retorno JSON:
+      {
+          "expenses": [
+              {
+                  "value": number,
+                  "date": "YYYY-MM-DD",
+                  "description": "string",
+                  "categoryName": "string (da lista fornecida)"
+              }
+              // ... mais despesas
+          ],
+          "reason": "string (motivo da falha se 'expenses' estiver vazio, ex: 'Nenhuma coluna de valor identificada')"
+      }
+      
+      Planilha CSV (Separador '|'):
+      --- PLANILHA INÍCIO ---
+      ${csvString}
+      --- PLANILHA FIM ---
+    `;
+
+    try {
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o', // Modelo avançado para análise complexa
+        messages: [{
+          role: 'user',
+          content: [{ type: 'text', text: prompt }],
+        }],
+        response_format: { type: "json_object" },
+        temperature: 0.1, // Manter baixa para extração de dados
+      });
+
+      const resultString = response.choices[0].message.content;
+      logger.info('[AIService] Análise de planilha concluída.');
+      return resultString; // Retorna a string JSON para ser validada e parsed no serviço
+    } catch (error) {
+      logger.error('[AIService] Erro na análise de planilha:', error);
+      // Retorna um JSON de erro para o serviço lidar
+      return JSON.stringify({ expenses: [], reason: `Erro na comunicação com a IA: ${error.message}` });
     }
   }
 

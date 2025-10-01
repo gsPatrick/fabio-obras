@@ -1,3 +1,5 @@
+// src/models/Revenue.js
+
 const { Model, DataTypes } = require('sequelize');
 
 class Revenue extends Model {
@@ -21,6 +23,10 @@ class Revenue extends Model {
       modelName: 'Revenue',
       tableName: 'revenues',
     });
+  }
+  
+  static associate(models) { // <<< ADICIONADO static associate
+      this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' }); // <<< NOVO: Associação ao Perfil
   }
 }
 

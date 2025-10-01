@@ -8,6 +8,7 @@ const Revenue = require('./Revenue');
 const MonitoredGroup = require('./MonitoredGroup');
 const PendingExpense = require('./PendingExpense'); // <<< IMPORTAR O NOVO MODEL
 const User = require('./User'); // <<< ADICIONAR IMPORT
+const Profile = require('./Profile'); // <<< IMPORTAR NOVO MODEL
 
 const models = [
   Category,
@@ -16,7 +17,8 @@ const models = [
   Revenue,
   MonitoredGroup,
   PendingExpense,
-  User
+  User,
+  Profile // <<< ADICIONAR NOVO MODEL
 ];
 
 class Database {

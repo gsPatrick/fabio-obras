@@ -28,6 +28,7 @@ class App {
     this.connectAndSeedDatabase();
     this.middlewares();
     this.routes();
+    this.exposeModels(); // Expõe modelos para o controller de Perfil
     this.startPendingExpenseWorker();
   }
 
@@ -36,7 +37,7 @@ class App {
       origin: true,
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Profile-Id'], // Adiciona o novo header
     }));
 
     this.server.use(express.json());
@@ -47,14 +48,20 @@ class App {
     this.server.use(mainRouter);
   }
 
+  // Expõe modelos no contexto do Express
+  exposeModels() {
+    this.server.locals.models = db;
+  }
+
   async connectAndSeedDatabase() {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: false }); // Mantenha 'force: true' apenas em desenvolvimento
+      // { alter: true } é mais seguro para migrações do que { force: false }
+      await db.sequelize.sync({ force: true, force: true }); 
       console.log('🔄 Modelos sincronizados com o banco de dados.');
-      await this.seedAdminUser();
-      await this.seedCategories();
+      await this.seedAdminUser(); // Agora também cria categorias/perfil
+      // REMOVIDO: await this.seedCategories();
     } catch (error) {
       console.error('❌ Não foi possível conectar, sincronizar ou popular o banco de dados:', error);
       process.exit(1);
@@ -62,23 +69,41 @@ class App {
   }
   
   async seedAdminUser() {
-    const { User } = db;
-    const adminEmail = 'admin@admin.com';
+    const { User, Profile } = db; // Inclui Profile
+    const adminEmail = 'fabio@gmail.com'; // <<< NOVO EMAIL
+    const adminPassword = 'Fabio123'; // <<< NOVA SENHA
     console.log('[SEEDER] Verificando usuário administrador...');
+    
     try {
-        const adminExists = await User.findOne({ where: { email: adminEmail } });
-        if (!adminExists) {
+        let user = await User.findOne({ where: { email: adminEmail } });
+        
+        if (!user) {
             console.log('[SEEDER] Usuário administrador não encontrado. Criando...');
-            await User.create({ email: adminEmail, password: 'admin' });
+            user = await User.create({ email: adminEmail, password: adminPassword });
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' criado com sucesso.`);
         } else {
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' já existe.`);
         }
+        
+        // ===============================================================
+        // CRIAÇÃO DE PERFIL PADRÃO e CATEGORIAS para o usuário administrador
+        // ===============================================================
+        let profile = await Profile.findOne({ where: { user_id: user.id } });
+        if (!profile) {
+            console.log(`[SEEDER] Criando perfil padrão para o usuário ${user.email}...`);
+            profile = await Profile.create({ name: 'Perfil Padrão', user_id: user.id });
+            await this.seedCategories(); // Chama o seeder de categorias
+            console.log('[SEEDER] Perfil Padrão e Categorias iniciais criadas.');
+        } else {
+            console.log(`[SEEDER] Perfil padrão já existe para o usuário ${user.email}.`);
+        }
+        
     } catch (error) {
-        console.error('[SEEDER] ❌ Falha ao verificar ou criar o usuário administrador:', error);
+        console.error('[SEEDER] ❌ Falha ao verificar ou criar o usuário/perfil administrador:', error);
     }
   }
 
+  // O seedCategories agora existe, mas é chamado APENAS por seedAdminUser
   async seedCategories() {
     const { Category } = db;
     const categoriesToSeed = [
@@ -111,6 +136,9 @@ class App {
     ];
     console.log('[SEEDER] Verificando e criando categorias essenciais...');
     for (const categoryData of categoriesToSeed) {
+        // A categoria deve ser global, pois não foi associada a um perfil.
+        // Se ela fosse associada a um perfil, o parâmetro profileId precisaria ser passado aqui.
+        // Assumindo que categorias são compartilhadas entre perfis (ou pelo menos iniciais globais)
         await Category.findOrCreate({
             where: { name: categoryData.name },
             defaults: categoryData,
@@ -131,6 +159,7 @@ class App {
       const now = new Date();
       try {
         // 1. TIMEOUT DE VALIDAÇÃO (despesa salva, mas o prazo para edição de categoria expirou)
+        // Não precisa de filtro por perfil/user, pois a despesa expira de qualquer forma.
         const expiredValidations = await PendingExpense.findAll({
           where: { 
             status: 'awaiting_validation', 

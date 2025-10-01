@@ -1,11 +1,20 @@
-// src/middleware/auth.middleware.js - VERSÃO ATUALIZADA
+// src/middleware/auth.middleware.js - VERSÃO COM EXCEÇÕES CORRIGIDAS
 
 const jwt = require('jsonwebtoken');
 const { User, Profile } = require('../models');
 
 module.exports = async (req, res, next) => {
   const authHeader = req.headers.authorization;
-  const profileId = req.headers['x-profile-id']; // <<< NOVO HEADER
+  const profileId = req.headers['x-profile-id']; // NOVO HEADER
+  const originalUrl = req.originalUrl;
+  
+  // Rotas que SÓ PRECISAM de JWT, mas NÃO de X-Profile-Id (Ex: buscar dados do user, listar perfis)
+  const PROFILE_REQUIRED_EXCEPTIONS = [
+    '/profiles',
+    '/users/me'
+  ];
+
+  const requiresProfile = !PROFILE_REQUIRED_EXCEPTIONS.some(path => originalUrl.startsWith(path));
 
   if (!authHeader) {
     return res.status(401).json({ error: 'Acesso negado. Nenhum token fornecido.' });
@@ -29,27 +38,25 @@ module.exports = async (req, res, next) => {
     }
 
     // ===================================================================
-    // <<< NOVO: Validação e Contexto do Perfil >>>
+    // CRÍTICO: NOVO: Validação e Contexto do Perfil
     // ===================================================================
-    if (!profileId) {
-        // Permitimos que a rota /profiles continue sem profileId (para listagem/criação)
-        if (req.originalUrl.includes('/profiles')) {
-            return next();
+    if (requiresProfile) {
+        if (!profileId) {
+            return res.status(400).json({ error: 'Header X-Profile-Id obrigatório para esta operação.' });
         }
-        return res.status(400).json({ error: 'Header X-Profile-Id obrigatório para esta operação.' });
-    }
 
-    const profile = await Profile.findOne({ where: { id: profileId, user_id: req.userId } });
-    if (!profile) {
-        return res.status(403).json({ error: 'Perfil inválido ou não pertence a este usuário.' });
+        const profile = await Profile.findOne({ where: { id: profileId, user_id: req.userId } });
+        if (!profile) {
+            return res.status(403).json({ error: 'Perfil inválido ou não pertence a este usuário.' });
+        }
+        
+        req.profileId = profile.id; // Anexa o ID do perfil à requisição
     }
-    
-    req.profileId = profile.id; // Anexa o ID do perfil à requisição
+    // Se não for necessário (requiresProfile=false), apenas avança com req.userId
     // ===================================================================
 
     return next();
   } catch (error) {
-    // Se o erro for de validação de perfil (400/403), ele já foi tratado. Se for de JWT, cai aqui.
     if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
         return res.status(401).json({ error: 'Token inválido ou expirado.' });
     }

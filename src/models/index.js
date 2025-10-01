@@ -1,3 +1,5 @@
+// src/models/index.js
+
 const Sequelize = require('sequelize');
 const dbConfig = require('../config/database');
 
@@ -6,10 +8,11 @@ const Expense = require('./Expense');
 const Attachment = require('./Attachment');
 const Revenue = require('./Revenue');
 const MonitoredGroup = require('./MonitoredGroup');
-const PendingExpense = require('./PendingExpense'); 
+const PendingExpense = require('./PendingExpense');
 const User = require('./User'); 
 const Profile = require('./Profile'); 
-const MonthlyGoal = require('./MonthlyGoal'); // <<< IMPORTAR NOVO MODEL
+const MonthlyGoal = require('./MonthlyGoal');
+const Subscription = require('./Subscription'); // <<< NOVO
 
 const models = [
   Category,
@@ -19,8 +22,9 @@ const models = [
   MonitoredGroup,
   PendingExpense,
   User,
-  Profile, // <<< ADICIONAR NOVO MODEL
-  MonthlyGoal // <<< ADICIONAR NOVO MODEL
+  Profile,
+  MonthlyGoal,
+  Subscription // <<< ADICIONAR NOVO
 ];
 
 class Database {

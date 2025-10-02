@@ -12,7 +12,7 @@ const { Poppler } = require('node-poppler');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 60 * 1000, // 60 segundos
+  timeout: 60 * 1000, // 60 segundos para extração de planilha
 });
 
 class AIService {
@@ -88,26 +88,22 @@ class AIService {
    * @returns {Promise<string>} - String JSON com os dados normalizados ou motivo da falha.
    */
   async analyzeExcelStructureAndExtractData(csvString, categoryList) {
-    logger.info('[AIService] Iniciando análise de estrutura de planilha...');
+    logger.info('[AIService] Iniciando análise de estrutura de planilha universal...');
     
     const categoryNames = categoryList.map(c => c.trim()).filter(c => c.length > 0);
     const categoryOptions = `"${categoryNames.join('", "')}"`;
 
     const prompt = `
-      Sua tarefa é analisar a planilha CSV (separada por pipe '|') fornecida, que possui colunas desorganizadas de DATA, DESCRICAO e VALORES em colunas separadas (Ex: FABIO, CORREA, etc.).
+      Você é um especialista em análise de planilhas financeiras de CUSTOS (despesas). Sua missão é extrair dados de despesas de forma universal de uma planilha CSV (separada por pipe '|') desestruturada.
       
-      Você deve identificar as linhas de despesa, extrair os dados e consolidar as múltiplas colunas de valor em despesa(s) por linha de descrição.
+      Regras CRÍTICAS Universais:
+      1.  **Foco em Custos:** Ignore qualquer coluna ou valor que represente 'ENTRADA', 'RECEITA', ou valores positivos que não sejam despesas (a menos que a descrição indique um custo). **O sistema é APENAS para despesas.**
+      2.  **Identificação de Colunas:** A coluna de Valor de CUSTO é a que contém a maioria dos números monetários de SAÍDA. A coluna de Data é a que contém o formato de data mais consistente. A coluna de Descrição é a que possui o texto mais descritivo.
+      3.  **Consolidação de Despesas:** Para cada linha com uma DATA e DESCRIÇÃO, se houver um valor em UMA ou MAIS colunas de CUSTO, gere uma DESPESA SEPARADA para CADA valor de custo.
+      4.  **Descrição Final:** A descrição deve ser a DESCRIÇÃO ORIGINAL CONCATENADA com o NOME DO CABEÇALHO DA COLUNA DE CUSTO (Ex: 'COMPRA DE CIMENTO - FABIO').
+      5.  **Data:** Converta para o formato 'YYYY-MM-DD'. Use o ano atual (ou o ano mais provável, como 2024/2025) se o ano não estiver especificado (Ex: '12-abr.' -> '2025-04-12').
+      6.  **Categorização:** Mapeie para uma das categorias existentes: [${categoryOptions}]. Use "Outros" se não houver mapeamento claro.
       
-      Regras CRÍTICAS para Extração:
-      1.  Ignore linhas que NÃO POSSUEM uma descrição válida (coluna DESCRICAO) ou DATA.
-      2.  Ignore colunas de valor que se chamam 'ENTRADA' ou similares (considere apenas saídas de caixa/custos).
-      3.  Se uma linha (mesma DATA/DESCRICAO) tiver valores em MAIS DE UMA coluna (Ex: FABIO=X, CORREA=Y), trate cada valor de despesa como uma DESPESA SEPARADA, mas mantenha a mesma DATA e DESCRICAO base.
-      4.  A "categoryName" DEVE ser mapeada para uma das categorias existentes: [${categoryOptions}]. Se não houver correspondência clara, use "Outros".
-      5.  A "value" deve ser um número (ex: 150.50), sem símbolos de moeda.
-      6.  A "date" deve ser convertida para o formato 'YYYY-MM-DD' (Ex: '12-abr.' deve ser '2022-04-12'). Use 2022 como ano padrão se o ano não estiver na data, e a conversão deve ser fiel à data fornecida.
-      7.  A "description" deve ser a DESCRICAO original concatenada com o nome da coluna de valor, se houver (Ex: 'MO INICIO - FABIO').
-      8.  Retorne APENAS um objeto JSON.
-
       Estrutura do retorno JSON:
       {
           "expenses": [
@@ -119,7 +115,7 @@ class AIService {
               }
               // ... mais despesas
           ],
-          "reason": "string (motivo da falha se 'expenses' estiver vazio, ex: 'Nenhuma coluna de valor identificada')"
+          "reason": "string (motivo da falha se 'expenses' estiver vazio, ex: 'Nenhuma coluna de custo identificada')"
       }
       
       Planilha CSV (Separador '|'):
@@ -130,7 +126,7 @@ class AIService {
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o', 
+        model: 'gpt-3.5-turbo-0125', 
         messages: [{
           role: 'user',
           content: [{ type: 'text', text: prompt }],
@@ -146,12 +142,10 @@ class AIService {
     } catch (error) {
       logger.error('[AIService] Erro na análise de planilha:', error);
       
-      // Capturar Erro de Timeout da OpenAI ou HTTP Error
       if (error.status === 400 || error.status === 429) {
           return JSON.stringify({ expenses: [], reason: `Erro da API OpenAI. Código: ${error.status}` });
       }
       
-      // Em caso de TIMEOUT (sem status HTTP) ou erro de conexão
       return JSON.stringify({ expenses: [], reason: `Erro crítico de comunicação/timeout com a IA. Tente novamente.` });
     }
   }
@@ -210,8 +204,8 @@ class AIService {
 
   _validateAnalysisResult(result, categoryArray) {
     if (!result.categoryName || !categoryArray.includes(result.categoryName)) {
-      // Se a IA não retornou uma das categorias existentes, usa 'Outros' (que deve ser criado no seed)
       logger.warn(`[AIService] IA sugeriu categoria inválida/vazia ('${result.categoryName}'). Usando 'Outros'.`);
+      // O backend deve garantir que a categoria 'Outros' exista no perfil
       result.categoryName = 'Outros';
     }
     return result;

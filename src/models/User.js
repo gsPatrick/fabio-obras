@@ -12,17 +12,17 @@ class User extends Model {
         validate: {
           isEmail: true,
         },
-              whatsapp_phone: { // <<< NOVO CAMPO
+      }, // <<< FECHAR O OBJETO EMAIL AQUI
+      whatsapp_phone: { // <<< AGORA ESTÁ SEPARADO
         type: DataTypes.STRING,
-        allowNull: true, // Permitir nulo inicialmente
+        allowNull: true, 
         comment: 'Número de WhatsApp do usuário no formato DDI+DDD+Numero (ex: 5511987654321)'
-      }
       },
       password: {
         type: DataTypes.STRING,
         allowNull: false,
       },
-    }, {
+    }, { // <<< FECHAR O OBJETO DE CAMPOS AQUI
       sequelize,
       modelName: 'User',
       tableName: 'users',

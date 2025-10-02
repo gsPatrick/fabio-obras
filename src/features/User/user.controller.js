@@ -5,13 +5,15 @@ const subscriptionService = require('../../services/subscriptionService'); // Im
 class UserController {
     // Retorna os dados do usuário logado (útil para o front-end)
     async getMe(req, res) {
-        const user = await User.findByPk(req.userId, { attributes: ['id', 'email'] });
+        // Retornamos os atributos básicos, incluindo o whatsapp_phone para o frontend
+        const user = await User.findByPk(req.userId, { attributes: ['id', 'email', 'whatsapp_phone'] });
         res.status(200).json(user);
     }
     
     // Atualiza o usuário logado
     async updateMe(req, res) {
-        const { email, password } = req.body;
+        // Incluir whatsapp_phone no body para que o usuário possa atualizá-lo em Configurações
+        const { email, password, whatsappPhone } = req.body;
         
         try {
             const user = await User.findByPk(req.userId);
@@ -19,6 +21,8 @@ class UserController {
 
             if (email) user.email = email;
             if (password) user.password = password; // O hook irá criptografar
+            // CRÍTICO: Atualiza o número de WhatsApp
+            if (whatsappPhone) user.whatsapp_phone = whatsappPhone.replace(/[^0-9]/g, ''); // Limpa e salva o novo número
 
             await user.save();
             res.status(200).json({ message: 'Credenciais atualizadas com sucesso.' });
@@ -31,6 +35,7 @@ class UserController {
     async getSubscriptionStatus(req, res) {
         try {
             const userId = req.userId;
+            // O serviço retorna o status e a mensagem para o frontend
             const status = await subscriptionService.getSubscriptionStatus(userId);
             res.status(200).json(status);
         } catch (error) {

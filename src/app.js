@@ -58,7 +58,7 @@ class App {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
       // CORREÇÃO: Usar force: false e alter: true para migrações seguras
-      await db.sequelize.sync({ force: true, alter: true }); 
+      await db.sequelize.sync({ force: false, alter: false }); 
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser(); // Agora também cria categorias/perfil
     } catch (error) {

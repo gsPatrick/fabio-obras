@@ -8,11 +8,12 @@ const { Category } = require('../models');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-
 const { Poppler } = require('node-poppler');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
+  // Aumentar o timeout para requisições de IA mais complexas (como análise de planilha)
+  timeout: 60 * 1000, // 60 segundos
 });
 
 class AIService {
@@ -123,30 +124,38 @@ class AIService {
     `;
 
     try {
+      // Usar a configuração de timeout da instância do OpenAI
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o', // Modelo avançado para análise complexa
+        model: 'gpt-4o', 
         messages: [{
           role: 'user',
           content: [{ type: 'text', text: prompt }],
         }],
         response_format: { type: "json_object" },
-        temperature: 0.1, // Manter baixa para extração de dados
+        temperature: 0.1, 
       });
 
       const resultString = response.choices[0].message.content;
       logger.info('[AIService] Análise de planilha concluída.');
-      return resultString; // Retorna a string JSON para ser validada e parsed no serviço
+      return resultString; 
+      
     } catch (error) {
       logger.error('[AIService] Erro na análise de planilha:', error);
-      // Retorna um JSON de erro para o serviço lidar
-      return JSON.stringify({ expenses: [], reason: `Erro na comunicação com a IA: ${error.message}` });
+      
+      // Capturar Erro de Timeout da OpenAI ou HTTP Error
+      if (error.status === 400 || error.status === 429) {
+          return JSON.stringify({ expenses: [], reason: `Erro da API OpenAI. Código: ${error.status}` });
+      }
+      
+      // Em caso de TIMEOUT (sem status HTTP) ou erro de conexão
+      return JSON.stringify({ expenses: [], reason: `Erro crítico de comunicação/timeout com a IA. Tente novamente.` });
     }
   }
 
   /**
    * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
    */
-  async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg') {
+  async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg', profileId) { 
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);
     
     let finalImageBuffer = mediaBuffer;
@@ -160,7 +169,8 @@ class AIService {
       finalImageBuffer = convertedImage;
     }
     
-    const categories = await Category.findAll({ attributes: ['name'] });
+    // CRÍTICO: Buscar categorias APENAS para o Perfil
+    const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name'] }); 
     const categoryList = `"${categories.map(c => c.name).join('", "')}"`;
     const base64Image = finalImageBuffer.toString('base64');
     

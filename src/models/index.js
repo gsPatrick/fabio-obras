@@ -13,6 +13,8 @@ const User = require('./User');
 const Profile = require('./Profile'); 
 const MonthlyGoal = require('./MonthlyGoal');
 const Subscription = require('./Subscription'); // <<< NOVO
+const GuestUser = require('./GuestUser'); // <<< NOVO
+const GuestPermission = require('./GuestPermission'); // <<< NOVO
 
 const models = [
   Category,
@@ -24,7 +26,9 @@ const models = [
   User,
   Profile,
   MonthlyGoal,
-  Subscription // <<< ADICIONAR NOVO
+  Subscription,
+  GuestUser, // <<< ADICIONAR NOVO
+  GuestPermission // <<< ADICIONAR NOVO
 ];
 
 class Database {

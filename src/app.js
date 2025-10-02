@@ -57,11 +57,10 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      // { alter: true } é mais seguro para migrações do que { force: false }
-      await db.sequelize.sync({ force: true, force: true }); 
+      // CORREÇÃO: Usar force: false e alter: true para migrações seguras
+      await db.sequelize.sync({ force: false, alter: true }); 
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser(); // Agora também cria categorias/perfil
-      // REMOVIDO: await this.seedCategories();
     } catch (error) {
       console.error('❌ Não foi possível conectar, sincronizar ou popular o banco de dados:', error);
       process.exit(1);
@@ -70,8 +69,10 @@ class App {
   
   async seedAdminUser() {
     const { User, Profile } = db; // Inclui Profile
-    const adminEmail = 'fabio@gmail.com'; // <<< NOVO EMAIL
-    const adminPassword = 'Fabio123'; // <<< NOVA SENHA
+    const adminEmail = 'fabio@gmail.com'; 
+    const adminPassword = 'Fabio123'; 
+    // NOVO: Número do BOT/Admin sem formatação (DDI+DDD+Numero)
+    const adminWhatsappPhone = '5521983311000'; 
     console.log('[SEEDER] Verificando usuário administrador...');
     
     try {
@@ -79,9 +80,18 @@ class App {
         
         if (!user) {
             console.log('[SEEDER] Usuário administrador não encontrado. Criando...');
-            user = await User.create({ email: adminEmail, password: adminPassword });
+            user = await User.create({ 
+                email: adminEmail, 
+                password: adminPassword,
+                whatsapp_phone: adminWhatsappPhone // <<< SALVANDO O NÚMERO
+            });
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' criado com sucesso.`);
         } else {
+            // Se o usuário existe, garantir que o número de WhatsApp está atualizado
+            if (user.whatsapp_phone !== adminWhatsappPhone) {
+                 await user.update({ whatsapp_phone: adminWhatsappPhone });
+                 console.log(`[SEEDER] Número do administrador '${adminEmail}' atualizado.`);
+            }
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' já existe.`);
         }
         
@@ -136,9 +146,6 @@ class App {
     ];
     console.log('[SEEDER] Verificando e criando categorias essenciais...');
     for (const categoryData of categoriesToSeed) {
-        // A categoria deve ser global, pois não foi associada a um perfil.
-        // Se ela fosse associada a um perfil, o parâmetro profileId precisaria ser passado aqui.
-        // Assumindo que categorias são compartilhadas entre perfis (ou pelo menos iniciais globais)
         await Category.findOrCreate({
             where: { name: categoryData.name },
             defaults: categoryData,
@@ -159,7 +166,6 @@ class App {
       const now = new Date();
       try {
         // 1. TIMEOUT DE VALIDAÇÃO (despesa salva, mas o prazo para edição de categoria expirou)
-        // Não precisa de filtro por perfil/user, pois a despesa expira de qualquer forma.
         const expiredValidations = await PendingExpense.findAll({
           where: { 
             status: 'awaiting_validation', 
@@ -171,8 +177,6 @@ class App {
         for (const pending of expiredValidations) {
           console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
           
-          // MUDANÇA: A mensagem de confirmação final foi removida.
-          // A despesa já está salva, apenas limpamos a pendência.
           await pending.destroy(); 
         }
 

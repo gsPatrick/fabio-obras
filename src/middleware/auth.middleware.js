@@ -5,13 +5,14 @@ const { User, Profile } = require('../models');
 
 module.exports = async (req, res, next) => {
   const authHeader = req.headers.authorization;
-  const profileId = req.headers['x-profile-id']; // NOVO HEADER
-  const originalUrl = req.originalUrl;
+  const profileIdHeader = req.headers['x-profile-id']; // HEADER
+  const originalUrl = req.originalUrl.split('?')[0]; // Ignora Query Params
   
-  // Rotas que SÓ PRECISAM de JWT, mas NÃO de X-Profile-Id (Ex: buscar dados do user, listar perfis)
+  // Rotas que SÓ PRECISAM de JWT, mas NÃO de X-Profile-Id no Header
   const PROFILE_REQUIRED_EXCEPTIONS = [
     '/profiles',
-    '/users/me'
+    '/users/me',
+    '/categories' // <<< ADICIONAR CATEGORIES
   ];
 
   const requiresProfile = !PROFILE_REQUIRED_EXCEPTIONS.some(path => originalUrl.startsWith(path));
@@ -38,21 +39,28 @@ module.exports = async (req, res, next) => {
     }
 
     // ===================================================================
-    // CRÍTICO: NOVO: Validação e Contexto do Perfil
+    // CRÍTICO: Validação e Contexto do Perfil
     // ===================================================================
     if (requiresProfile) {
-        if (!profileId) {
+        if (!profileIdHeader) {
             return res.status(400).json({ error: 'Header X-Profile-Id obrigatório para esta operação.' });
         }
 
-        const profile = await Profile.findOne({ where: { id: profileId, user_id: req.userId } });
+        const profile = await Profile.findOne({ where: { id: profileIdHeader, user_id: req.userId } });
         if (!profile) {
             return res.status(403).json({ error: 'Perfil inválido ou não pertence a este usuário.' });
         }
         
         req.profileId = profile.id; // Anexa o ID do perfil à requisição
+    } else {
+        // Se é uma exceção (ex: /categories, /profiles), tenta anexar o ID do Header se existir.
+        if (profileIdHeader) {
+            const profile = await Profile.findOne({ where: { id: profileIdHeader, user_id: req.userId } });
+            if (profile) {
+                 req.profileId = profile.id; // <<< ANEXA O ID DO PERFIL PARA USO NO CONTROLLER
+            }
+        }
     }
-    // Se não for necessário (requiresProfile=false), apenas avança com req.userId
     // ===================================================================
 
     return next();

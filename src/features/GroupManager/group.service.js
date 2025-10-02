@@ -3,7 +3,7 @@
 const { MonitoredGroup, User } = require('../../models'); 
 const whatsappService = require('../../utils/whatsappService'); // Manter para outras funções
 const subscriptionService = require('../../services/subscriptionService'); 
-const groupManagerService = require('../../services/GroupManagerService'); // <<< NOVO: IMPORTAR MANAGER
+const groupManagerService = require('../../utils/GroupManagerService'); // <<< NOVO: IMPORTAR MANAGER
 const logger = require('../../utils/logger');
 const { Op } = require('sequelize');
 

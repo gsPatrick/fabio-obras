@@ -1,4 +1,4 @@
-const { MonitoredGroup } = require('../../models');
+const { MonitoredGroup, User } = require('../../models');
 const whatsappService = require('../../utils/whatsappService');
 const subscriptionService = require('../../services/subscriptionService'); 
 const logger = require('../../utils/logger');
@@ -6,24 +6,64 @@ const { Op } = require('sequelize');
 
 class GroupService {
   /**
-   * Busca todos os grupos na instância do WhatsApp.
+   * Busca todos os grupos na instância do WhatsApp (sem filtro).
    * @returns {Promise<Array|null>} Uma lista de objetos de grupo.
    */
   async listAllGroupsFromWhatsapp() {
-    // <<< MUDANÇA: Chamando a nova função correta do whatsappService >>>
     const allGroups = await whatsappService.listGroups();
     
     if (!allGroups) {
       logger.error('[GroupService] Não foi possível obter a lista de grupos do WhatsApp.');
       return null;
     }
-    // A API já retorna apenas grupos, então o filtro não é mais estritamente necessário, mas mantemos por segurança.
+    // A API já retorna apenas grupos
     return allGroups.filter(chat => chat.isGroup);
   }
 
   /**
+   * NOVO: Lista apenas os grupos onde o usuário logado (via seu número de WhatsApp) é participante.
+   * @param {number} userId - O ID do usuário logado.
+   * @returns {Promise<Array>} Lista de grupos filtrados.
+   */
+  async listUserGroups(userId) {
+    // 1. Obter o número de WhatsApp do usuário logado
+    const user = await User.findByPk(userId);
+    // Remove caracteres não numéricos e o '+' inicial, mantendo apenas DDI+DDD+Numero
+    const userPhone = user?.whatsapp_phone ? user.whatsapp_phone.replace(/[^0-9]/g, '') : null;
+
+    if (!userPhone) {
+        throw new Error("O número de WhatsApp do seu perfil é obrigatório para listar grupos. Por favor, configure-o em Configurações.");
+    }
+    
+    // 2. Obter a lista COMPLETA de grupos da instância
+    const allGroups = await this.listAllGroupsFromWhatsapp();
+    if (!allGroups || allGroups.length === 0) {
+        return [];
+    }
+
+    // 3. Filtrar grupos onde o usuário é participante
+    const userGroups = [];
+    for (const group of allGroups) {
+        // Obter os metadados do grupo para ter a lista de participantes
+        const metadata = await whatsappService.getGroupMetadata(group.phone);
+        
+        if (metadata && metadata.participants) {
+            // A API Z-API retorna o telefone no formato DDI+DDD+Numero (sem o '+')
+            const participant = metadata.participants.find(p => p.phone === userPhone);
+            
+            if (participant) {
+                userGroups.push(group);
+            }
+        }
+    }
+    
+    logger.info(`[GroupService] Filtragem de grupos concluída. ${userGroups.length} grupo(s) encontrado(s) para o usuário ${userPhone}.`);
+    return userGroups;
+  }
+
+
+  /**
    * Adiciona um grupo à lista de monitoramento no banco de dados, associado a um Perfil.
-   * CRÍTICO: Agora exige uma assinatura ativa do usuário.
    * @param {string} groupId - O ID do grupo.
    * @param {number} profileId - O ID do perfil.
    * @param {number} userId - O ID do usuário (dono do perfil).
@@ -43,15 +83,17 @@ class GroupService {
     }
     // ===================================================================
 
-    const allGroups = await this.listAllGroupsFromWhatsapp();
-    // Adicionado um log para depuração
+    // CRÍTICO: Buscar apenas os grupos onde o usuário é participante
+    const allGroups = await this.listUserGroups(userId); 
+
     if (!allGroups) {
         throw new Error('Falha ao buscar a lista de grupos da Z-API. Verifique os logs.');
     }
 
-    const groupDetails = allGroups.find(g => g.phone === groupId); // O ID do grupo vem no campo "phone"
+    // Verificar se o grupo selecionado ESTÁ na lista filtrada
+    const groupDetails = allGroups.find(g => g.phone === groupId);
     if (!groupDetails) {
-      throw new Error(`Grupo com ID ${groupId} não foi encontrado na sua instância do WhatsApp.`);
+        throw new Error(`Grupo com ID ${groupId} não foi encontrado na sua lista de grupos do WhatsApp. Verifique se você está no grupo.`);
     }
 
     // ===================================================================

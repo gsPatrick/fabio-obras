@@ -12,6 +12,11 @@ class User extends Model {
         validate: {
           isEmail: true,
         },
+              whatsapp_phone: { // <<< NOVO CAMPO
+        type: DataTypes.STRING,
+        allowNull: true, // Permitir nulo inicialmente
+        comment: 'Número de WhatsApp do usuário no formato DDI+DDD+Numero (ex: 5511987654321)'
+      }
       },
       password: {
         type: DataTypes.STRING,

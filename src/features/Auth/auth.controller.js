@@ -1,15 +1,15 @@
 // src/features/Auth/auth.controller.js
-const { User, Profile } = require('../../models'); // Importar Profile para criar o primeiro perfil
+const { User, Profile } = require('../../models'); 
 const jwt = require('jsonwebtoken');
 const logger = require('../../utils/logger');
 
 class AuthController {
   
-  // NOVO: Função para registrar um novo usuário
+  // Função para registrar um novo usuário
   async register(req, res) {
-    const { email, password } = req.body;
-    if (!email || !password) {
-      return res.status(400).json({ error: 'Email e senha são obrigatórios.' });
+    const { email, password, whatsappPhone } = req.body;
+    if (!email || !password || !whatsappPhone) {
+      return res.status(400).json({ error: 'Email, senha e número de WhatsApp são obrigatórios.' });
     }
 
     try {
@@ -20,7 +20,11 @@ class AuthController {
       }
 
       // 2. Criar o usuário (o hook de modelo criptografa a senha)
-      const newUser = await User.create({ email, password });
+      const newUser = await User.create({ 
+          email, 
+          password,
+          whatsapp_phone: whatsappPhone // <<< SALVAR NOVO CAMPO
+      });
       
       // 3. Criar o primeiro Perfil Padrão
       const newProfile = await Profile.create({ 

@@ -201,6 +201,23 @@ async function sendDocument(phone, filePath, caption = '') {
   }
 }
 
+async function getGroupMetadata(groupId) {
+    if (!checkCredentials() || !groupId) {
+        logger.error('[WhatsAppService] ID do grupo é obrigatório para obter metadados.');
+        return null;
+    }
+    const endpoint = `${BASE_URL}/group-metadata/${groupId}`;
+    try {
+        logger.debug(`[WhatsAppService] Buscando metadados do grupo: ${groupId}`);
+        const response = await axios.get(endpoint, { headers });
+        return response.data;
+    } catch (error) {
+        const errorData = error.response ? error.response.data : error.message;
+        logger.error(`[WhatsAppService] Erro ao obter metadados para ${groupId}:`, errorData);
+        return null;
+    }
+}
+
 
 module.exports = {
   sendWhatsappMessage,
@@ -208,5 +225,7 @@ module.exports = {
   listGroups,
   downloadZapiMedia,
   sendButtonList,
-  sendDocument, // MUDANÇA: Exportar a função sendDocument corrigida
+  sendDocument,
+  getGroupMetadata
+  // MUDANÇA: Exportar a função sendDocument corrigida
 };

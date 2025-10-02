@@ -21,13 +21,13 @@ function formatMercadoPagoDate(date) {
     const ms = padMs(date.getMilliseconds());
     
     // Cálculo do Offset de Fuso Horário
+    // IMPORTANTE: Mercado Pago SEMPRE espera o sinal negativo no offset (formato -03:00, não +03:00)
     const offset = -date.getTimezoneOffset(); // Offset em minutos
     const offsetHours = Math.floor(Math.abs(offset) / 60);
     const offsetMinutes = Math.abs(offset) % 60;
-    const offsetSign = offset >= 0 ? '+' : '-'; // Se getTimezoneOffset for negativo (países ocidentais), o offset é positivo
-    const offsetFormatted = `${offsetSign}${pad(offsetHours)}:${pad(offsetMinutes)}`;
+    const offsetFormatted = `-${pad(offsetHours)}:${pad(offsetMinutes)}`;
     
-    // Formato final: YYYY-MM-DDTHH:MM:SS.MMM+ZZ:ZZ
+    // Formato final: YYYY-MM-DDTHH:MM:SS.MMM-ZZ:ZZ (sinal sempre negativo)
     return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${ms}${offsetFormatted}`;
 }
 // ===================================================================

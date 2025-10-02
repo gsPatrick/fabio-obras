@@ -1,14 +1,42 @@
 // src/services/subscriptionService.js
 const { User, Subscription } = require('../models');
-const mercadopago = require('../config/mercadoPago'); // Usaremos o config do MP
+const mercadopago = require('../config/mercadoPago'); 
 const logger = require('../utils/logger');
 const { Op } = require('sequelize');
+
+
+// ===================================================================
+// FUNÇÃO CRÍTICA: CORRIGIR O FORMATO DE DATA PARA O MERCADO PAGO
+// ===================================================================
+function formatMercadoPagoDate(date) {
+    const pad = (n) => String(n).padStart(2, '0');
+    const padMs = (n) => String(n).padStart(3, '0');
+    
+    const year = date.getFullYear();
+    const month = pad(date.getMonth() + 1); // getMonth() é 0-base
+    const day = pad(date.getDate());
+    const hours = pad(date.getHours());
+    const minutes = pad(date.getMinutes());
+    const seconds = pad(date.getSeconds());
+    const ms = padMs(date.getMilliseconds());
+    
+    // Cálculo do Offset de Fuso Horário
+    const offset = -date.getTimezoneOffset(); // Offset em minutos
+    const offsetHours = Math.floor(Math.abs(offset) / 60);
+    const offsetMinutes = Math.abs(offset) % 60;
+    const offsetSign = offset >= 0 ? '+' : '-'; // Se getTimezoneOffset for negativo (países ocidentais), o offset é positivo
+    const offsetFormatted = `${offsetSign}${pad(offsetHours)}:${pad(offsetMinutes)}`;
+    
+    // Formato final: YYYY-MM-DDTHH:MM:SS.MMM+ZZ:ZZ
+    return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${ms}${offsetFormatted}`;
+}
+// ===================================================================
+
 
 const subscriptionService = {
   
   /**
    * Verifica se o usuário tem uma assinatura ativa.
-   * Usado para proteger a funcionalidade de monitoramento de grupo.
    * @param {number} userId 
    * @returns {Promise<boolean>}
    */
@@ -77,8 +105,8 @@ const subscriptionService = {
     // Valores do plano (Exemplo: $49.90 Mensal)
     const PLAN_VALUE = 49.90;
     
-    // Tenta encontrar uma preapproval_id existente para reusar ou atualizar
-    const existingSubscription = await Subscription.findOne({ where: { user_id: userId } });
+    // Calcula a data de fim (1 ano a partir de agora)
+    const endDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
     const preference = {
       // ... (Restante dos dados de preferência de assinatura)
@@ -89,8 +117,9 @@ const subscriptionService = {
         frequency_type: "months",
         transaction_amount: PLAN_VALUE, // Valor
         currency_id: "BRL",
-        start_date: new Date().toISOString(),
-        end_date: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(), // 1 ano
+        // CRÍTICO: USAR O NOVO FORMATADOR
+        start_date: formatMercadoPagoDate(new Date()), 
+        end_date: formatMercadoPagoDate(endDate), // CRÍTICO: USAR O NOVO FORMATADOR
       },
       payer_email: user.email,
       back_url: `${process.env.FRONTEND_URL}/settings?subscription=success`,
@@ -132,6 +161,7 @@ const subscriptionService = {
       
       // 2. Calcula a nova data de expiração (adiciona 1 mês à expiração ATUAL ou à data de hoje)
       const now = new Date();
+      // Se a data de expiração não for válida ou já passou, usamos 'now' como base
       let baseDate = subscription.expires_at && subscription.expires_at > now ? subscription.expires_at : now;
       
       // Adiciona 1 mês à data base

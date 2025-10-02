@@ -1,9 +1,20 @@
 // src/features/ExcelImport/excelImport.service.js
-const { Expense, Category } = require('../../models');
+'use strict';
+
 const logger = require('../../utils/logger');
+const { MonitoredGroup, Category, PendingExpense, Expense } = require('../../models');
+const { Op } = require('sequelize');
 const aiService = require('../../utils/aiService');
-const XLSX = require('xlsx');
+const whatsappService = require('../../utils/whatsappService');
+const dashboardService = require('../../features/Dashboard/dashboard.service');
+const excelService = require('../../utils/excelService');
 const fs = require('fs');
+const path = require('path');
+const { startOfMonth, format } = require('date-fns');
+const XLSX = require('xlsx'); // Importar XLSX
+
+const CONTEXT_WAIT_TIME_MINUTES = 2;
+const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1;
 
 class ExcelImportService {
     /**
@@ -28,18 +39,23 @@ class ExcelImportService {
                 throw new Error('Planilha vazia ou ilegível.');
             }
 
-            // 2. BUSCAR CATEGORIAS EXISTENTES
-            const categories = await Category.findAll({ attributes: ['name', 'id'] });
+            // 2. BUSCAR CATEGORIAS EXISTENTES (Filtrando por perfil)
+            const categories = await Category.findAll({ 
+                where: { profile_id: profileId }, // <<< FILTRO CRÍTICO
+                attributes: ['name', 'id'] 
+            });
             const categoryList = categories.map(c => c.name);
 
             // 3. ENVIAR PARA A IA PARA ANÁLISE DE ESTRUTURA E EXTRAÇÃO
             logger.info('[ExcelImportService] Iniciando análise de planilha com a IA...');
             const resultJsonString = await aiService.analyzeExcelStructureAndExtractData(csvString, categoryList);
             
+            // CRÍTICO: Tentar fazer o parse do JSON da IA
             const importResult = JSON.parse(resultJsonString);
             const expensesToImport = importResult.expenses;
             
             if (!expensesToImport || expensesToImport.length === 0) {
+                // Se a IA falhou, lança a razão que ela forneceu
                 throw new Error(importResult.reason || 'A IA não conseguiu extrair dados de despesa válidos da planilha.');
             }
 
@@ -47,10 +63,16 @@ class ExcelImportService {
             const importedExpenses = [];
             let importCount = 0;
             
+            // Mapeia categorias por nome para ID para inserção rápida
+            const categoryMap = categories.reduce((map, cat) => {
+                map[cat.name] = cat.id;
+                return map;
+            }, {});
+            const otherCategoryId = categoryMap['Outros'];
+            
             for (const expenseData of expensesToImport) {
                 // Encontra a Category ID correspondente ao nome normalizado pela IA
-                const matchingCategory = categories.find(c => c.name === expenseData.categoryName);
-                const category_id = matchingCategory?.id || categories.find(c => c.name === 'Outros')?.id;
+                const category_id = categoryMap[expenseData.categoryName] || otherCategoryId;
 
                 if (category_id) {
                     const newExpense = await Expense.create({
@@ -64,7 +86,7 @@ class ExcelImportService {
                     importedExpenses.push(newExpense);
                     importCount++;
                 } else {
-                    logger.warn(`[ExcelImportService] Categoria não encontrada para: ${expenseData.categoryName}. Ignorando registro.`);
+                    logger.warn(`[ExcelImportService] Categoria 'Outros' não encontrada ou falha ao mapear. Ignorando registro.`);
                 }
             }
             
@@ -77,6 +99,7 @@ class ExcelImportService {
 
         } catch (error) {
             logger.error('[ExcelImportService] Erro no processamento da importação de Excel:', error.message);
+            // Propagar a mensagem de erro (que pode vir da IA) para o controller
             throw new Error(`Falha na importação: ${error.message}`);
         } finally {
             // Garante que o arquivo temporário seja deletado

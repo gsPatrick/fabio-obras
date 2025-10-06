@@ -2,7 +2,6 @@
 'use strict';
 
 const logger = require('../../utils/logger');
-// <<< MUDANÇA: Adicionar User e SubscriptionService >>>
 const { MonitoredGroup, Category, PendingExpense, Expense, Profile, User } = require('../../models'); 
 const subscriptionService = require('../../services/subscriptionService'); 
 const { Op } = require('sequelize');
@@ -23,40 +22,33 @@ const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1;
 
 class WebhookService {
   async processIncomingMessage(payload) {
-    // Lógica para IGNORAR APENAS o documento Excel enviado pelo PRÓPRIO BOT.
     if (payload.fromMe && payload.document && 
         payload.document.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
       logger.debug('[Webhook] Ignorando documento Excel enviado pelo próprio bot.');
       return;
     }
 
-    // Roteador de Ações: primeiro verifica cliques em botões.
     if (payload.buttonsResponseMessage) {
       return this.handleEditButton(payload);
     }
     
-    // Ignora mensagens que não são de grupos.
     if (!payload.isGroup) {
       logger.debug('[Webhook] Ignorando mensagem que não é de grupo.');
       return;
     }
 
-    // Ignora eventos sem um remetente identificado (ex: alguém entrou no grupo).
     const participantPhone = payload.participantPhone;
     if (!participantPhone) {
         logger.warn('[Webhook] Ignorando evento sem identificação do participante.');
         return;
     }
 
-    // ===================================================================
-    // <<< MUDANÇA CRÍTICA 1: Checar Monitoramento e o Dono do Perfil >>>
-    // ===================================================================
     const monitoredGroup = await MonitoredGroup.findOne({ 
         where: { group_id: payload.phone, is_active: true },
         include: [{ 
             model: Profile, 
             as: 'profile',
-            include: [{ model: User, as: 'user' }] // Incluir o Dono do Perfil
+            include: [{ model: User, as: 'user' }]
         }]
     });
     
@@ -67,24 +59,16 @@ class WebhookService {
     
     const ownerUserId = monitoredGroup.profile.user.id;
     
-    // ===================================================================
-    // <<< MUDANÇA CRÍTICA 2: Validação de Plano/Admin >>>
-    // ===================================================================
     const isPlanActive = await subscriptionService.isUserActive(ownerUserId);
 
     if (!isPlanActive) {
       logger.warn(`[Webhook] Acesso negado. Usuário ${ownerUserId} (dono do perfil) não tem plano ativo. Ignorando mensagem do grupo ${payload.phone}.`);
-      // Opcional: Enviar uma mensagem de "plano expirado" para o grupo.
-      // await whatsappService.sendWhatsappMessage(payload.phone, "⚠️ *Acesso Bloqueado:* O plano de monitoramento expirou. Renove seu plano no Painel de Controle.");
       return;
     }
-    // ===================================================================
     
-    // Anexar o ID do Perfil para o restante do fluxo (continuação do código)
     payload.profileId = monitoredGroup.profile.id; 
     logger.debug(`[Webhook] Mensagem do grupo ${payload.phone} pertence ao Perfil ${payload.profileId} (Plano Ativo).`);
     
-    // Direciona para a função correta com base no tipo de conteúdo.
     if (payload.image || payload.document) {
       return this.handleMediaArrival(payload);
     }
@@ -96,22 +80,20 @@ class WebhookService {
 
   /**
    * ETAPA 1: Lida com a chegada de uma imagem/documento.
-   * Cria um registro 'awaiting_context' e envia uma confirmação curta para o usuário.
    */
   async handleMediaArrival(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
-    const profileId = payload.profileId; // USAR profileId
+    const profileId = payload.profileId;
     
     const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
     const mimeType = payload.image ? payload.image.mimeType : payload.document.mimeType;
     
-    // Limpa pendências antigas do mesmo usuário para evitar confusão.
     await PendingExpense.destroy({
       where: {
         participant_phone: participantPhone,
         whatsapp_group_id: groupId,
-        profile_id: profileId, // CRÍTICO: FILTRO POR PERFIL
+        profile_id: profileId,
         status: 'awaiting_context',
       }
     });
@@ -123,7 +105,7 @@ class WebhookService {
       attachment_url: mediaUrl,
       attachment_mimetype: mimeType,
       status: 'awaiting_context',
-      profile_id: profileId, // CRÍTICO: ADICIONAR profile_id
+      profile_id: profileId,
       expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
     });
 
@@ -135,23 +117,22 @@ class WebhookService {
 
   /**
    * ETAPA 2: Lida com a chegada de texto/áudio.
-   * Verifica se é um contexto para uma mídia pendente ou uma resposta numérica para edição.
    */
  async handleContextArrival(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
-    const profileId = payload.profileId; // USAR profileId
+    const profileId = payload.profileId;
     const textMessage = payload.text ? payload.text.message : null;
 
     if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
         logger.info(`[Webhook] Comando #Relatorio recebido de ${participantPhone}.`);
-        await this.sendSpendingReport(groupId, participantPhone, profileId); // PASSAR profileId
+        await this.sendSpendingReport(groupId, participantPhone, profileId);
         return;
     }
 
     if (textMessage && textMessage.toLowerCase().trim() === '#exportardespesas') {
         logger.info(`[Webhook] Comando #ExportarDespesas recebido de ${participantPhone}.`);
-        await this.sendExpensesExcelReport(groupId, participantPhone, profileId); // PASSAR profileId
+        await this.sendExpensesExcelReport(groupId, participantPhone, profileId);
         return;
     }
 
@@ -159,7 +140,7 @@ class WebhookService {
       where: {
         participant_phone: participantPhone,
         whatsapp_group_id: groupId,
-        profile_id: profileId, // CRÍTICO: FILTRO POR PERFIL
+        profile_id: profileId,
         status: 'awaiting_context',
         expires_at: { [Op.gt]: new Date() }
       },
@@ -167,7 +148,6 @@ class WebhookService {
     });
 
     if (pendingMedia) {
-      // Verifica o mimetype antes de tentar análise de IA
       const allowedMimeTypesForAI = ['image/jpeg', 'image/png', 'application/pdf'];
       if (!allowedMimeTypesForAI.includes(pendingMedia.attachment_mimetype)) {
         logger.warn(`[Webhook] Mídia de tipo '${pendingMedia.attachment_mimetype}' não suportada para análise de IA. Ignorando.`);
@@ -175,7 +155,7 @@ class WebhookService {
         const errorMessage = `⚠️ O tipo de arquivo que você enviou (*.${fileExtension}*) não é suportado para análise de despesas com a IA. Por favor, envie uma imagem (JPEG/PNG) ou um PDF.`;
         await whatsappService.sendWhatsappMessage(groupId, errorMessage);
         await pendingMedia.destroy();
-        return; // Interrompe o processamento
+        return;
       }
 
       await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando...`);
@@ -192,7 +172,8 @@ class WebhookService {
       const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
 
       if (mediaBuffer && userContext) {
-        const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype);
+        // AQUI ESTÁ A CORREÇÃO: Passando 'pendingMedia.profile_id' para o aiService
+        const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, pendingMedia.profile_id);
         
         if (analysisResult) {
           return this.saveAndStartEditFlow(pendingMedia, analysisResult, userContext);
@@ -212,7 +193,7 @@ class WebhookService {
 
     } else {
       if (textMessage && /^\d+$/.test(textMessage)) {
-        await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone, profileId); // PASSAR profileId
+        await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone, profileId);
       }
     }
   }
@@ -242,20 +223,20 @@ class WebhookService {
       expense_date: pendingExpense.createdAt,
       whatsapp_message_id: pendingExpense.whatsapp_message_id,
       category_id: category.id,
-      profile_id: pendingExpense.profile_id, // CRÍTICO: ADICIONAR profile_id
+      profile_id: pendingExpense.profile_id,
     });
 
     pendingExpense.value = value;
     pendingExpense.description = finalDescriptionForDB;
     pendingExpense.suggested_category_id = category.id;
     pendingExpense.expense_id = newExpense.id;
-    pendingExpense.status = 'awaiting_validation'; // Significa "salvo, aguardando possível edição de categoria"
+    pendingExpense.status = 'awaiting_validation';
     pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
     await pendingExpense.save();
     
     const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
 
-    const totalExpenses = await Expense.sum('value', { where: { profile_id: pendingExpense.profile_id } }); // FILTRO POR PERFIL
+    const totalExpenses = await Expense.sum('value', { where: { profile_id: pendingExpense.profile_id } });
     const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
 
     const message = `💸 *Custo Registrado:* ${formattedValue}
@@ -278,12 +259,12 @@ Despesa *já* salva no sistema! Para alterar a categoria, clique *Corrigir*. Cas
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const groupId = payload.phone;
     const clickerPhone = payload.participantPhone;
-    const profileId = payload.profileId; // USAR profileId
+    const profileId = payload.profileId;
 
     if (buttonId && buttonId.startsWith('edit_expense_')) {
       const pendingExpenseId = buttonId.split('_')[2];
       const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, {
-          where: { profile_id: profileId }, // CRÍTICO: FILTRO POR PERFIL
+          where: { profile_id: profileId },
           include: [{ model: Expense, as: 'expense' }]
       });
       
@@ -317,12 +298,12 @@ Despesa *já* salva no sistema! Para alterar a categoria, clique *Corrigir*. Cas
   /**
    * ETAPA 5: Usuário responde com um número para finalizar a edição.
    */
-  async handleNumericReply(groupId, selectedNumber, participantPhone, profileId) { // PASSAR profileId
+  async handleNumericReply(groupId, selectedNumber, participantPhone, profileId) {
     const pendingExpense = await PendingExpense.findOne({
       where: {
         whatsapp_group_id: groupId,
         participant_phone: participantPhone,
-        profile_id: profileId, // CRÍTICO: FILTRO POR PERFIL
+        profile_id: profileId,
         status: 'awaiting_category_reply',
       },
       include: [{ model: Expense, as: 'expense' }]
@@ -349,7 +330,7 @@ Despesa *já* salva no sistema! Para alterar a categoria, clique *Corrigir*. Cas
     
     await pendingExpense.destroy();
     
-    const totalExpenses = await Expense.sum('value', { where: { profile_id: profileId } }); // FILTRO POR PERFIL
+    const totalExpenses = await Expense.sum('value', { where: { profile_id: profileId } });
     const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
 
     const successMessage = `✅ *Custo Atualizado!* 
@@ -362,15 +343,15 @@ Nova categoria: *${selectedCategory.name}*
     return true;
   }
 
-  async sendSpendingReport(groupId, recipientPhone, profileId) { // PASSAR profileId
+  async sendSpendingReport(groupId, recipientPhone, profileId) {
     try {
         const now = new Date();
         const filters = {
             period: 'monthly',
         };
 
-        const kpis = await dashboardService.getKPIs(filters, profileId); // PASSAR profileId
-        const chartData = await dashboardService.getChartData(filters, profileId); // PASSAR profileId
+        const kpis = await dashboardService.getKPIs(filters, profileId);
+        const chartData = await dashboardService.getChartData(filters, profileId);
 
         if (!kpis || !chartData) {
             await whatsappService.sendWhatsappMessage(groupId, `❌ Não foi possível gerar o relatório. Tente novamente mais tarde.`);
@@ -410,10 +391,10 @@ _Este relatório é referente aos dados registrados até o momento._`;
     }
   }
 
-  async sendExpensesExcelReport(groupId, recipientPhone, profileId) { // PASSAR profileId
+  async sendExpensesExcelReport(groupId, recipientPhone, profileId) {
     let filePath = null;
     try {
-      const expenses = await dashboardService.getAllExpenses(profileId); // PASSAR profileId
+      const expenses = await dashboardService.getAllExpenses(profileId);
 
       if (!expenses || expenses.length === 0) {
         await whatsappService.sendWhatsappMessage(groupId, `Nenhuma despesa encontrada para exportar.`);

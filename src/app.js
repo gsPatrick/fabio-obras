@@ -57,7 +57,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: true}); 
+      await db.sequelize.sync({ force: false}); 
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser(); // Agora também cria categorias/perfil
     } catch (error) {

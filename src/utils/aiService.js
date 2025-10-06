@@ -49,23 +49,18 @@ class AIService {
     const tempOutputPath = path.join(os.tmpdir(), `img-${Date.now()}`);
 
     try {
-      // 1. Salva o buffer do PDF em um arquivo temporário
       fs.writeFileSync(tempPdfPath, pdfBuffer);
 
-      // 2. Opções para a conversão: JPEG, apenas a primeira página
       const options = {
         firstPageToConvert: 1,
         lastPageToConvert: 1,
         jpegFile: true,
       };
 
-      // 3. Executa a conversão
       await poppler.pdfToCairo(tempPdfPath, tempOutputPath, options);
       
-      // 4. O nome do arquivo de saída será "tempOutputPath-1.jpg"
       const imagePath = `${tempOutputPath}-1.jpg`;
 
-      // 5. Lê o arquivo de imagem gerado de volta para um buffer
       const imageBuffer = fs.readFileSync(imagePath);
       logger.info('[AIService] PDF convertido para imagem com sucesso.');
       return imageBuffer;
@@ -74,7 +69,6 @@ class AIService {
       logger.error('[AIService] Erro crítico durante a conversão do PDF com node-poppler.', error);
       return null;
     } finally {
-      // 6. Garante que todos os arquivos temporários sejam deletados
       if (fs.existsSync(tempPdfPath)) fs.unlinkSync(tempPdfPath);
       const imagePath = `${tempOutputPath}-1.jpg`;
       if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
@@ -83,9 +77,6 @@ class AIService {
 
   /**
    * Analisa um arquivo XLSX (em formato CSV String) para extrair despesas e categorizá-las.
-   * @param {string} csvString - O conteúdo da planilha em formato CSV String (Separador: |).
-   * @param {Array<string>} categoryList - Lista de nomes de categorias válidas.
-   * @returns {Promise<string>} - String JSON com os dados normalizados ou motivo da falha.
    */
   async analyzeExcelStructureAndExtractData(csvString, categoryList) {
     logger.info('[AIService] Iniciando análise de estrutura de planilha universal...');
@@ -113,7 +104,6 @@ class AIService {
                   "description": "string (Consolidada e completa)",
                   "categoryName": "string (da lista fornecida)"
               }
-              // ... mais despesas
           ],
           "reason": "string (motivo da falha se 'expenses' estiver vazio, ex: 'Nenhuma coluna de custo identificada')"
       }
@@ -167,7 +157,7 @@ class AIService {
       finalImageBuffer = convertedImage;
     }
     
-    // CRÍTICO: Buscar categorias APENAS para o Perfil
+    // AQUI ESTÁ A CORREÇÃO: Usando o profileId para buscar as categorias do perfil correto.
     const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name'] }); 
     const categoryList = `"${categories.map(c => c.name).join('", "')}"`;
     const base64Image = finalImageBuffer.toString('base64');
@@ -205,7 +195,6 @@ class AIService {
   _validateAnalysisResult(result, categoryArray) {
     if (!result.categoryName || !categoryArray.includes(result.categoryName)) {
       logger.warn(`[AIService] IA sugeriu categoria inválida/vazia ('${result.categoryName}'). Usando 'Outros'.`);
-      // O backend deve garantir que a categoria 'Outros' exista no perfil
       result.categoryName = 'Outros';
     }
     return result;

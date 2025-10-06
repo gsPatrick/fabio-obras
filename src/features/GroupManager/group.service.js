@@ -1,111 +1,131 @@
-// src/features/GroupManager/group.service.js
+// src/services/GroupManagerService.js
+const axios = require('axios');
+const logger = require('../utils/logger');
+const { ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN } = process.env;
 
-const { MonitoredGroup, User } = require('../../models'); 
-const whatsappService = require('../../utils/whatsappService'); // Manter para outras funções
-const subscriptionService = require('../../services/subscriptionService'); 
-const groupManagerService = require('../../utils/GroupManagerService'); // <<< NOVO: IMPORTAR MANAGER
-const logger = require('../../utils/logger');
-const { Op } = require('sequelize');
+const BASE_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}`;
+const headers = { 'Content-Type': 'application/json', 'client-token': ZAPI_CLIENT_TOKEN };
 
-class GroupService {
-  
-  // REMOVIDO: listAllGroupsFromWhatsapp (Substituído pelo GroupManagerService.getAllGroupsFromCache)
-  // REMOVIDO: listUserGroups (Substituído pelo GroupManagerService.findUserGroups)
-  
-  /**
-   * NOVO: Lista apenas os grupos onde o usuário logado (via seu número de WhatsApp) é participante.
-   * @param {number} userId - O ID do usuário logado.
-   * @returns {Promise<Array>} Lista de grupos filtrados.
-   */
-  async listUserGroups(userId) {
-    // 1. Obter o número de WhatsApp do usuário logado e verificar Admin
-    const user = await User.findByPk(userId);
-    const userPhone = user?.whatsapp_phone ? user.whatsapp_phone.replace(/[^0-9]/g, '') : null;
-    const isAdmin = user?.email === 'fabio@gmail.com'; 
-
-    if (!userPhone) {
-        if (!isAdmin) {
-             throw new Error("O número de WhatsApp do seu perfil é obrigatório para listar grupos. Por favor, configure-o em Configurações.");
-        }
-        // Se for Admin e sem número, retorna TODOS os grupos do CACHE
-        logger.warn('[GroupService] Usuário Admin (fabio@gmail.com) está sem número de WhatsApp. Retornando TODOS os grupos do cache.');
-        return groupManagerService.getAllGroupsFromCache();
+class GroupManagerService {
+    constructor() {
+        this.groupsCache = new Map(); // Cache dos grupos: {groupId -> {id, name}}
+        this.userGroupsIndex = new Map(); // Índice inverso: {phone -> Set<groupId>}
+        this.lastUpdate = null;
+        this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutos (300,000 ms)
+        
+        this.startCacheWorker();
     }
     
-    // 2. Busca os grupos do usuário pelo número no CACHE
-    const userGroups = await groupManagerService.findUserGroups(userPhone);
+    /**
+     * <<< CORREÇÃO: Normaliza o número de telefone para o formato brasileiro com DDI.
+     * Remove caracteres não numéricos e garante que o DDI '55' esteja presente.
+     */
+    _formatPhone(phone) {
+        if (!phone) return '';
+        const cleanedPhone = phone.replace(/[^0-9]/g, '');
 
-    return userGroups;
-  }
-
-  /**
-   * Adiciona um grupo à lista de monitoramento no banco de dados, associado a um Perfil.
-   * @param {string} groupId - O ID do grupo.
-   * @param {number} profileId - O ID do perfil.
-   * @param {number} userId - O ID do usuário (dono do perfil).
-   * @returns {Promise<object>}
-   */
-  async startMonitoringGroup(groupId, profileId, userId) {
-    if (!groupId || !profileId || !userId) {
-      throw new Error('O ID do grupo, perfil e usuário são obrigatórios.');
-    }
-
-    // Validação de Assinatura
-    const isActive = await subscriptionService.isUserActive(userId);
-    if (!isActive) {
-      throw new Error('Acesso negado: É necessário ter um plano ativo para monitorar um novo grupo.');
-    }
-
-    // CRÍTICO: Buscar apenas os grupos do usuário (para validação do grupoId)
-    const allGroups = await this.listUserGroups(userId); 
-
-    if (!allGroups) {
-        throw new Error('Falha ao buscar a lista de grupos do cache. Tente novamente.');
-    }
-
-    // Verificar se o grupo selecionado ESTÁ na lista filtrada
-    const groupDetails = allGroups.find(g => g.phone === groupId);
-    if (!groupDetails) {
-        throw new Error(`Grupo com ID ${groupId} não foi encontrado na sua lista de grupos do WhatsApp. Verifique se você está no grupo.`);
-    }
-
-    // Desativar todos os outros grupos *DO MESMO PERFIL*
-    await MonitoredGroup.update(
-        { is_active: false }, 
-        { 
-            where: { 
-                profile_id: profileId, 
-                group_id: { [Op.not]: groupDetails.phone },
-                is_active: true
-            } 
+        // Se o número não começa com 55 e tem o tamanho de um número brasileiro comum (com ou sem o 9º dígito),
+        // adiciona o DDI do Brasil. Isso resolve a inconsistência da Z-API.
+        if (!cleanedPhone.startsWith('55') && (cleanedPhone.length === 10 || cleanedPhone.length === 11)) {
+            return `55${cleanedPhone}`;
         }
-    );
-    logger.info(`[GroupService] Todos os grupos ativos foram desativados para o Perfil ${profileId}, exceto o novo.`);
-
-    const [monitoredGroup, created] = await MonitoredGroup.findOrCreate({
-      where: { group_id: groupDetails.phone, profile_id: profileId }, 
-      defaults: {
-        name: groupDetails.name,
-        is_active: true,
-        profile_id: profileId, 
-      },
-    });
-
-    if (!created && !monitoredGroup.is_active) {
-      monitoredGroup.is_active = true;
-      await monitoredGroup.save();
-      logger.info(`[GroupService] Monitoramento REATIVADO (e único) para o grupo: ${groupDetails.name} no Perfil ${profileId}`);
-      return { message: 'Monitoramento reativado com sucesso para este perfil. Outros grupos deste perfil desativados.', group: monitoredGroup };
+        
+        return cleanedPhone;
     }
 
-    if (!created) {
-        logger.info(`[GroupService] O grupo ${groupDetails.name} já estava sendo monitorado pelo Perfil ${profileId} e agora é o único ativo.`);
-        return { message: 'Este grupo já está sendo monitorado por este perfil (e agora é o único ativo).', group: monitoredGroup };
+    /**
+     * Atualiza o cache de grupos e o índice de usuários.
+     */
+    async updateCache() {
+        if (this.lastUpdate && (Date.now() - this.lastUpdate) < this.CACHE_DURATION) {
+            return;
+        }
+
+        logger.info('⚙️ [CacheWorker] Iniciando atualização de cache de grupos...');
+        
+        this.groupsCache.clear();
+        this.userGroupsIndex.clear();
+        let groupsFetched = 0;
+
+        try {
+            const listResponse = await axios.get(`${BASE_URL}/groups`, { headers });
+            const groups = (listResponse.data || []).filter(chat => chat.isGroup);
+
+            await Promise.all(groups.map(async (group) => {
+                try {
+                    const groupMetadata = await axios.get(
+                        `${BASE_URL}/group-metadata/${group.phone}`,
+                        { headers }
+                    );
+                    
+                    const participants = groupMetadata.data.participants || [];
+                    
+                    this.groupsCache.set(group.phone, {
+                        id: group.phone,
+                        name: group.name,
+                    });
+
+                    participants.forEach(participant => {
+                        // A normalização acontece aqui, garantindo que o índice seja consistente
+                        const phone = this._formatPhone(participant.phone); 
+                        if (!this.userGroupsIndex.has(phone)) {
+                            this.userGroupsIndex.set(phone, new Set());
+                        }
+                        this.userGroupsIndex.get(phone).add(group.phone);
+                    });
+                    groupsFetched++;
+                } catch (error) {
+                    logger.error(`[CacheWorker] Erro ao buscar participantes do grupo ${group.phone}:`, error.message);
+                }
+            }));
+
+            this.lastUpdate = Date.now();
+            logger.info(`✅ [CacheWorker] Cache atualizado. ${groupsFetched} grupos processados.`);
+        } catch (error) {
+            logger.error('[CacheWorker] Erro crítico ao buscar lista de grupos:', error.message);
+            throw new Error(`Falha ao conectar com a API do WhatsApp para atualizar o cache: ${error.message}`);
+        }
     }
-    
-    logger.info(`[GroupService] Novo monitoramento iniciado (e único) para o grupo: ${groupDetails.name} no Perfil ${profileId}`);
-    return { message: 'Grupo adicionado ao monitoramento com sucesso para este perfil. Outros grupos deste perfil desativados.', group: monitoredGroup };
-  }
+
+    /**
+     * Busca os grupos de um usuário no índice, utilizando o cache.
+     */
+    async findUserGroups(phone) {
+        await this.updateCache();
+
+        // Garante que o número pesquisado também seja normalizado
+        const formattedPhone = this._formatPhone(phone);
+        const groupIds = this.userGroupsIndex.get(formattedPhone);
+
+        if (!groupIds) return [];
+
+        return Array.from(groupIds).map(groupId => {
+            const group = this.groupsCache.get(groupId);
+            return {
+                phone: group.id,
+                name: group.name
+            };
+        });
+    }
+
+    /**
+     * Retorna a lista completa de grupos no cache.
+     */
+    async getAllGroupsFromCache() {
+        await this.updateCache();
+        return Array.from(this.groupsCache.values()).map(group => ({
+            phone: group.id,
+            name: group.name
+        }));
+    }
+
+    /**
+     * Inicia o worker que atualiza o cache.
+     */
+    startCacheWorker() {
+        this.updateCache().catch(err => logger.error("Falha inicial ao carregar cache de grupos.", err)); 
+        setInterval(() => this.updateCache().catch(err => logger.error("Worker falhou ao atualizar cache.", err)), this.CACHE_DURATION);
+    }
 }
 
-module.exports = new GroupService();
+module.exports = new GroupManagerService();

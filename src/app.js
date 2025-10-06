@@ -57,7 +57,6 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      // CORREÇÃO: Usar force: false e alter: true para migrações seguras
       await db.sequelize.sync({ force: true}); 
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser(); // Agora também cria categorias/perfil
@@ -71,7 +70,6 @@ class App {
     const { User, Profile } = db; // Inclui Profile
     const adminEmail = 'fabio@gmail.com'; 
     const adminPassword = 'Fabio123'; 
-    // NOVO: Número do BOT/Admin sem formatação (DDI+DDD+Numero)
     const adminWhatsappPhone = '5521983311000'; 
     console.log('[SEEDER] Verificando usuário administrador...');
     
@@ -83,11 +81,10 @@ class App {
             user = await User.create({ 
                 email: adminEmail, 
                 password: adminPassword,
-                whatsapp_phone: adminWhatsappPhone // <<< SALVANDO O NÚMERO
+                whatsapp_phone: adminWhatsappPhone
             });
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' criado com sucesso.`);
         } else {
-            // Se o usuário existe, garantir que o número de WhatsApp está atualizado
             if (user.whatsapp_phone !== adminWhatsappPhone) {
                  await user.update({ whatsapp_phone: adminWhatsappPhone });
                  console.log(`[SEEDER] Número do administrador '${adminEmail}' atualizado.`);
@@ -95,17 +92,19 @@ class App {
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' já existe.`);
         }
         
-        // ===============================================================
-        // CRIAÇÃO DE PERFIL PADRÃO e CATEGORIAS para o usuário administrador
-        // ===============================================================
         let profile = await Profile.findOne({ where: { user_id: user.id } });
         if (!profile) {
             console.log(`[SEEDER] Criando perfil padrão para o usuário ${user.email}...`);
             profile = await Profile.create({ name: 'Perfil Padrão', user_id: user.id });
-            await this.seedCategories(); // Chama o seeder de categorias
+            
+            // <<< CORREÇÃO 1: Passar o ID do perfil recém-criado para o seeder de categorias.
+            await this.seedCategories(profile.id); 
+            
             console.log('[SEEDER] Perfil Padrão e Categorias iniciais criadas.');
         } else {
             console.log(`[SEEDER] Perfil padrão já existe para o usuário ${user.email}.`);
+            // <<< MELHORIA: Garantir que as categorias existam mesmo se o perfil já existir
+            await this.seedCategories(profile.id);
         }
         
     } catch (error) {
@@ -113,10 +112,16 @@ class App {
     }
   }
 
-  // O seedCategories agora existe, mas é chamado APENAS por seedAdminUser
-  async seedCategories() {
+  // <<< CORREÇÃO 2: A função agora recebe e usa o 'profileId'.
+  async seedCategories(profileId) {
+    if (!profileId) {
+        console.error('[SEEDER] Erro: profileId não foi fornecido para o seeder de categorias.');
+        return;
+    }
+
     const { Category } = db;
     const categoriesToSeed = [
+        // ... (sua lista de categorias permanece a mesma)
         { name: 'Mão de obra estrutural', type: 'Mão de Obra' },
         { name: 'Mão de obra cinza', type: 'Mão de Obra' },
         { name: 'Mão de obra acabamento', type: 'Mão de Obra' },
@@ -146,15 +151,17 @@ class App {
     ];
     console.log('[SEEDER] Verificando e criando categorias essenciais...');
     for (const categoryData of categoriesToSeed) {
+        // <<< CORREÇÃO 3: Usar o 'profileId' para buscar e para criar a categoria.
         await Category.findOrCreate({
-            where: { name: categoryData.name },
-            defaults: categoryData,
+            where: { name: categoryData.name, profile_id: profileId },
+            defaults: { ...categoryData, profile_id: profileId },
         });
     }
     console.log('[SEEDER] Verificação de categorias concluída.');
   }
 
   startPendingExpenseWorker() {
+    // ... (o restante do seu arquivo permanece o mesmo)
     const { PendingExpense, Expense, Category } = db;
     const whatsappService = require('./utils/whatsappService');
 
@@ -165,7 +172,6 @@ class App {
       console.log('[WORKER] ⚙️ Verificando despesas pendentes expiradas...');
       const now = new Date();
       try {
-        // 1. TIMEOUT DE VALIDAÇÃO (despesa salva, mas o prazo para edição de categoria expirou)
         const expiredValidations = await PendingExpense.findAll({
           where: { 
             status: 'awaiting_validation', 
@@ -176,11 +182,9 @@ class App {
 
         for (const pending of expiredValidations) {
           console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
-          
           await pending.destroy(); 
         }
 
-        // 2. TIMEOUT DE EDIÇÃO (usuário não respondeu à solicitação de nova categoria)
         const expiredReplies = await PendingExpense.findAll({
           where: { 
             status: 'awaiting_category_reply', 
@@ -198,7 +202,6 @@ class App {
           await pending.destroy();
         }
 
-        // 3. LIMPEZA DE CONTEXTOS (após N minutos esperando descrição)
         await PendingExpense.destroy({
           where: { status: 'awaiting_context', expires_at: { [Op.lte]: now } }
         });

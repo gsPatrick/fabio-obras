@@ -9,6 +9,5 @@ router.get('/', groupController.listAvailableGroups);
 // Rota para começar a monitorar um grupo específico
 router.post('/', groupController.monitorGroup);
 
-router.get('/all-groups', groupController.listAllUnprotected);
 
 module.exports = router;

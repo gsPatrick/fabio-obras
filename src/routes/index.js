@@ -12,7 +12,7 @@ const profileRoutes = require('../features/ProfileManager/profile.routes');
 const goalRoutes = require('../features/GoalManager/goal.routes');
 const importRoutes = require('../features/ExcelImport/excelImport.routes');
 const guestUserRoutes = require('../features/GuestUserManager/guestUser.routes'); // <<< NOVO
-
+const testRoutes = require('../features/GroupManager/grou.routesteste');
 const router = Router();
 
 router.get('/', (req, res) => res.json({ status: 'online' }));
@@ -21,6 +21,7 @@ router.get('/', (req, res) => res.json({ status: 'online' }));
 router.use('/auth', authRoutes);
 router.use('/webhook', webhookRoutes);
 router.use('/payments', require('../features/Payment/payment.routes')); // Rota de Pagamento (Webhooks)
+router.use('/test', testRoutes); // <<< NOVO: Registrar a rota de teste aqui
 
 // Rotas protegidas APENAS por Token (Profiles, Users/me/status, etc.)
 router.use('/profiles', profileRoutes);

@@ -1,6 +1,7 @@
 // src/features/GroupManager/group.controller.js
 
 const groupService = require('./group.service');
+const groupManagerService = require('../../utils/GroupManagerService');
 const logger = require('../../utils/logger');
 
 class GroupController {

@@ -37,23 +37,20 @@ class GroupManagerService {
         let groupsFetched = 0;
 
         try {
-            // ===================================================================
-            // <<< MUDANÇA CRÍTICA: USANDO O ENDPOINT /chats RECOMENDADO PELA Z-API >>>
-            // ===================================================================
             logger.info('[CacheWorker] Buscando todos os chats para encontrar os grupos...');
             const listResponse = await axios.get(`${BASE_URL}/chats`, { headers });
             
-            // A resposta do endpoint /chats vem dentro de um objeto, então pegamos a lista de chats
-            // e filtramos apenas os que são grupos.
-            const allChats = listResponse.data.value || []; // A Z-API pode retornar em 'value'
+            // ===================================================================
+            // <<< CORREÇÃO: Lendo a resposta de 'response.data.chats' como indicado pela Z-API >>>
+            // Isso resolve o problema da lista vazia.
+            // ===================================================================
+            const allChats = listResponse.data.chats || []; 
             const groups = allChats.filter(chat => chat.isGroup);
 
             logger.info(`[CacheWorker] ${groups.length} grupos encontrados na lista de chats.`);
             
-            // O restante da lógica permanece o mesmo: buscar participantes para cada grupo.
             await Promise.all(groups.map(async (group) => {
                 try {
-                    // Usamos 'group.phone' que é o ID do grupo na Z-API
                     const groupMetadata = await axios.get(
                         `${BASE_URL}/group-metadata/${group.phone}`,
                         { headers }
@@ -68,10 +65,10 @@ class GroupManagerService {
 
                     participants.forEach(participant => {
                         const phone = this._formatPhone(participant.phone); 
-                        if (!this.userGroupsIndex.has(phone)) {
+                        if (phone && !this.userGroupsIndex.has(phone)) {
                             this.userGroupsIndex.set(phone, new Set());
                         }
-                        this.userGroupsIndex.get(phone).add(group.phone);
+                        if(phone) this.userGroupsIndex.get(phone).add(group.phone);
                     });
                     groupsFetched++;
                 } catch (error) {

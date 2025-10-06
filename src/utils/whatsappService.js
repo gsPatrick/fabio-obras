@@ -3,7 +3,7 @@ const axios = require('axios');
 const logger = require('./logger');
 const fs = require('fs');
 const path = require('path');
-const mime = require('mime-types'); // MUDANÇA: Importar mime-types
+const mime = require('mime-types');
 
 const { ZAPI_INSTANCE_ID, ZAPI_TOKEN, ZAPI_CLIENT_TOKEN } = process.env;
 const BASE_URL = `https://api.z-api.io/instances/${ZAPI_INSTANCE_ID}/token/${ZAPI_TOKEN}`;
@@ -23,10 +23,9 @@ function checkCredentials() {
 
 /**
  * Envia uma mensagem de texto simples.
- * @param {string} phone - Número do destinatário ou ID do grupo.
- * @param {string} message - A mensagem a ser enviada.
  */
 async function sendWhatsappMessage(phone, message) {
+  // ... (função sem alterações)
   if (!checkCredentials() || !phone || !message) {
     logger.error('[WhatsAppService] Telefone e mensagem são obrigatórios.');
     return null;
@@ -47,11 +46,9 @@ async function sendWhatsappMessage(phone, message) {
 
 /**
  * Envia uma lista de opções (menu).
- * @param {string} phone - O ID do grupo ou número de telefone.
- * @param {string} messageText - A mensagem principal.
- * @param {object} optionListConfig - Configurações da lista.
  */
 async function sendOptionList(phone, messageText, optionListConfig) {
+    // ... (função sem alterações)
     if (!checkCredentials() || !phone || !messageText || !optionListConfig) {
         logger.error('[WhatsAppService] Parâmetros inválidos para sendOptionList.');
         return null;
@@ -79,31 +76,38 @@ async function sendOptionList(phone, messageText, optionListConfig) {
 }
 
 /**
+ * <<< CORREÇÃO: A função agora usa o endpoint /chats para obter a lista completa de grupos. >>>
  * Obtém a lista de todos os grupos da instância.
  */
 async function listGroups() {
   if (!checkCredentials()) return null;
-  const endpoint = `${BASE_URL}/groups`;
-  const params = { page: 1, pageSize: 100 };
+  
+  // Endpoint correto, conforme recomendação
+  const endpoint = `${BASE_URL}/chats`;
+
   try {
-    logger.info('[WhatsAppService] Buscando lista de grupos...');
-    const response = await axios.get(endpoint, { headers, params });
-    logger.info(`[WhatsAppService] ${response.data.length} grupos encontrados.`);
-    return response.data;
+    logger.info('[WhatsAppService] Buscando lista de chats para filtrar os grupos...');
+    const response = await axios.get(endpoint, { headers });
+
+    // Filtra apenas os chats que são grupos
+    const allChats = response.data.chats || [];
+    const groups = allChats.filter(chat => chat.isGroup);
+
+    logger.info(`[WhatsAppService] ${groups.length} grupos encontrados.`);
+    return groups;
   } catch (error) {
     const status = error.response ? error.response.status : 'N/A';
     const errorData = error.response ? error.response.data : error.message;
-    logger.error(`[WhatsAppService] Erro ao listar grupos (Status: ${status}):`, errorData);
+    logger.error(`[WhatsAppService] Erro ao listar chats/grupos (Status: ${status}):`, errorData);
     return null;
   }
 }
 
 /**
  * Baixa uma mídia a partir de uma URL da Z-API.
- * @param {string} mediaUrl A URL da mídia.
- * @returns {Promise<Buffer|null>} O buffer do arquivo.
  */
 async function downloadZapiMedia(mediaUrl) {
+  // ... (função sem alterações)
   if (!checkCredentials() || !mediaUrl) {
     logger.error('[WhatsAppService] URL da mídia é necessária para download.');
     return null;
@@ -128,11 +132,9 @@ async function downloadZapiMedia(mediaUrl) {
 
 /**
  * Envia uma mensagem com botões simples.
- * @param {string} phone - O ID do grupo.
- * @param {string} messageText - A mensagem principal.
- * @param {Array<{id: string, label: string}>} buttons - Um array de objetos de botão.
  */
 async function sendButtonList(phone, messageText, buttons) {
+  // ... (função sem alterações)
   if (!checkCredentials() || !phone || !messageText || !buttons) {
     logger.error('[WhatsAppService] Parâmetros inválidos para sendButtonList.');
     return null;
@@ -158,37 +160,30 @@ async function sendButtonList(phone, messageText, buttons) {
 }
 
 /**
- * MUDANÇA: NOVA FUNÇÃO PARA ENVIAR DOCUMENTOS (corrigida)
  * Envia um documento (arquivo) via WhatsApp.
- * @param {string} phone - O número do destinatário ou ID do grupo.
- * @param {string} filePath - O caminho completo para o arquivo local a ser enviado.
- * @param {string} caption - A legenda (texto) que acompanha o documento.
- * @returns {Promise<object|null>} O resultado da API ou null em caso de erro.
  */
 async function sendDocument(phone, filePath, caption = '') {
+  // ... (função sem alterações)
   if (!checkCredentials() || !phone || !filePath || !fs.existsSync(filePath)) {
     logger.error('[WhatsAppService] Parâmetros inválidos para sendDocument ou arquivo não encontrado.');
     return null;
   }
 
-  // MUDANÇA: Extrair extensão e mimetype do arquivo para o endpoint e payload
-  const fileExtension = path.extname(filePath).substring(1); // Ex: 'xlsx'
+  const fileExtension = path.extname(filePath).substring(1);
   const filename = path.basename(filePath);
-  const mimeType = mime.lookup(filePath) || 'application/octet-stream'; // Ex: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  const mimeType = mime.lookup(filePath) || 'application/octet-stream';
   
   const fileBuffer = fs.readFileSync(filePath);
   const base64File = fileBuffer.toString('base64');
   
-  // MUDANÇA: Ajustar payload conforme a documentação da Z-API
   const payload = {
     phone,
-    document: `data:${mimeType};base64,${base64File}`, // Data URI completo no atributo 'document'
+    document: `data:${mimeType};base64,${base64File}`,
     fileName: filename,
-    caption: caption, // Usar 'caption' para a legenda
+    caption: caption,
   };
 
   try {
-    // MUDANÇA: Construir o endpoint com a extensão do arquivo
     const fullEndpoint = `${BASE_URL}/send-document/${fileExtension}`;
     logger.info(`[WhatsAppService] Enviando documento '${filename}' para ${phone} via ${fullEndpoint}...`);
     const response = await axios.post(fullEndpoint, payload, { headers });
@@ -202,6 +197,7 @@ async function sendDocument(phone, filePath, caption = '') {
 }
 
 async function getGroupMetadata(groupId) {
+    // ... (função sem alterações)
     if (!checkCredentials() || !groupId) {
         logger.error('[WhatsAppService] ID do grupo é obrigatório para obter metadados.');
         return null;
@@ -218,7 +214,6 @@ async function getGroupMetadata(groupId) {
     }
 }
 
-
 module.exports = {
   sendWhatsappMessage,
   sendOptionList,
@@ -227,5 +222,4 @@ module.exports = {
   sendButtonList,
   sendDocument,
   getGroupMetadata
-  // MUDANÇA: Exportar a função sendDocument corrigida
 };

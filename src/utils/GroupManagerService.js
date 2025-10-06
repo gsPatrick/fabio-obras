@@ -8,23 +8,33 @@ const headers = { 'Content-Type': 'application/json', 'client-token': ZAPI_CLIEN
 
 class GroupManagerService {
     constructor() {
-        this.groupsCache = new Map();
-        this.userGroupsIndex = new Map();
+        this.groupsCache = new Map(); // Cache dos grupos: {groupId -> {id, name}}
+        this.userGroupsIndex = new Map(); // Índice inverso: {phone -> Set<groupId>}
         this.lastUpdate = null;
-        this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutos
+        this.CACHE_DURATION = 5 * 60 * 1000; // 5 minutos (300,000 ms)
         
+        // Inicia o worker de atualização do cache
         this.startCacheWorker();
     }
     
+    /**
+     * Remove caracteres de formatação do telefone e garante DDI+DDD+Numero.
+     */
     _formatPhone(phone) {
         if (!phone) return '';
         const cleanedPhone = phone.replace(/[^0-9]/g, '');
+
         if (!cleanedPhone.startsWith('55') && (cleanedPhone.length === 10 || cleanedPhone.length === 11)) {
             return `55${cleanedPhone}`;
         }
+        
         return cleanedPhone;
     }
 
+    /**
+     * Atualiza o cache de grupos e o índice de usuários.
+     * @returns {Promise<void>}
+     */
     async updateCache() {
         if (this.lastUpdate && (Date.now() - this.lastUpdate) < this.CACHE_DURATION) {
             return;
@@ -37,17 +47,14 @@ class GroupManagerService {
         let groupsFetched = 0;
 
         try {
-            logger.info('[CacheWorker] Buscando todos os chats para encontrar os grupos...');
-            const listResponse = await axios.get(`${BASE_URL}/chats`, { headers });
+            // Adiciona 'params' para pedir até 500 grupos de uma vez para resolver a paginação.
+            const params = { pageSize: 500 };
+            const listResponse = await axios.get(`${BASE_URL}/groups`, { headers, params });
             
-            // ===================================================================
-            // <<< CORREÇÃO: Lendo a resposta de 'response.data.chats' como indicado pela Z-API >>>
-            // Isso resolve o problema da lista vazia.
-            // ===================================================================
-            const allChats = listResponse.data.chats || []; 
-            const groups = allChats.filter(chat => chat.isGroup);
+            // A resposta de /groups já é um array direto de grupos
+            const groups = listResponse.data || [];
 
-            logger.info(`[CacheWorker] ${groups.length} grupos encontrados na lista de chats.`);
+            logger.info(`[CacheWorker] ${groups.length} grupos encontrados na API.`);
             
             await Promise.all(groups.map(async (group) => {
                 try {
@@ -65,10 +72,12 @@ class GroupManagerService {
 
                     participants.forEach(participant => {
                         const phone = this._formatPhone(participant.phone); 
-                        if (phone && !this.userGroupsIndex.has(phone)) {
-                            this.userGroupsIndex.set(phone, new Set());
+                        if (phone) {
+                            if (!this.userGroupsIndex.has(phone)) {
+                                this.userGroupsIndex.set(phone, new Set());
+                            }
+                            this.userGroupsIndex.get(phone).add(group.phone);
                         }
-                        if(phone) this.userGroupsIndex.get(phone).add(group.phone);
                     });
                     groupsFetched++;
                 } catch (error) {
@@ -79,13 +88,19 @@ class GroupManagerService {
             this.lastUpdate = Date.now();
             logger.info(`✅ [CacheWorker] Cache atualizado. ${groupsFetched} grupos processados.`);
         } catch (error) {
-            logger.error('[CacheWorker] Erro crítico ao buscar lista de chats:', error.message);
+            logger.error('[CacheWorker] Erro crítico ao buscar lista de grupos:', error.message);
             throw new Error(`Falha ao conectar com a API do WhatsApp para atualizar o cache: ${error.message}`);
         }
     }
 
+    /**
+     * Busca os grupos de um usuário no índice, utilizando o cache.
+     * @param {string} phone - O número de WhatsApp do usuário (DDI+DDD+Numero).
+     * @returns {Array<object>} Lista de grupos que o usuário participa.
+     */
     async findUserGroups(phone) {
         await this.updateCache();
+
         const formattedPhone = this._formatPhone(phone);
         const groupIds = this.userGroupsIndex.get(formattedPhone);
 
@@ -94,12 +109,16 @@ class GroupManagerService {
         return Array.from(groupIds).map(groupId => {
             const group = this.groupsCache.get(groupId);
             return {
-                phone: group.id,
+                phone: group.id, // O phone é o ID do grupo na Z-API
                 name: group.name
             };
         });
     }
 
+    /**
+     * Retorna a lista completa de grupos no cache (para uso de Admin sem número de WhatsApp).
+     * @returns {Array<object>} Lista de todos os grupos em cache.
+     */
     async getAllGroupsFromCache() {
         await this.updateCache();
         return Array.from(this.groupsCache.values()).map(group => ({
@@ -108,8 +127,13 @@ class GroupManagerService {
         }));
     }
 
+    /**
+     * Inicia o worker que atualiza o cache a cada 5 minutos.
+     */
     startCacheWorker() {
+        // Roda a primeira vez imediatamente
         this.updateCache().catch(err => logger.error("Falha inicial ao carregar cache de grupos.", err)); 
+        // Roda a cada 5 minutos
         setInterval(() => this.updateCache().catch(err => logger.error("Worker falhou ao atualizar cache.", err)), this.CACHE_DURATION);
     }
 }

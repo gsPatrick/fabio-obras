@@ -16,6 +16,20 @@ class GroupController {
     }
   }
 
+    // ===================================================================
+  // <<< NOVO MÉTODO DE TESTE (PÚBLICO) >>>
+  // ===================================================================
+  async listAllUnprotected(req, res) {
+    try {
+      // Chama diretamente o serviço de cache para obter todos os grupos, sem filtros
+      const groups = await groupManagerService.getAllGroupsFromCache();
+      res.status(200).json(groups);
+    } catch (error) {
+      logger.error('[GroupController] Erro ao listar todos os grupos (unprotected):', error.message);
+      res.status(500).json({ error: 'Não foi possível buscar a lista completa de grupos.' });
+    }
+  }
+
   async monitorGroup(req, res) {
     const { groupId } = req.body;
     const profileId = req.profileId; 

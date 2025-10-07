@@ -7,7 +7,7 @@ class PendingExpense extends Model {
     super.init({
       value: {
         type: DataTypes.DECIMAL(10, 2),
-        allowNull: true, // Será nulo até a análise final, mas depois a despesa real terá
+        allowNull: true,
       },
       description: {
         type: DataTypes.TEXT,
@@ -37,17 +37,30 @@ class PendingExpense extends Model {
       },
       attachment_mimetype: {
         type: DataTypes.STRING,
-        allowNull: true, // Pode ser nulo para pendências antigas ou sem anexo
+        allowNull: true,
         comment: 'O mimeType do anexo (ex: application/pdf).',
       },
       expense_id: {
         type: DataTypes.INTEGER,
-        allowNull: true, // Será nulo apenas no estado 'awaiting_context'
-        comment: 'ID da despesa já criada no sistema.',
+        allowNull: true,
+        comment: 'ID da despesa já criada no sistema (usado para edição).',
+      },
+      // <<< MUDANÇA AQUI >>>
+      suggested_new_category_name: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        comment: 'Nome da nova categoria sugerida pela IA que ainda não existe.'
       },
       status: {
-        type: DataTypes.ENUM('awaiting_context', 'awaiting_validation', 'awaiting_category_reply'),
-        defaultValue: 'awaiting_context', // O novo estado inicial
+        // <<< MUDANÇA AQUI >>>
+        type: DataTypes.ENUM(
+          'awaiting_context', 
+          'awaiting_validation', 
+          'awaiting_category_reply',
+          'awaiting_new_category_decision', // Novo: Aguardando decisão sobre a nova categoria
+          'awaiting_new_category_type'      // Novo: Aguardando o tipo da nova categoria
+        ),
+        defaultValue: 'awaiting_context',
         allowNull: false,
       },
     }, {
@@ -60,7 +73,7 @@ class PendingExpense extends Model {
   static associate(models) {
     this.belongsTo(models.Category, { foreignKey: 'suggested_category_id', as: 'suggestedCategory' });
     this.belongsTo(models.Expense, { foreignKey: 'expense_id', as: 'expense' });
-    this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' }); // <<< NOVO: Associação ao Perfil
+    this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' });
   }
 }
 

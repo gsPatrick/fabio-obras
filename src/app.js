@@ -30,6 +30,7 @@ class App {
     this.routes();
     this.exposeModels(); // Expõe modelos para o controller de Perfil
     this.startPendingExpenseWorker();
+    this.startOnboardingWorker(); // <<< NOVO: Iniciar worker de onboarding
   }
 
   middlewares() {
@@ -57,7 +58,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: false}); 
+      await db.sequelize.sync({ force: true}); 
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser(); // Agora também cria categorias/perfil
     } catch (error) {
@@ -112,7 +113,6 @@ class App {
     }
   }
 
-  // <<< CORREÇÃO 2: A função agora recebe e usa o 'profileId'.
   async seedCategories(profileId) {
     if (!profileId) {
         console.error('[SEEDER] Erro: profileId não foi fornecido para o seeder de categorias.');
@@ -121,7 +121,6 @@ class App {
 
     const { Category } = db;
     const categoriesToSeed = [
-        // ... (sua lista de categorias permanece a mesma)
         { name: 'Mão de obra estrutural', type: 'Mão de Obra' },
         { name: 'Mão de obra cinza', type: 'Mão de Obra' },
         { name: 'Mão de obra acabamento', type: 'Mão de Obra' },
@@ -151,7 +150,6 @@ class App {
     ];
     console.log('[SEEDER] Verificando e criando categorias essenciais...');
     for (const categoryData of categoriesToSeed) {
-        // <<< CORREÇÃO 3: Usar o 'profileId' para buscar e para criar a categoria.
         await Category.findOrCreate({
             where: { name: categoryData.name, profile_id: profileId },
             defaults: { ...categoryData, profile_id: profileId },
@@ -161,12 +159,8 @@ class App {
   }
 
   startPendingExpenseWorker() {
-    // ... (o restante do seu arquivo permanece o mesmo)
     const { PendingExpense, Expense, Category } = db;
     const whatsappService = require('./utils/whatsappService');
-
-    const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1; 
-    const CONTEXT_WAIT_TIME_MINUTES = 2; 
 
     const runWorker = async () => {
       console.log('[WORKER] ⚙️ Verificando despesas pendentes expiradas...');
@@ -195,7 +189,6 @@ class App {
 
         for (const pending of expiredReplies) {
           console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
-
           const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
           const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa *já salva* de *${formattedValue}* foi mantida com a categoria original: *${pending.suggestedCategory.name}*.`;
           await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
@@ -212,6 +205,25 @@ class App {
     };
     
     setInterval(runWorker, 30000); 
+  }
+
+  // <<< NOVO MÉTODO PARA LIMPAR ONBOARDINGS EXPIRADOS >>>
+  startOnboardingWorker() {
+    const { OnboardingState } = db;
+    const runWorker = async () => {
+        try {
+            const deletedCount = await OnboardingState.destroy({
+                where: { expires_at: { [Op.lte]: new Date() } }
+            });
+            if (deletedCount > 0) {
+                console.log(`[WORKER-ONBOARDING] 🧹 Limpeza de ${deletedCount} estado(s) de onboarding expirado(s) concluída.`);
+            }
+        } catch (error) {
+            console.error('[WORKER-ONBOARDING] ❌ Erro ao limpar estados de onboarding:', error);
+        }
+    };
+    // Roda a cada 5 minutos
+    setInterval(runWorker, 5 * 60 * 1000);
   }
 }
 

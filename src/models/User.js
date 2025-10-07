@@ -12,32 +12,37 @@ class User extends Model {
         validate: {
           isEmail: true,
         },
-      }, // <<< FECHAR O OBJETO EMAIL AQUI
-      whatsapp_phone: { // <<< AGORA ESTÁ SEPARADO
+      },
+      whatsapp_phone: {
         type: DataTypes.STRING,
         allowNull: true, 
         comment: 'Número de WhatsApp do usuário no formato DDI+DDD+Numero (ex: 5511987654321)'
       },
       password: {
         type: DataTypes.STRING,
-        allowNull: false,
+        allowNull: true, // <<< MUDANÇA: Senha pode ser nula inicialmente
       },
-    }, { // <<< FECHAR O OBJETO DE CAMPOS AQUI
+      // <<< NOVO CAMPO >>>
+      status: {
+        type: DataTypes.ENUM('pending', 'active'),
+        defaultValue: 'pending',
+        allowNull: false,
+      }
+    }, {
       sequelize,
       modelName: 'User',
       tableName: 'users',
     });
 
-    // Hook para criptografar a senha antes de salvar/criar
     this.addHook('beforeSave', async (user) => {
-      if (user.changed('password')) {
+      if (user.changed('password') && user.password) { // <<< MUDANÇA: Verifica se a senha existe
         user.password = await bcrypt.hash(user.password, 10);
       }
     });
   }
 
-  // Método para verificar a senha durante o login
   checkPassword(password) {
+    if (!this.password) return false; // <<< MUDANÇA: Se não há senha, não compara
     return bcrypt.compare(password, this.password);
   }
 }

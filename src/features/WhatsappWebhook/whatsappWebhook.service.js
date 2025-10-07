@@ -3,6 +3,7 @@
 
 const logger = require('../../utils/logger');
 const { MonitoredGroup, Category, PendingExpense, Expense, Profile, User, OnboardingState } = require('../../models');
+const jwt = require('jsonwebtoken'); // <<< IMPORTAR JWT
 const subscriptionService = require('../../services/subscriptionService');
 const profileService = require('../ProfileManager/profile.service');
 const groupService = require('../GroupManager/group.service');
@@ -14,8 +15,6 @@ const dashboardService = require('../../features/Dashboard/dashboard.service');
 const excelService = require('../../utils/excelService');
 const fs = require('fs');
 const path = require('path');
-const { startOfMonth, format } = require('date-fns');
-const ptBR = require('date-fns/locale/pt-BR');
 
 const CONTEXT_WAIT_TIME_MINUTES = 2;
 const EXPENSE_EDIT_WAIT_TIME_MINUTES = 5;
@@ -24,50 +23,19 @@ const ONBOARDING_WAIT_TIME_MINUTES = 10;
 class WebhookService {
 
   async processIncomingMessage(payload) {
-    if (payload.fromMe && payload.document && payload.document.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
-      return;
-    }
-
-    // <<< CORREÇÃO CRÍTICA: Adaptado para o payload real da Z-API >>>
-    // O evento de criação de grupo é o nosso gatilho de onboarding
-    if (payload.notification === 'GROUP_CREATE') {
-        return this.handleGroupJoin(payload);
-    }
-    
-    if (!payload.isGroup) {
-      return;
-    }
-
+    if (payload.fromMe && payload.document && payload.document.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') { return; }
+    if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
+    if (!payload.isGroup) { return; }
     const onboardingState = await OnboardingState.findOne({ where: { group_id: payload.phone } });
-    if (onboardingState) {
-        return this.handleOnboardingResponse(payload, onboardingState);
-    }
-    
-    if (payload.buttonsResponseMessage) {
-      return this.handleButtonResponse(payload);
-    }
-
+    if (onboardingState) { return this.handleOnboardingResponse(payload, onboardingState); }
+    if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
     const participantPhone = payload.participantPhone;
-    if (!participantPhone) {
-        return;
-    }
-
-    const monitoredGroup = await MonitoredGroup.findOne({ 
-        where: { group_id: payload.phone, is_active: true },
-        include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }]
-    });
-    
-    if (!monitoredGroup || !monitoredGroup.profile || !monitoredGroup.profile.user) {
-      logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou não tem perfil/usuário associado.`);
-      return;
-    }
-    
+    if (!participantPhone) { return; }
+    const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true }, include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] });
+    if (!monitoredGroup || !monitoredGroup.profile || !monitoredGroup.profile.user) { logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou não tem perfil/usuário associado.`); return; }
     const ownerUserId = monitoredGroup.profile.user.id;
     const isPlanActive = await subscriptionService.isUserActive(ownerUserId);
-    if (!isPlanActive) {
-      return;
-    }
-    
+    if (!isPlanActive) { return; }
     payload.profileId = monitoredGroup.profile.id;
     if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
     if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
@@ -75,27 +43,36 @@ class WebhookService {
 
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
-    // <<< CORREÇÃO: Usar o 'connectedPhone' como o identificador do administrador >>>
-    const initiatorPhone = payload.connectedPhone; 
-
-    if (!initiatorPhone) {
-        logger.error(`[Onboarding] Falha crítica: 'connectedPhone' não encontrado no payload de criação de grupo. Payload: ${JSON.stringify(payload)}`);
-        return;
-    }
+    const initiatorPhone = payload.connectedPhone;
+    if (!initiatorPhone) { logger.error(`[Onboarding] Falha crítica: 'connectedPhone' não encontrado.`); return; }
 
     const user = await User.findOne({ where: { whatsapp_phone: initiatorPhone } });
 
-    if (!user) {
-        logger.warn(`[Onboarding] O administrador da instância (${initiatorPhone}) não foi encontrado como usuário no sistema.`);
-        await whatsappService.sendWhatsappMessage(groupId, "Olá! Ocorreu um erro: o número de telefone conectado a esta instância não está registrado como um usuário no nosso sistema.");
+    // <<< MUDANÇA CRÍTICA: NOVO FLUXO PARA USUÁRIO NÃO ENCONTRADO >>>
+    if (!user || user.status === 'pending') {
+        if (user && user.status === 'pending') {
+            await whatsappService.sendWhatsappMessage(groupId, "Olá! Parece que você já iniciou seu cadastro, mas ainda não o finalizou. Por favor, verifique seu e-mail para o link de finalização.");
+            return;
+        }
+
+        logger.warn(`[Onboarding] Novo usuário não registrado (${initiatorPhone}). Iniciando fluxo de pré-cadastro.`);
+        await OnboardingState.destroy({ where: { group_id: groupId } });
+        await OnboardingState.create({
+            group_id: groupId,
+            initiator_phone: initiatorPhone,
+            status: 'awaiting_email',
+            expires_at: new Date(Date.now() + ONBOARDING_WAIT_TIME_MINUTES * 60 * 1000),
+        });
+        const welcomeMessage = `Olá! 👋 Sou seu assistente de gestão de custos. Vi que você é novo por aqui!
+
+Para começarmos, por favor, me informe seu melhor e-mail para criarmos sua conta.`;
+        await whatsappService.sendWhatsappMessage(groupId, welcomeMessage);
         return;
     }
     
-    // A verificação de plano é redundante se considerarmos que o admin sempre tem acesso, mas mantemos por segurança.
     const isPlanActive = await subscriptionService.isUserActive(user.id);
     if (!isPlanActive) {
-        logger.warn(`[Onboarding] Acesso negado para o administrador ${initiatorPhone}. Plano inativo.`);
-        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos, a conta principal precisa de uma assinatura ativa.\n\nPor favor, acesse nosso site para escolher seu plano:\nhttps://obras-fabio.vercel.app/landing#precos\n\nApós a confirmação, basta criar um novo grupo para iniciarmos a configuração.`;
+        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos, sua conta precisa de uma assinatura ativa.\n\nPor favor, acesse nosso site para escolher seu plano:\nhttps://obras-fabio.vercel.app/landing#precos\n\nApós a confirmação, basta criar um novo grupo para iniciarmos a configuração.`;
         await whatsappService.sendWhatsappMessage(groupId, paymentMessage);
         return;
     }
@@ -109,24 +86,62 @@ class WebhookService {
         expires_at: new Date(Date.now() + ONBOARDING_WAIT_TIME_MINUTES * 60 * 1000),
     });
 
-    const welcomeMessage = `Olá! 👋 Sou seu novo assistente de gestão de custos.\n\nPara começar, precisamos vincular este grupo a um perfil de custos. Um perfil representa uma obra ou projeto específico.\n\nO que você deseja fazer?`;
+    const welcomeMessage = `Olá! 👋 Sou seu novo assistente de gestão de custos.\n\nPara começar, precisamos vincular este grupo a um perfil de custos.\n\nO que você deseja fazer?`;
     const buttons = [ { id: 'onboarding_create_profile', label: '➕ Criar um novo Perfil' }, { id: 'onboarding_use_existing', label: '📂 Usar Perfil existente' } ];
     await whatsappService.sendButtonList(groupId, welcomeMessage, buttons);
-    logger.info(`[Onboarding] Iniciei o processo de onboarding para o grupo ${groupId}, iniciado pelo administrador ${initiatorPhone}.`);
+    logger.info(`[Onboarding] Iniciei o processo de onboarding para o grupo ${groupId}, iniciado pelo usuário ${user.email}.`);
   }
-  
-  // O restante do arquivo (handleOnboardingResponse, handleContextArrival, etc.) permanece idêntico ao que você já tem.
-  // Vou incluí-lo para garantir que você tenha o arquivo completo e correto.
   
   async handleOnboardingResponse(payload, state) {
     const groupId = payload.phone;
-    const userId = state.user_id;
     const textMessage = payload.text ? payload.text.message : null;
     const buttonId = payload.buttonsResponseMessage ? payload.buttonsResponseMessage.buttonId : null;
     const selectedRowId = payload.listResponseMessage ? payload.listResponseMessage.selectedRowId : null;
     
     switch (state.status) {
+      // <<< NOVO ESTADO: AGUARDANDO E-MAIL PARA PRÉ-CADASTRO >>>
+      case 'awaiting_email':
+        if (textMessage && textMessage.includes('@')) {
+            const email = textMessage.trim();
+            const existingUser = await User.findOne({ where: { email } });
+            if (existingUser) {
+                await whatsappService.sendWhatsappMessage(groupId, `O e-mail ${email} já está cadastrado. Se você é o dono desta conta, por favor, adicione o número ${state.initiator_phone} ao seu perfil em nosso site e tente novamente.`);
+                await state.destroy();
+                return;
+            }
+
+            const newUser = await User.create({
+                email,
+                whatsapp_phone: state.initiator_phone,
+                status: 'pending',
+            });
+            
+            const registrationToken = jwt.sign({ id: newUser.id }, process.env.JWT_SECRET || 'your-default-secret', { expiresIn: '1h' });
+            
+            // ATENÇÃO: A URL base do frontend deve estar em .env
+            const completionLink = `${process.env.FRONTEND_URL}/complete-registration?token=${registrationToken}`;
+
+            const linkMessage = `✅ Ótimo! Criei um pré-cadastro para você com o e-mail: *${email}*
+
+Agora, o último passo:
+
+1️⃣ *Clique no link abaixo* para definir sua senha e ativar sua conta:
+${completionLink}
+
+2️⃣ Após ativar, você será direcionado para a página de planos.
+
+3️⃣ Assim que sua assinatura for confirmada, basta me *remover e adicionar novamente a este grupo* para começarmos a configuração do seu primeiro projeto!`;
+
+            await whatsappService.sendWhatsappMessage(groupId, linkMessage);
+            await state.destroy();
+        } else {
+            await whatsappService.sendWhatsappMessage(groupId, "Por favor, envie um endereço de e-mail válido.");
+        }
+        break;
+
+      // O restante dos casos permanece o mesmo...
       case 'awaiting_profile_choice':
+        const userId = state.user_id;
         if (buttonId === 'onboarding_create_profile') {
           state.status = 'awaiting_new_profile_name';
           await state.save();
@@ -152,13 +167,14 @@ class WebhookService {
 
       case 'awaiting_new_profile_name':
         if (textMessage) {
-          const newProfile = await profileService.createProfile({ name: textMessage, user_id: userId });
-          await groupService.startMonitoringGroup(groupId, newProfile.id, userId);
+          const newProfile = await profileService.createProfile({ name: textMessage, user_id: state.user_id });
+          await groupService.startMonitoringGroup(groupId, newProfile.id, state.user_id);
           await whatsappService.sendWhatsappMessage(groupId, `✅ Perfil "${newProfile.name}" criado e vinculado a este grupo!`);
           await this.startCategoryCreationFlow(state, newProfile.id);
         }
         break;
-
+      
+      // O restante dos casos de categoria permanece o mesmo...
       case 'awaiting_category_creation_start':
         if (buttonId === 'onboarding_add_category') {
             state.status = 'awaiting_new_category_name';
@@ -195,6 +211,8 @@ class WebhookService {
     }
   }
 
+  // O restante do arquivo continua idêntico
+  // ...
   async startCategoryCreationFlow(state, profileId, isFirstTime = true) {
     state.status = 'awaiting_category_creation_start';
     state.profile_id = profileId;

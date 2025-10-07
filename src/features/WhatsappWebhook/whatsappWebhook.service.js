@@ -1,9 +1,9 @@
-
 // src/features/WhatsappWebhook/whatsappWebhook.service.js
 'use strict';
 
 const logger = require('../../utils/logger');
 const { MonitoredGroup, Category, PendingExpense, Expense, Profile, User, OnboardingState } = require('../../models');
+const jwt = require('jsonwebtoken');
 const subscriptionService = require('../../services/subscriptionService');
 const profileService = require('../ProfileManager/profile.service');
 const groupService = require('../GroupManager/group.service');
@@ -15,8 +15,6 @@ const dashboardService = require('../../features/Dashboard/dashboard.service');
 const excelService = require('../../utils/excelService');
 const fs = require('fs');
 const path = require('path');
-const { startOfMonth, format } = require('date-fns');
-const ptBR = require('date-fns/locale/pt-BR');
 
 const CONTEXT_WAIT_TIME_MINUTES = 2;
 const EXPENSE_EDIT_WAIT_TIME_MINUTES = 5;
@@ -25,39 +23,19 @@ const ONBOARDING_WAIT_TIME_MINUTES = 10;
 class WebhookService {
 
   async processIncomingMessage(payload) {
-    if (payload.fromMe && payload.document && payload.document.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
-      return;
-    }
-    if (payload.notification === 'GROUP_CREATE') {
-        return this.handleGroupJoin(payload);
-    }
-    if (!payload.isGroup) {
-      return;
-    }
+    if (payload.fromMe && payload.document && payload.document.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') { return; }
+    if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
+    if (!payload.isGroup) { return; }
     const onboardingState = await OnboardingState.findOne({ where: { group_id: payload.phone } });
-    if (onboardingState) {
-        return this.handleOnboardingResponse(payload, onboardingState);
-    }
-    if (payload.buttonsResponseMessage) {
-      return this.handleButtonResponse(payload);
-    }
+    if (onboardingState) { return this.handleOnboardingResponse(payload, onboardingState); }
+    if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
     const participantPhone = payload.participantPhone;
-    if (!participantPhone) {
-        return;
-    }
-    const monitoredGroup = await MonitoredGroup.findOne({ 
-        where: { group_id: payload.phone, is_active: true },
-        include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }]
-    });
-    if (!monitoredGroup || !monitoredGroup.profile || !monitoredGroup.profile.user) {
-      logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou não tem perfil/usuário associado.`);
-      return;
-    }
+    if (!participantPhone) { return; }
+    const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true }, include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] });
+    if (!monitoredGroup || !monitoredGroup.profile || !monitoredGroup.profile.user) { logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou não tem perfil/usuário associado.`); return; }
     const ownerUserId = monitoredGroup.profile.user.id;
     const isPlanActive = await subscriptionService.isUserActive(ownerUserId);
-    if (!isPlanActive) {
-      return;
-    }
+    if (!isPlanActive) { return; }
     payload.profileId = monitoredGroup.profile.id;
     if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
     if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
@@ -65,43 +43,32 @@ class WebhookService {
 
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
-    const initiatorPhone = payload.connectedPhone; 
-
-    if (!initiatorPhone) {
-        logger.error(`[Onboarding] Falha crítica: 'connectedPhone' não encontrado no payload de criação de grupo. Payload: ${JSON.stringify(payload)}`);
+    const initiatorPhone = payload.connectedPhone;
+    if (!initiatorPhone) { logger.error(`[Onboarding] Falha crítica: 'connectedPhone' não encontrado.`); return; }
+    const user = await User.findOne({ where: { whatsapp_phone: initiatorPhone } });
+    if (!user || user.status === 'pending') {
+        if (user && user.status === 'pending') {
+            await whatsappService.sendWhatsappMessage(groupId, "Olá! Parece que você já iniciou seu cadastro, mas ainda não o finalizou. Por favor, verifique o link que enviei anteriormente para definir sua senha.");
+            return;
+        }
+        logger.warn(`[Onboarding] Novo usuário não registrado (${initiatorPhone}). Iniciando fluxo de pré-cadastro.`);
+        await OnboardingState.destroy({ where: { group_id: groupId } });
+        await OnboardingState.create({
+            group_id: groupId,
+            initiator_phone: initiatorPhone,
+            status: 'awaiting_email',
+            expires_at: new Date(Date.now() + ONBOARDING_WAIT_TIME_MINUTES * 60 * 1000),
+        });
+        const welcomeMessage = `Olá! 👋 Sou seu assistente de gestão de custos. Vi que você é novo por aqui!\n\nPara começarmos, por favor, me informe seu melhor e-mail para criarmos sua conta.`;
+        await whatsappService.sendWhatsappMessage(groupId, welcomeMessage);
         return;
     }
-
-    const user = await User.findOne({ where: { whatsapp_phone: initiatorPhone } });
-
-    // <<< CORREÇÃO PRINCIPAL AQUI >>>
-    if (!user) {
-        logger.warn(`[Onboarding] Novo usuário não registrado (${initiatorPhone}) tentou iniciar o bot no grupo ${groupId}.`);
-        
-        const welcomeAndRegisterMessage = `Olá! 👋 Sou seu assistente de gestão de custos e vi que você me adicionou a este grupo. Que bom ter você aqui!
-
-Para começarmos, você precisa criar sua conta em nosso sistema e ativar um plano. É bem rápido!
-
-1️⃣ Acesse o link abaixo para se cadastrar e escolher seu plano:
-https://obras-fabio.vercel.app/landing#precos
-
-2️⃣ Após confirmar sua assinatura, basta me remover e me adicionar novamente a este grupo. Eu estarei pronto para começar a configuração!
-
-Estou aguardando você! 😉`;
-
-        await whatsappService.sendWhatsappMessage(groupId, welcomeAndRegisterMessage);
-        return; // Encerra o fluxo
-    }
-    // <<< FIM DA CORREÇÃO >>>
-    
     const isPlanActive = await subscriptionService.isUserActive(user.id);
     if (!isPlanActive) {
-        logger.warn(`[Onboarding] Acesso negado para o administrador ${initiatorPhone}. Plano inativo.`);
-        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos, a conta principal precisa de uma assinatura ativa.\n\nPor favor, acesse nosso site para escolher seu plano:\nhttps://obras-fabio.vercel.app/landing#precos\n\nApós a confirmação, basta criar um novo grupo para iniciarmos a configuração.`;
+        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos, sua conta precisa de uma assinatura ativa.\n\nPor favor, acesse nosso site para escolher seu plano:\nhttps://obras-fabio.vercel.app/landing#precos\n\nApós a confirmação, basta criar um novo grupo para iniciarmos a configuração.`;
         await whatsappService.sendWhatsappMessage(groupId, paymentMessage);
         return;
     }
-
     await OnboardingState.destroy({ where: { group_id: groupId } });
     await OnboardingState.create({
         group_id: groupId,
@@ -110,22 +77,55 @@ Estou aguardando você! 😉`;
         status: 'awaiting_profile_choice',
         expires_at: new Date(Date.now() + ONBOARDING_WAIT_TIME_MINUTES * 60 * 1000),
     });
-
-    const welcomeMessage = `Olá! 👋 Sou seu novo assistente de gestão de custos.\n\nPara começar, precisamos vincular este grupo a um perfil de custos. Um perfil representa uma obra ou projeto específico.\n\nO que você deseja fazer?`;
+    const welcomeMessage = `Olá! 👋 Sou seu novo assistente de gestão de custos.\n\nPara começar, precisamos vincular este grupo a um perfil de custos.\n\nO que você deseja fazer?`;
     const buttons = [ { id: 'onboarding_create_profile', label: '➕ Criar um novo Perfil' }, { id: 'onboarding_use_existing', label: '📂 Usar Perfil existente' } ];
     await whatsappService.sendButtonList(groupId, welcomeMessage, buttons);
-    logger.info(`[Onboarding] Iniciei o processo de onboarding para o grupo ${groupId}, iniciado pelo administrador ${initiatorPhone}.`);
+    logger.info(`[Onboarding] Iniciei o processo de onboarding para o grupo ${groupId}, iniciado pelo usuário ${user.email}.`);
   }
   
   async handleOnboardingResponse(payload, state) {
     const groupId = payload.phone;
-    const userId = state.user_id;
     const textMessage = payload.text ? payload.text.message : null;
     const buttonId = payload.buttonsResponseMessage ? payload.buttonsResponseMessage.buttonId : null;
     const selectedRowId = payload.listResponseMessage ? payload.listResponseMessage.selectedRowId : null;
     
     switch (state.status) {
+      case 'awaiting_email':
+        // <<< CORREÇÃO AQUI >>>
+        // Só age se for uma mensagem de texto. Ignora callbacks e outras notificações.
+        if (textMessage) { 
+            if (textMessage.includes('@') && textMessage.includes('.')) { // Validação simples de e-mail
+                const email = textMessage.trim();
+                const existingUser = await User.findOne({ where: { email } });
+                if (existingUser) {
+                    await whatsappService.sendWhatsappMessage(groupId, `O e-mail ${email} já está cadastrado. Se você é o dono desta conta, por favor, adicione o número ${state.initiator_phone} ao seu perfil em nosso site e tente novamente.`);
+                    await state.destroy();
+                    return;
+                }
+
+                const newUser = await User.create({
+                    email,
+                    whatsapp_phone: state.initiator_phone,
+                    status: 'pending',
+                });
+                
+                const registrationToken = jwt.sign({ id: newUser.id }, process.env.JWT_SECRET || 'your-default-secret', { expiresIn: '1h' });
+                const completionLink = `${process.env.FRONTEND_URL}/complete-registration?token=${registrationToken}`;
+
+                const linkMessage = `✅ Ótimo! Criei um pré-cadastro para você com o e-mail: *${email}*\n\nAgora, o último passo:\n\n1️⃣ *Clique no link abaixo* para definir sua senha e ativar sua conta:\n${completionLink}\n\n2️⃣ Após ativar, você será direcionado para a página de planos.\n\n3️⃣ Assim que sua assinatura for confirmada, basta me *remover e adicionar novamente a este grupo* para começarmos a configuração do seu primeiro projeto!`;
+
+                await whatsappService.sendWhatsappMessage(groupId, linkMessage);
+                await state.destroy();
+            } else {
+                // Se for uma mensagem de texto, mas não um e-mail válido, pede novamente.
+                await whatsappService.sendWhatsappMessage(groupId, "Isso não parece um e-mail válido. Por favor, tente novamente.");
+            }
+        }
+        // Se não for uma mensagem de texto (textMessage é nulo), não faz nada e quebra o loop.
+        break;
+
       case 'awaiting_profile_choice':
+        const userId = state.user_id;
         if (buttonId === 'onboarding_create_profile') {
           state.status = 'awaiting_new_profile_name';
           await state.save();
@@ -151,13 +151,13 @@ Estou aguardando você! 😉`;
 
       case 'awaiting_new_profile_name':
         if (textMessage) {
-          const newProfile = await profileService.createProfile({ name: textMessage, user_id: userId });
-          await groupService.startMonitoringGroup(groupId, newProfile.id, userId);
+          const newProfile = await profileService.createProfile({ name: textMessage, user_id: state.user_id });
+          await groupService.startMonitoringGroup(groupId, newProfile.id, state.user_id);
           await whatsappService.sendWhatsappMessage(groupId, `✅ Perfil "${newProfile.name}" criado e vinculado a este grupo!`);
           await this.startCategoryCreationFlow(state, newProfile.id);
         }
         break;
-
+      
       case 'awaiting_category_creation_start':
         if (buttonId === 'onboarding_add_category') {
             state.status = 'awaiting_new_category_name';
@@ -525,7 +525,7 @@ Estou aguardando você! 😉`;
               categorySummary = chartData.pieChart.sort((a, b) => b.value - a.value).map(cat => `- ${cat.name}: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cat.value)}`).join('\n');
           }
           const currentMonth = new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(now);
-          const currentYear = now.getFullYear();
+          const currentYear = new Date().getFullYear();
           const formattedReportHeaderMonth = `${currentMonth.charAt(0).toUpperCase() + currentMonth.slice(1)}/${currentYear}`;
           const reportMessage = `📊 *Relatório Mensal de Despesas* 📊\n(${formattedReportHeaderMonth}) \n\n*Despesas Totais:* ${formattedTotalExpenses}\n\n*Gastos por Categoria:*\n${categorySummary}\n\n_Este relatório é referente aos dados registrados até o momento._`;
           await whatsappService.sendWhatsappMessage(groupId, reportMessage);

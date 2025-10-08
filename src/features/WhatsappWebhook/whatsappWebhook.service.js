@@ -21,40 +21,25 @@ const ONBOARDING_WAIT_TIME_MINUTES = 10;
 
 class WebhookService {
 
-  // <<< INÍCIO DA NOVA FUNÇÃO HELPER >>>
-  /**
-   * Busca um usuário pelo telefone, testando variações com e sem o nono dígito.
-   * @param {string} phone - O número de telefone a ser buscado.
-   * @returns {Promise<User|null>} - O usuário encontrado ou nulo.
-   */
   async _findUserByFlexiblePhone(phone) {
     if (!phone) return null;
-
-    const variations = new Set([phone]); // Usa um Set para evitar duplicatas
-
-    // Lógica para o nono dígito (específico para celulares do Brasil)
-    // Ex: 557182862912 (12 dígitos) -> adiciona 5571982862912 (13 dígitos)
+    const variations = new Set([phone]);
     if (phone.startsWith('55') && phone.length === 12) {
       const areaCode = phone.substring(2, 4);
       const localNumber = phone.substring(4);
-      if (localNumber.length === 8) { // Celulares antigos sem o 9
+      if (localNumber.length === 8) {
         variations.add(`55${areaCode}9${localNumber}`);
       }
-    }
-    // Ex: 5571982862912 (13 dígitos) -> adiciona 557182862912 (12 dígitos)
-    else if (phone.startsWith('55') && phone.length === 13) {
+    } else if (phone.startsWith('55') && phone.length === 13) {
       const areaCode = phone.substring(2, 4);
       const localNumber = phone.substring(4);
       if (localNumber.startsWith('9') && localNumber.length === 9) {
         variations.add(`55${areaCode}${localNumber.substring(1)}`);
       }
     }
-    
     logger.info(`[Auth] Buscando usuário com variações de telefone: ${Array.from(variations).join(', ')}`);
     return User.findOne({ where: { whatsapp_phone: { [Op.in]: Array.from(variations) } } });
   }
-  // <<< FIM DA NOVA FUNÇÃO HELPER >>>
-
 
   async processIncomingMessage(payload) {
     if (payload.fromMe) { return; }
@@ -69,10 +54,10 @@ class WebhookService {
 
     const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
     if (!monitoredGroup) {
-        const pendingUser = await this._findUserByFlexiblePhone(participantPhone);
-        if (pendingUser && pendingUser.status === 'pending') {
-            logger.info(`[Webhook] Mensagem de usuário pendente (${pendingUser.email}) em grupo não monitorado.`);
-            await this.startPendingPaymentFlow(payload.phone, participantPhone, pendingUser);
+        const user = await this._findUserByFlexiblePhone(participantPhone);
+        if (user && user.status === 'pending') {
+            logger.info(`[Webhook] Mensagem de usuário pendente (${user.email}) em grupo não monitorado.`);
+            await this.startPendingPaymentFlow(payload.phone, participantPhone, user);
             return;
         }
         logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou participante não está pendente.`);
@@ -116,7 +101,6 @@ class WebhookService {
 
     for (const participant of metadata.participants) {
       if (!participant.phone) continue;
-      // <<< MUDANÇA: Usando a busca flexível >>>
       const user = await this._findUserByFlexiblePhone(participant.phone);
       if (user) {
         const isPlanActive = await subscriptionService.isUserActive(user.id);
@@ -155,7 +139,6 @@ class WebhookService {
     const ownerPhone = ownerParticipant.phone;
     logger.info(`[Onboarding] Dono do grupo identificado pelo número real: ${ownerPhone}`);
   
-    // <<< MUDANÇA: Usando a busca flexível >>>
     const ownerUser = await this._findUserByFlexiblePhone(ownerPhone);
   
     if (ownerUser) {
@@ -195,12 +178,23 @@ class WebhookService {
       await whatsappService.sendButtonList(groupId, message, buttons);
   }
 
+  // <<< INÍCIO DA VERSÃO CORRIGIDA E FINAL DA FUNÇÃO >>>
   async handleOnboardingResponse(payload, state) {
     if (payload.fromMe) { return; }
     const groupId = payload.phone;
     const textMessage = payload.text ? payload.text.message : null;
     const buttonId = payload.buttonsResponseMessage ? payload.buttonsResponseMessage.buttonId : null;
-    const selectedRowId = payload.listResponseMessage ? payload.listResponseMessage.selectedRowId : null;
+    
+    // <<< MUDANÇA 1: Simplificar a validação do respondente >>>
+    // Apenas o usuário que iniciou o processo pode responder.
+    const userIsInitiator = await this._findUserByFlexiblePhone(payload.participantPhone);
+    if (!userIsInitiator || userIsInitiator.id !== state.user_id) {
+        // Se o estado não tiver user_id (novo cadastro), compara o número de telefone.
+        if (!state.user_id && payload.participantPhone !== state.initiator_phone) {
+            logger.warn(`[Onboarding] Resposta ignorada. Participante ${payload.participantPhone} não é o iniciador ${state.initiator_phone}.`);
+            return;
+        }
+    }
     
     switch (state.status) {
       case 'awaiting_pending_payment':
@@ -261,6 +255,24 @@ class WebhookService {
       
       case 'awaiting_profile_choice':
         const userId = state.user_id;
+
+        // Lógica para quando o usuário digita um número para selecionar o perfil
+        if (textMessage && /^\d+$/.test(textMessage)) {
+            const profiles = await profileService.getProfilesByUserId(userId);
+            const selectedIndex = parseInt(textMessage, 10) - 1;
+            const profile = profiles[selectedIndex];
+
+            if (profile) {
+                await groupService.startMonitoringGroup(groupId, profile.id, userId);
+                await whatsappService.sendWhatsappMessage(groupId, `✅ Perfil "${profile.name}" selecionado!`);
+                await this.startCategoryCreationFlow(state, profile.id);
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, responda com um número da lista.`);
+            }
+            return; // Impede que a lógica de botões execute
+        }
+
+        // Lógica para os botões "Criar" ou "Usar existente"
         if (buttonId === 'onboarding_create_profile') {
           state.status = 'awaiting_new_profile_name';
           await state.save();
@@ -272,17 +284,16 @@ class WebhookService {
             state.status = 'awaiting_new_profile_name';
             await state.save();
           } else {
-            const optionList = { title: "Seus Perfis", buttonLabel: "Escolha um Perfil", options: profiles.map(p => ({ id: `onboarding_select_profile_${p.id}`, title: p.name, description: `ID: ${p.id}` })) };
-            await whatsappService.sendOptionList(groupId, "Selecione um de seus perfis para monitorar os custos deste grupo.", optionList);
+            // <<< MUDANÇA 2: Enviar como texto numerado >>>
+            const profileListText = profiles
+                .map((p, index) => `${index + 1} - ${p.name}`)
+                .join('\n');
+            const message = `Seus perfis existentes:\n\n${profileListText}\n\nResponda com o *número* do perfil que você deseja usar para este grupo.`;
+            await whatsappService.sendWhatsappMessage(groupId, message);
           }
-        } else if (selectedRowId && selectedRowId.startsWith('onboarding_select_profile_')) {
-            const profileId = selectedRowId.split('_')[3];
-            await groupService.startMonitoringGroup(groupId, profileId, userId);
-            const profile = await Profile.findByPk(profileId);
-            await whatsappService.sendWhatsappMessage(groupId, `✅ Perfil "${profile.name}" selecionado!`);
-            await this.startCategoryCreationFlow(state, profileId);
         }
         break;
+        
       case 'awaiting_new_profile_name':
         if (textMessage) {
           const newProfile = await profileService.createProfile({ name: textMessage, user_id: state.user_id });
@@ -332,9 +343,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
           break;
     }
   }
+  // <<< FIM DA VERSÃO CORRIGIDA >>>
 
-  // O restante do arquivo (funções handleMediaArrival, handleContextArrival, etc.) permanece inalterado.
-  // ... (cole o restante das funções do arquivo aqui, elas não precisam de modificação)
   async startCategoryCreationFlow(state, profileId, isFirstTime = true) {
     state.status = 'awaiting_category_creation_start';
     state.profile_id = profileId;

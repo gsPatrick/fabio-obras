@@ -42,67 +42,46 @@ class WebhookService {
   }
 
   async processIncomingMessage(payload) {
-    try {
-      if (payload.fromMe) { return; }
-      if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
-      if (!payload.isGroup) { return; }
+    if (payload.fromMe) { return; }
+    if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
+    if (!payload.isGroup) { return; }
 
-      const onboardingState = await OnboardingState.findOne({ where: { group_id: payload.phone } });
-      if (onboardingState) { return this.handleOnboardingResponse(payload, onboardingState); }
+    const onboardingState = await OnboardingState.findOne({ where: { group_id: payload.phone } });
+    if (onboardingState) { return this.handleOnboardingResponse(payload, onboardingState); }
 
-      const participantPhone = payload.participantPhone;
-      if (!participantPhone) { return; }
+    const participantPhone = payload.participantPhone;
+    if (!participantPhone) { return; }
 
-      const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
-      if (!monitoredGroup) {
-          const user = await this._findUserByFlexiblePhone(participantPhone);
-          if (user && user.status === 'pending') {
-              logger.info(`[Webhook] Mensagem de usuário pendente (${user.email}) em grupo não monitorado.`);
-              await this.startPendingPaymentFlow(payload.phone, participantPhone, user);
-              return;
-          }
-          logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou participante não está pendente.`);
-          return;
-      }
-
-      // <<< INÍCIO DA CORREÇÃO >>>
-      // Corrigido para incluir o modelo User aninhado.
-      const groupWithDetails = await MonitoredGroup.findOne({ 
-          where: { id: monitoredGroup.id }, 
-          include: [{ 
-              model: Profile, 
-              as: 'profile', 
-              include: [{
-                  model: User,
-                  as: 'user'
-              }]
-          }] 
-      });
-
-      if (!groupWithDetails || !groupWithDetails.profile || !groupWithDetails.profile.user) {
-        logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil ou usuário associado.`);
+    const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
+    if (!monitoredGroup) {
+        const user = await this._findUserByFlexiblePhone(participantPhone);
+        if (user && user.status === 'pending') {
+            logger.info(`[Webhook] Mensagem de usuário pendente (${user.email}) em grupo não monitorado.`);
+            await this.startPendingPaymentFlow(payload.phone, participantPhone, user);
+            return;
+        }
+        logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou participante não está pendente.`);
         return;
-      }
-      payload.profileId = groupWithDetails.profile.id;
-
-      if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
-
-      const user = groupWithDetails.profile.user; 
-      const isPlanActive = await subscriptionService.isUserActive(user.id);
-      if (!isPlanActive) {
-        logger.warn(`[Webhook] Acesso negado para ${user.email}. Plano inativo.`);
-        const checkout = await subscriptionService.createSubscriptionCheckout(user.id);
-        const paymentMessage = `Sua assinatura não está ativa. Para continuar registrando despesas, por favor, renove seu plano através do link abaixo:\n\n${checkout.checkoutUrl}`;
-        await whatsappService.sendWhatsappMessage(payload.phone, paymentMessage);
-        return;
-      }
-      // <<< FIM DA CORREÇÃO >>>
-
-      if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
-      if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
-    } catch (error) {
-        logger.error('[Webhook] ERRO NÃO TRATADO no processIncomingMessage:', error);
     }
+
+    if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
+
+    const groupWithDetails = await MonitoredGroup.findOne({ where: { id: monitoredGroup.id }, include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] });
+    if (!groupWithDetails.profile || !groupWithDetails.profile.user) { logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil ou usuário associado.`); return; }
+
+    const ownerUserId = groupWithDetails.profile.user.id;
+    const isPlanActive = await subscriptionService.isUserActive(ownerUserId);
+    if (!isPlanActive) {
+      logger.warn(`[Webhook] Acesso negado para ${groupWithDetails.profile.user.email}. Plano inativo.`);
+      const checkout = await subscriptionService.createSubscriptionCheckout(ownerUserId);
+      const paymentMessage = `Sua assinatura não está ativa. Para continuar registrando despesas, por favor, renove seu plano através do link abaixo:\n\n${checkout.checkoutUrl}`;
+      await whatsappService.sendWhatsappMessage(payload.phone, paymentMessage);
+      return;
+    }
+
+    payload.profileId = groupWithDetails.profile.id;
+    if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
+    if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
   }
   
   async handleGroupJoin(payload) {
@@ -206,7 +185,7 @@ class WebhookService {
     const buttonId = payload.buttonsResponseMessage ? payload.buttonsResponseMessage.buttonId : null;
     
     const userIsInitiator = await this._findUserByFlexiblePhone(payload.participantPhone);
-    if (!userIsInitiator || (state.user_id && userIsInitiator.id !== state.user_id)) {
+    if (!userIsInitiator || userIsInitiator.id !== state.user_id) {
         if (!state.user_id && payload.participantPhone !== state.initiator_phone) {
             logger.warn(`[Onboarding] Resposta ignorada. Participante ${payload.participantPhone} não é o iniciador ${state.initiator_phone}.`);
             return;
@@ -491,8 +470,10 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o arquivo ou o áudio. Por favor, tente novamente.`);
         await pendingMedia.destroy();
       }
-    } else if (textMessage && /^\d+$/.test(textMessage)) {
+    } else {
+      if (textMessage && /^\d+$/.test(textMessage)) {
         await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone, profileId);
+      }
     }
   }
 
@@ -521,23 +502,15 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const finalDescriptionForDB = userContext ? `${baseDescription} (${userContext})` : baseDescription;
     const category = await Category.findByPk(categoryId);
     const newExpense = await Expense.create({ value, description: finalDescriptionForDB, expense_date: pendingExpense.createdAt, whatsapp_message_id: pendingExpense.whatsapp_message_id, category_id: categoryId, profile_id: pendingExpense.profile_id, });
-    
+    if (pendingExpense.status === 'awaiting_context') {
+      pendingExpense.value = value;
+      pendingExpense.description = finalDescriptionForDB;
+      pendingExpense.suggested_category_id = categoryId;
+    }
     pendingExpense.expense_id = newExpense.id;
     pendingExpense.status = 'awaiting_validation';
     pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
-    
-    if (!pendingExpense.value) {
-        pendingExpense.value = value;
-    }
-     if (!pendingExpense.description) {
-        pendingExpense.description = finalDescriptionForDB;
-    }
-    if (!pendingExpense.suggested_category_id) {
-       pendingExpense.suggested_category_id = categoryId;
-    }
-    
     await pendingExpense.save();
-    
     const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
     const totalExpenses = await Expense.sum('value', { where: { profile_id: pendingExpense.profile_id } });
     const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
@@ -593,36 +566,18 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       const clickerPhone = payload.participantPhone;
       const profileId = payload.profileId;
       const pendingExpenseId = buttonId.split('_')[2];
-      
-      const pendingExpense = await PendingExpense.findOne({ 
-          where: { id: pendingExpenseId, profile_id: profileId },
-          include: [{ model: Expense, as: 'expense' }]
-      });
-
-      if (!pendingExpense) { 
-          await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ⏳\n\nO prazo para editar esta despesa já expirou ou ela não existe.`); 
-          return; 
-      }
-      
-      if (pendingExpense.participant_phone !== clickerPhone) { 
-          await whatsappService.sendWhatsappMessage(groupId, `🤚 *Atenção!* \n\nApenas a pessoa que registrou a despesa pode editá-la.`); 
-          return; 
-      }
-      
+      const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId }});
+      if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ⏳\n\nO prazo para editar esta despesa já expirou ou ela não existe.`); return; }
+      if (pendingExpense.participant_phone !== clickerPhone) { await whatsappService.sendWhatsappMessage(groupId, `🤚 *Atenção, ${clickerPhone}!* \n\nApenas a pessoa que registrou a despesa (${pendingExpense.participant_phone}) pode editá-la.`); return; }
       const allCategories = await Category.findAll({ where: { profile_id: profileId }, order: [['name', 'ASC']] });
       const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name}`).join('\n');
-      
-      const valueToFormat = pendingExpense.value;
-      const descriptionToUse = pendingExpense.description;
-      
+      const valueToFormat = pendingExpense.expense ? pendingExpense.expense.value : pendingExpense.value;
+      const descriptionToUse = pendingExpense.expense ? pendingExpense.expense.description : pendingExpense.description;
       const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);
-      
-      const message = `📋 *Escolha a Categoria Correta*\n\nVocê está alterando a categoria para a despesa de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
-      
+      const message = `📋 *Escolha a Categoria Correta*\n\nVocê está definindo a categoria para a despesa de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
       pendingExpense.status = 'awaiting_category_reply';
       pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
       await pendingExpense.save();
-      
       await whatsappService.sendWhatsappMessage(groupId, message);
       logger.info(`[Webhook] Solicitação de escolha de categoria para pendência #${pendingExpense.id} por ${clickerPhone}.`);
   }
@@ -632,35 +587,25 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, status: 'awaiting_category_reply' },
       include: [{ model: Expense, as: 'expense' }]
     });
-    if (!pendingExpense) { 
-        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada (nenhuma pendência encontrada).`); 
-        return; 
-    }
-    
+    if (!pendingExpense) { logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada.`); return false; }
     const allCategories = await Category.findAll({ where: { profile_id: profileId }, order: [['name', 'ASC']] });
     const selectedCategory = allCategories[selectedNumber - 1];
-    if (!selectedCategory) { 
-        const totalCategories = allCategories.length; 
-        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!* \n\nO número *${selectedNumber}* não está na lista. Responda com um número entre 1 e ${totalCategories}.`); 
-        return; 
-    }
-    
+    if (!selectedCategory) { const totalCategories = allCategories.length; await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!* \n\nO número *${selectedNumber}* não está na lista. Responda com um número entre 1 e ${totalCategories}.`); return true; }
     if (pendingExpense.expense) {
       await pendingExpense.expense.update({ category_id: selectedCategory.id });
     } else {
       const analysisResult = { value: pendingExpense.value, baseDescription: pendingExpense.description.split(' (')[0] };
       const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
       await this.createExpenseAndStartEditFlow(pendingExpense, analysisResult, userContext, selectedCategory.id);
-      return;
+      return true;
     }
-
     await pendingExpense.destroy();
-    
     const totalExpenses = await Expense.sum('value', { where: { profile_id: profileId } });
     const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
     const successMessage = `✅ *Custo Atualizado!* \nDespesa #${pendingExpense.expense.id}\nNova categoria: *${selectedCategory.name}*\n*Total de Despesas:* ${formattedTotalExpenses}`;
     await whatsappService.sendWhatsappMessage(groupId, successMessage);
     logger.info(`[Webhook] Despesa #${pendingExpense.expense_id} atualizada para categoria ${selectedCategory.name} por ${participantPhone}.`);
+    return true;
   }
 
   async sendSpendingReport(groupId, recipientPhone, profileId) {

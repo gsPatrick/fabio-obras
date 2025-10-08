@@ -19,7 +19,7 @@ class User extends Model {
       },
       password: {
         type: DataTypes.STRING,
-        allowNull: false, // <<< VOLTOU A SER OBRIGATÓRIO
+        allowNull: false,
       },
       status: {
         type: DataTypes.ENUM('pending', 'active'),
@@ -43,6 +43,15 @@ class User extends Model {
     if (!this.password) return false;
     return bcrypt.compare(password, this.password);
   }
+
+  // <<< INÍCIO DA CORREÇÃO >>>
+  static associate(models) {
+    // 1:1 - Um Usuário tem uma Assinatura
+    this.hasOne(models.Subscription, { foreignKey: 'user_id', as: 'subscription' });
+    // 1:N - Um Usuário tem muitos Perfis
+    this.hasMany(models.Profile, { foreignKey: 'user_id', as: 'profiles' });
+  }
+  // <<< FIM DA CORREÇÃO >>>
 }
 
 module.exports = User;

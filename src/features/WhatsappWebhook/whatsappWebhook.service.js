@@ -21,6 +21,41 @@ const ONBOARDING_WAIT_TIME_MINUTES = 10;
 
 class WebhookService {
 
+  // <<< INÍCIO DA NOVA FUNÇÃO HELPER >>>
+  /**
+   * Busca um usuário pelo telefone, testando variações com e sem o nono dígito.
+   * @param {string} phone - O número de telefone a ser buscado.
+   * @returns {Promise<User|null>} - O usuário encontrado ou nulo.
+   */
+  async _findUserByFlexiblePhone(phone) {
+    if (!phone) return null;
+
+    const variations = new Set([phone]); // Usa um Set para evitar duplicatas
+
+    // Lógica para o nono dígito (específico para celulares do Brasil)
+    // Ex: 557182862912 (12 dígitos) -> adiciona 5571982862912 (13 dígitos)
+    if (phone.startsWith('55') && phone.length === 12) {
+      const areaCode = phone.substring(2, 4);
+      const localNumber = phone.substring(4);
+      if (localNumber.length === 8) { // Celulares antigos sem o 9
+        variations.add(`55${areaCode}9${localNumber}`);
+      }
+    }
+    // Ex: 5571982862912 (13 dígitos) -> adiciona 557182862912 (12 dígitos)
+    else if (phone.startsWith('55') && phone.length === 13) {
+      const areaCode = phone.substring(2, 4);
+      const localNumber = phone.substring(4);
+      if (localNumber.startsWith('9') && localNumber.length === 9) {
+        variations.add(`55${areaCode}${localNumber.substring(1)}`);
+      }
+    }
+    
+    logger.info(`[Auth] Buscando usuário com variações de telefone: ${Array.from(variations).join(', ')}`);
+    return User.findOne({ where: { whatsapp_phone: { [Op.in]: Array.from(variations) } } });
+  }
+  // <<< FIM DA NOVA FUNÇÃO HELPER >>>
+
+
   async processIncomingMessage(payload) {
     if (payload.fromMe) { return; }
     if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
@@ -34,13 +69,13 @@ class WebhookService {
 
     const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
     if (!monitoredGroup) {
-        const pendingUser = await User.findOne({ where: { whatsapp_phone: participantPhone, status: 'pending' } });
-        if (pendingUser) {
+        const pendingUser = await this._findUserByFlexiblePhone(participantPhone);
+        if (pendingUser && pendingUser.status === 'pending') {
             logger.info(`[Webhook] Mensagem de usuário pendente (${pendingUser.email}) em grupo não monitorado.`);
             await this.startPendingPaymentFlow(payload.phone, participantPhone, pendingUser);
             return;
         }
-        logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado e o participante não está pendente.`);
+        logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou participante não está pendente.`);
         return;
     }
 
@@ -63,8 +98,7 @@ class WebhookService {
     if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
     if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
   }
-
-  // <<< INÍCIO DA VERSÃO CORRIGIDA COM LOGS E LÓGICA DE OWNER >>>
+  
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
     logger.info(`[Onboarding] Bot adicionado ao grupo ${groupId}. Verificando participantes...`);
@@ -75,16 +109,15 @@ class WebhookService {
       return;
     }
 
-    // <<< ADICIONADO LOG PARA DEPURAÇÃO >>>
     logger.info('[Onboarding] Metadados recebidos:', JSON.stringify(metadata, null, 2));
   
-    // ETAPA 1: Procurar por QUALQUER usuário com plano ativo ou admin no grupo.
     let responsibleUser = null;
     let initiatorPhone = null;
 
     for (const participant of metadata.participants) {
       if (!participant.phone) continue;
-      const user = await User.findOne({ where: { whatsapp_phone: participant.phone } });
+      // <<< MUDANÇA: Usando a busca flexível >>>
+      const user = await this._findUserByFlexiblePhone(participant.phone);
       if (user) {
         const isPlanActive = await subscriptionService.isUserActive(user.id);
         if (isPlanActive) {
@@ -97,7 +130,6 @@ class WebhookService {
     }
   
     if (responsibleUser) {
-      // CENÁRIO 1: Encontramos um usuário ativo/admin. Iniciar onboarding de perfil para ele.
       logger.info(`[Onboarding] Iniciando fluxo de configuração de perfil para ${responsibleUser.email}.`);
       await OnboardingState.destroy({ where: { group_id: groupId } });
       await OnboardingState.create({
@@ -113,8 +145,6 @@ class WebhookService {
       return;
     }
   
-    // ETAPA 2: Nenhum usuário ativo foi encontrado. Agora, focamos no DONO do grupo.
-    // <<< MUDANÇA CRÍTICA: Encontrar o número real do dono >>>
     const ownerParticipant = metadata.participants.find(p => p.isSuperAdmin);
     
     if (!ownerParticipant || !ownerParticipant.phone) {
@@ -125,10 +155,10 @@ class WebhookService {
     const ownerPhone = ownerParticipant.phone;
     logger.info(`[Onboarding] Dono do grupo identificado pelo número real: ${ownerPhone}`);
   
-    const ownerUser = await User.findOne({ where: { whatsapp_phone: ownerPhone } });
+    // <<< MUDANÇA: Usando a busca flexível >>>
+    const ownerUser = await this._findUserByFlexiblePhone(ownerPhone);
   
     if (ownerUser) {
-      // CENÁRIO 2: O dono do grupo JÁ É um usuário do nosso sistema, mas com plano inativo/pendente.
       if (ownerUser.status === 'pending') {
         logger.warn(`[Onboarding] O dono do grupo (${ownerUser.email}) tem um cadastro pendente de pagamento.`);
         await this.startPendingPaymentFlow(groupId, ownerPhone, ownerUser);
@@ -139,7 +169,6 @@ class WebhookService {
         await whatsappService.sendWhatsappMessage(groupId, paymentMessage);
       }
     } else {
-      // CENÁRIO 3: O dono do grupo NÃO está em nosso banco de dados. É um usuário genuinamente novo.
       logger.warn(`[Onboarding] Dono do grupo (${ownerPhone}) não encontrado em nosso sistema. Iniciando fluxo de novo cadastro.`);
       await OnboardingState.create({
         group_id: groupId,
@@ -151,7 +180,6 @@ class WebhookService {
       await whatsappService.sendWhatsappMessage(groupId, welcomeMessage);
     }
   }
-  // <<< FIM DA VERSÃO CORRIGIDA >>>
 
   async startPendingPaymentFlow(groupId, initiatorPhone, user) {
       await OnboardingState.destroy({ where: { group_id: groupId } });
@@ -305,6 +333,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     }
   }
 
+  // O restante do arquivo (funções handleMediaArrival, handleContextArrival, etc.) permanece inalterado.
+  // ... (cole o restante das funções do arquivo aqui, elas não precisam de modificação)
   async startCategoryCreationFlow(state, profileId, isFirstTime = true) {
     state.status = 'awaiting_category_creation_start';
     state.profile_id = profileId;

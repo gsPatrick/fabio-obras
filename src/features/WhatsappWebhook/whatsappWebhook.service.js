@@ -64,7 +64,7 @@ class WebhookService {
     if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
   }
 
-  // <<< INÍCIO DA VERSÃO CORRIGIDA E FINAL DA FUNÇÃO >>>
+  // <<< INÍCIO DA VERSÃO CORRIGIDA COM LOGS E LÓGICA DE OWNER >>>
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
     logger.info(`[Onboarding] Bot adicionado ao grupo ${groupId}. Verificando participantes...`);
@@ -74,9 +74,11 @@ class WebhookService {
       logger.error(`[Onboarding] Falha ao obter metadados para o grupo ${groupId}. Abortando.`);
       return;
     }
+
+    // <<< ADICIONADO LOG PARA DEPURAÇÃO >>>
+    logger.info('[Onboarding] Metadados recebidos:', JSON.stringify(metadata, null, 2));
   
     // ETAPA 1: Procurar por QUALQUER usuário com plano ativo ou admin no grupo.
-    // Eles têm prioridade máxima para assumir o onboarding.
     let responsibleUser = null;
     let initiatorPhone = null;
 
@@ -89,7 +91,7 @@ class WebhookService {
           responsibleUser = user;
           initiatorPhone = participant.phone;
           logger.info(`[Onboarding] Usuário prioritário (Admin/Ativo) encontrado: ${user.email}.`);
-          break; // Encontramos o melhor candidato, podemos parar.
+          break;
         }
       }
     }
@@ -112,11 +114,16 @@ class WebhookService {
     }
   
     // ETAPA 2: Nenhum usuário ativo foi encontrado. Agora, focamos no DONO do grupo.
-    const ownerPhone = metadata.owner;
-    if (!ownerPhone) {
-      logger.error(`[Onboarding] Não foi possível identificar o dono (owner) do grupo ${groupId}. Abortando.`);
+    // <<< MUDANÇA CRÍTICA: Encontrar o número real do dono >>>
+    const ownerParticipant = metadata.participants.find(p => p.isSuperAdmin);
+    
+    if (!ownerParticipant || !ownerParticipant.phone) {
+      logger.error(`[Onboarding] Não foi possível identificar o participante dono (isSuperAdmin) com um número de telefone válido no grupo ${groupId}. Abortando.`);
       return;
     }
+
+    const ownerPhone = ownerParticipant.phone;
+    logger.info(`[Onboarding] Dono do grupo identificado pelo número real: ${ownerPhone}`);
   
     const ownerUser = await User.findOne({ where: { whatsapp_phone: ownerPhone } });
   
@@ -133,7 +140,7 @@ class WebhookService {
       }
     } else {
       // CENÁRIO 3: O dono do grupo NÃO está em nosso banco de dados. É um usuário genuinamente novo.
-      logger.warn(`[Onboarding] Dono do grupo (${ownerPhone}) não encontrado. Iniciando fluxo de novo cadastro.`);
+      logger.warn(`[Onboarding] Dono do grupo (${ownerPhone}) não encontrado em nosso sistema. Iniciando fluxo de novo cadastro.`);
       await OnboardingState.create({
         group_id: groupId,
         initiator_phone: ownerPhone,
@@ -144,7 +151,7 @@ class WebhookService {
       await whatsappService.sendWhatsappMessage(groupId, welcomeMessage);
     }
   }
-  // <<< FIM DA VERSÃO CORRIGIDA E FINAL DA FUNÇÃO >>>
+  // <<< FIM DA VERSÃO CORRIGIDA >>>
 
   async startPendingPaymentFlow(groupId, initiatorPhone, user) {
       await OnboardingState.destroy({ where: { group_id: groupId } });

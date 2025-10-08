@@ -1,7 +1,8 @@
 // src/features/Payment/payment.controller.js
 const subscriptionService = require('../../services/subscriptionService');
 const logger = require('../../utils/logger');
-const mercadopago = require('../../config/mercadoPago'); // Para buscar detalhes
+const mercadopago = require('../../config/mercadoPago');
+const { User, Profile } = require('../../models'); // <<< IMPORTAR USER E PROFILE
 
 class PaymentController {
   
@@ -19,37 +20,49 @@ class PaymentController {
   async webhook(req, res) {
     try {
       const { topic, action, type, data } = req.body; 
-      const mpTopic = topic || action || type; // Tenta obter o tipo do evento
+      const mpTopic = topic || action || type;
 
       if (mpTopic === 'preapproval') {
-          // Webhook para criação/alteração/suspensão da PRÉ-APROVAÇÃO (Assinatura)
           const preapprovalId = data?.id || req.query['data.id'];
-
           if (preapprovalId) {
               const preapproval = await mercadopago.preapproval.get(preapprovalId);
-              await subscriptionService.processPreapprovalWebhook(preapproval.body);
+              const preapprovalBody = preapproval.body;
+              
+              // <<< LÓGICA DE ATIVAÇÃO DE USUÁRIO >>>
+              // Se a assinatura foi aprovada pela primeira vez
+              if (preapprovalBody.status === 'authorized' || preapprovalBody.status === 'approved') {
+                  const userId = preapprovalBody.external_reference;
+                  const user = await User.findByPk(userId);
+
+                  // Se o usuário estava pendente, ativa e cria o perfil
+                  if (user && user.status === 'pending') {
+                      user.status = 'active';
+                      // Define uma senha temporária forte que o usuário poderá alterar depois
+                      user.password = require('crypto').randomBytes(16).toString('hex');
+                      await user.save();
+
+                      // Cria o primeiro perfil padrão para o usuário
+                      await Profile.findOrCreate({
+                          where: { user_id: user.id },
+                          defaults: { name: 'Perfil Principal' }
+                      });
+                      logger.info(`[PaymentWebhook] Usuário ${user.email} (ID: ${userId}) ativado e perfil criado após pagamento.`);
+                  }
+              }
+              // <<< FIM DA LÓGICA DE ATIVAÇÃO >>>
+
+              await subscriptionService.processPreapprovalWebhook(preapprovalBody);
           }
 
       } else if (mpTopic === 'payment') {
-          // Webhook para cobranças (PAGAMENTOS) - Usado para renovação automática
           const paymentId = data?.id || req.query['data.id'];
-          
           if (paymentId) {
               const payment = await mercadopago.payment.findById(paymentId);
               const paymentData = payment.body;
-              
-              // CRÍTICO: Se houver um external_reference, o MP o associa ao user/assinatura
               const externalReferenceUserId = paymentData.external_reference; 
 
-              if (externalReferenceUserId) {
-                  // O pagamento de renovação foi APROVADO.
-                  if (paymentData.status === 'approved') {
-                      await subscriptionService.processSubscriptionRenewal(externalReferenceUserId, paymentData);
-                  }
-                  // Pagamentos rejeitados/pendentes de renovação também podem ser tratados, 
-                  // mas o MP envia um preapproval webhook se o status da assinatura mudar.
-              } else {
-                  logger.warn('[PaymentController] Webhook de pagamento ignorado: Sem external_reference (não é de assinatura).');
+              if (externalReferenceUserId && paymentData.status === 'approved') {
+                  await subscriptionService.processSubscriptionRenewal(externalReferenceUserId, paymentData);
               }
           }
       }

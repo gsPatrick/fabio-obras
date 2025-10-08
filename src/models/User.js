@@ -16,13 +16,12 @@ class User extends Model {
       whatsapp_phone: {
         type: DataTypes.STRING,
         allowNull: true, 
-        comment: 'Número de WhatsApp do usuário no formato DDI+DDD+Numero (ex: 5511987654321)'
+        comment: 'Número de WhatsApp do usuário no formato DDI+DDD+Numero (ex: 5511983311000)'
       },
       password: {
         type: DataTypes.STRING,
-        allowNull: true, // <<< MUDANÇA: Senha pode ser nula inicialmente
+        allowNull: true, // <<< PERMITE NULO PARA CADASTRO PENDENTE
       },
-      // <<< NOVO CAMPO >>>
       status: {
         type: DataTypes.ENUM('pending', 'active'),
         defaultValue: 'pending',
@@ -35,14 +34,16 @@ class User extends Model {
     });
 
     this.addHook('beforeSave', async (user) => {
-      if (user.changed('password') && user.password) { // <<< MUDANÇA: Verifica se a senha existe
+      // Só criptografa se a senha foi modificada E não é nula
+      if (user.changed('password') && user.password) {
         user.password = await bcrypt.hash(user.password, 10);
       }
     });
   }
 
   checkPassword(password) {
-    if (!this.password) return false; // <<< MUDANÇA: Se não há senha, não compara
+    // Se não há senha no banco, a comparação falha
+    if (!this.password) return false;
     return bcrypt.compare(password, this.password);
   }
 }

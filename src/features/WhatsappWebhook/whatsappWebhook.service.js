@@ -41,8 +41,6 @@ class WebhookService {
     return User.findOne({ where: { whatsapp_phone: { [Op.in]: Array.from(variations) } } });
   }
 
-  // <<< MUDANÇA CRÍTICA 1: ADICIONADO TRY...CATCH GLOBAL >>>
-  // Isso impede que qualquer erro interno trave o servidor.
   async processIncomingMessage(payload) {
     try {
       if (payload.fromMe) { return; }
@@ -67,17 +65,29 @@ class WebhookService {
           return;
       }
 
-      // Adiciona o profileId ao payload para uso nas funções seguintes
-      const groupWithDetails = await MonitoredGroup.findOne({ where: { id: monitoredGroup.id }, include: [{ model: Profile, as: 'profile' }] });
-      if (!groupWithDetails || !groupWithDetails.profile) {
-        logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil associado.`);
+      // <<< INÍCIO DA CORREÇÃO >>>
+      // Corrigido para incluir o modelo User aninhado.
+      const groupWithDetails = await MonitoredGroup.findOne({ 
+          where: { id: monitoredGroup.id }, 
+          include: [{ 
+              model: Profile, 
+              as: 'profile', 
+              include: [{
+                  model: User,
+                  as: 'user'
+              }]
+          }] 
+      });
+
+      if (!groupWithDetails || !groupWithDetails.profile || !groupWithDetails.profile.user) {
+        logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil ou usuário associado.`);
         return;
       }
       payload.profileId = groupWithDetails.profile.id;
 
       if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
 
-      const user = groupWithDetails.profile.user; // O user já vem da associação
+      const user = groupWithDetails.profile.user; 
       const isPlanActive = await subscriptionService.isUserActive(user.id);
       if (!isPlanActive) {
         logger.warn(`[Webhook] Acesso negado para ${user.email}. Plano inativo.`);
@@ -86,12 +96,12 @@ class WebhookService {
         await whatsappService.sendWhatsappMessage(payload.phone, paymentMessage);
         return;
       }
+      // <<< FIM DA CORREÇÃO >>>
 
       if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
       if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
     } catch (error) {
         logger.error('[Webhook] ERRO NÃO TRATADO no processIncomingMessage:', error);
-        // Não relança o erro para não travar o servidor. Apenas registra o log.
     }
   }
   
@@ -516,8 +526,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     pendingExpense.status = 'awaiting_validation';
     pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
     
-    // Se a despesa pendente veio de uma imagem, ela já tem valor e descrição.
-    // Se veio de um fluxo de escolha, pode não ter.
     if (!pendingExpense.value) {
         pendingExpense.value = value;
     }
@@ -579,7 +587,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     logger.info(`[Webhook] Nova categoria "${newCategory.name}" criada e despesa #${newExpense.id} registrada.`);
   }
 
-  // <<< MUDANÇA CRÍTICA 2: CORREÇÃO DA BUSCA E DO ERRO >>>
   async handleEditButtonFlow(payload) {
       const buttonId = payload.buttonsResponseMessage.buttonId;
       const groupId = payload.phone;
@@ -587,7 +594,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       const profileId = payload.profileId;
       const pendingExpenseId = buttonId.split('_')[2];
       
-      // Correção 1: Usar `findOne` com `where` e `include` para carregar a despesa associada.
       const pendingExpense = await PendingExpense.findOne({ 
           where: { id: pendingExpenseId, profile_id: profileId },
           include: [{ model: Expense, as: 'expense' }]
@@ -598,7 +604,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
           return; 
       }
       
-      // A lógica de permissão permanece a mesma.
       if (pendingExpense.participant_phone !== clickerPhone) { 
           await whatsappService.sendWhatsappMessage(groupId, `🤚 *Atenção!* \n\nApenas a pessoa que registrou a despesa pode editá-la.`); 
           return; 
@@ -607,7 +612,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       const allCategories = await Category.findAll({ where: { profile_id: profileId }, order: [['name', 'ASC']] });
       const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name}`).join('\n');
       
-      // Correção 2: Acessar os dados com segurança. O `pendingExpense` já tem os dados necessários.
       const valueToFormat = pendingExpense.value;
       const descriptionToUse = pendingExpense.description;
       
@@ -629,7 +633,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       include: [{ model: Expense, as: 'expense' }]
     });
     if (!pendingExpense) { 
-        // Não envia mensagem para evitar poluir o grupo com respostas a números aleatórios.
         logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada (nenhuma pendência encontrada).`); 
         return; 
     }
@@ -642,15 +645,11 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         return; 
     }
     
-    // Se a despesa original já existe (fluxo de edição)
     if (pendingExpense.expense) {
       await pendingExpense.expense.update({ category_id: selectedCategory.id });
     } else {
-      // Se a despesa ainda não existe (fluxo de "escolher da lista" após IA sugerir nova)
       const analysisResult = { value: pendingExpense.value, baseDescription: pendingExpense.description.split(' (')[0] };
       const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
-      // Destrói a pendência antiga e cria uma nova já com a categoria certa.
-      await pendingExpense.destroy();
       await this.createExpenseAndStartEditFlow(pendingExpense, analysisResult, userContext, selectedCategory.id);
       return;
     }

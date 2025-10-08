@@ -178,18 +178,14 @@ class WebhookService {
       await whatsappService.sendButtonList(groupId, message, buttons);
   }
 
-  // <<< INÍCIO DA VERSÃO CORRIGIDA E FINAL DA FUNÇÃO >>>
   async handleOnboardingResponse(payload, state) {
     if (payload.fromMe) { return; }
     const groupId = payload.phone;
     const textMessage = payload.text ? payload.text.message : null;
     const buttonId = payload.buttonsResponseMessage ? payload.buttonsResponseMessage.buttonId : null;
     
-    // <<< MUDANÇA 1: Simplificar a validação do respondente >>>
-    // Apenas o usuário que iniciou o processo pode responder.
     const userIsInitiator = await this._findUserByFlexiblePhone(payload.participantPhone);
     if (!userIsInitiator || userIsInitiator.id !== state.user_id) {
-        // Se o estado não tiver user_id (novo cadastro), compara o número de telefone.
         if (!state.user_id && payload.participantPhone !== state.initiator_phone) {
             logger.warn(`[Onboarding] Resposta ignorada. Participante ${payload.participantPhone} não é o iniciador ${state.initiator_phone}.`);
             return;
@@ -255,24 +251,23 @@ class WebhookService {
       
       case 'awaiting_profile_choice':
         const userId = state.user_id;
+        const groupName = payload.chatName;
 
-        // Lógica para quando o usuário digita um número para selecionar o perfil
         if (textMessage && /^\d+$/.test(textMessage)) {
             const profiles = await profileService.getProfilesByUserId(userId);
             const selectedIndex = parseInt(textMessage, 10) - 1;
             const profile = profiles[selectedIndex];
 
             if (profile) {
-                await groupService.startMonitoringGroup(groupId, profile.id, userId);
+                await groupService.startMonitoringGroup(groupId, profile.id, userId, groupName);
                 await whatsappService.sendWhatsappMessage(groupId, `✅ Perfil "${profile.name}" selecionado!`);
                 await this.startCategoryCreationFlow(state, profile.id);
             } else {
                 await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, responda com um número da lista.`);
             }
-            return; // Impede que a lógica de botões execute
+            return;
         }
 
-        // Lógica para os botões "Criar" ou "Usar existente"
         if (buttonId === 'onboarding_create_profile') {
           state.status = 'awaiting_new_profile_name';
           await state.save();
@@ -284,7 +279,6 @@ class WebhookService {
             state.status = 'awaiting_new_profile_name';
             await state.save();
           } else {
-            // <<< MUDANÇA 2: Enviar como texto numerado >>>
             const profileListText = profiles
                 .map((p, index) => `${index + 1} - ${p.name}`)
                 .join('\n');
@@ -296,8 +290,9 @@ class WebhookService {
         
       case 'awaiting_new_profile_name':
         if (textMessage) {
+          const groupNameForMonitoring = payload.chatName;
           const newProfile = await profileService.createProfile({ name: textMessage, user_id: state.user_id });
-          await groupService.startMonitoringGroup(groupId, newProfile.id, state.user_id);
+          await groupService.startMonitoringGroup(groupId, newProfile.id, state.user_id, groupNameForMonitoring);
           await whatsappService.sendWhatsappMessage(groupId, `✅ Perfil "${newProfile.name}" criado e vinculado a este grupo!`);
           await this.startCategoryCreationFlow(state, newProfile.id);
         }
@@ -307,7 +302,7 @@ class WebhookService {
         if (buttonId === 'onboarding_add_category') {
             state.status = 'awaiting_new_category_name';
             await state.save();
-            await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria?');
+            await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Alvenaria")');
         } else if (buttonId === 'onboarding_finish') {
             const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos.
 
@@ -325,30 +320,57 @@ Acesse em: https://obras-fabio.vercel.app/login`;
               state.status = 'awaiting_new_category_type';
               state.temp_category_name = textMessage;
               await state.save();
-              await whatsappService.sendWhatsappMessage(groupId, `Entendido. A qual tipo de custo a categoria "*${textMessage}*" pertence?\n\nResponda com uma das opções: *Material*, *Mão de Obra*, *Serviços/Equipamentos* ou *Outros*.`);
+              await whatsappService.sendWhatsappMessage(groupId, `Entendido. Agora, defina um *tipo* para a categoria "*${textMessage}*".\n\nIsso ajuda a agrupar seus custos nos relatórios (ex: "Mão de Obra", "Material Bruto", "Acabamentos").`);
           }
           break;
+
       case 'awaiting_new_category_type':
           if (textMessage) {
-              const validTypes = ['Material', 'Mão de Obra', 'Serviços/Equipamentos', 'Outros'];
-              const normalizedType = validTypes.find(t => t.toLowerCase() === textMessage.trim().toLowerCase());
-              if (!normalizedType) {
-                  await whatsappService.sendWhatsappMessage(groupId, `⚠️ Tipo inválido. Por favor, responda com uma das opções: *Material*, *Mão de Obra*, *Serviços/Equipamentos* ou *Outros*.`);
-              } else {
-                  await categoryService.create({ name: state.temp_category_name, type: normalizedType }, state.profile_id);
-                  await whatsappService.sendWhatsappMessage(groupId, `✅ Categoria "*${state.temp_category_name}*" criada com sucesso!`);
-                  await this.startCategoryCreationFlow(state, state.profile_id, false);
+              state.status = 'awaiting_new_category_goal';
+              state.temp_category_type = textMessage.trim();
+              await state.save();
+              await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${state.temp_category_name}*"?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+          }
+          break;
+      
+      case 'awaiting_new_category_goal':
+          if (textMessage) {
+              const goalValue = parseFloat(textMessage.replace(',', '.'));
+              if (isNaN(goalValue)) {
+                  await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números (ex: 1500 ou 0).`);
+                  return;
               }
+
+              const goalService = require('../GoalManager/goal.service');
+
+              const newCategory = await categoryService.create(
+                  { name: state.temp_category_name, type: state.temp_category_type },
+                  state.profile_id
+              );
+              
+              let goalMessage = `✅ Categoria "*${state.temp_category_name}*" criada com sucesso!`;
+
+              if (goalValue > 0) {
+                  await goalService.createOrUpdateGoal(state.profile_id, {
+                      value: goalValue,
+                      categoryId: newCategory.id
+                  });
+                  goalMessage += `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
+              }
+              
+              await whatsappService.sendWhatsappMessage(groupId, goalMessage);
+              
+              await this.startCategoryCreationFlow(state, state.profile_id, false);
           }
           break;
     }
   }
-  // <<< FIM DA VERSÃO CORRIGIDA >>>
 
   async startCategoryCreationFlow(state, profileId, isFirstTime = true) {
     state.status = 'awaiting_category_creation_start';
     state.profile_id = profileId;
     state.temp_category_name = null;
+    state.temp_category_type = null;
     await state.save();
     const message = isFirstTime ? 'Agora, vamos configurar suas categorias de custo. Você pode criar quantas quiser.' : 'Deseja adicionar outra categoria?';
     const buttons = [ { id: 'onboarding_add_category', label: '➕ Adicionar Categoria' }, { id: 'onboarding_finish', label: '🏁 Finalizar Configuração' } ];

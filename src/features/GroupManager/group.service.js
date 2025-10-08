@@ -47,7 +47,7 @@ class GroupService {
    * @param {number} userId - O ID do usuário (dono do perfil).
    * @returns {Promise<object>}
    */
-  async startMonitoringGroup(groupId, profileId, userId) {
+async startMonitoringGroup(groupId, profileId, userId, groupName) { // <<< Adicionado groupName
     if (!groupId || !profileId || !userId) {
       throw new Error('O ID do grupo, perfil e usuário são obrigatórios.');
     }
@@ -57,25 +57,25 @@ class GroupService {
       throw new Error('Acesso negado: É necessário ter um plano ativo para monitorar um novo grupo.');
     }
 
-    // A chamada a listUserGroups aqui agora funcionará corretamente para o admin,
-    // retornando todos os grupos para a validação do 'groupDetails'.
-    const allAvailableGroups = await this.listUserGroups(userId); 
-
-    if (!allAvailableGroups) {
-        throw new Error('Falha ao buscar a lista de grupos do cache. Tente novamente.');
+    // <<< INÍCIO DA MUDANÇA CRÍTICA: REMOVER A VALIDAÇÃO CONTRA O CACHE >>>
+    // Em vez de buscar no cache, vamos usar o nome do grupo que já sabemos pelo webhook.
+    // Se o groupName não for passado (ex: via API web), aí sim buscamos os metadados.
+    let finalGroupName = groupName;
+    if (!finalGroupName) {
+        const groupDetails = await whatsappService.getGroupMetadata(groupId);
+        if (!groupDetails || !groupDetails.name) {
+            throw new Error(`Não foi possível obter o nome do grupo com ID ${groupId}.`);
+        }
+        finalGroupName = groupDetails.name;
     }
-
-    const groupDetails = allAvailableGroups.find(g => g.phone === groupId);
-    if (!groupDetails) {
-        throw new Error(`Grupo com ID ${groupId} não foi encontrado na sua lista de grupos disponíveis. Verifique se o bot está no grupo.`);
-    }
+    // <<< FIM DA MUDANÇA CRÍTICA >>>
 
     await MonitoredGroup.update(
         { is_active: false }, 
         { 
             where: { 
                 profile_id: profileId, 
-                group_id: { [Op.not]: groupDetails.phone },
+                group_id: { [Op.not]: groupId },
                 is_active: true
             } 
         }
@@ -83,29 +83,26 @@ class GroupService {
     logger.info(`[GroupService] Todos os grupos ativos foram desativados para o Perfil ${profileId}, exceto o novo.`);
 
     const [monitoredGroup, created] = await MonitoredGroup.findOrCreate({
-      where: { group_id: groupDetails.phone, profile_id: profileId }, 
+      where: { group_id: groupId, profile_id: profileId }, 
       defaults: {
-        name: groupDetails.name,
+        name: finalGroupName, // <<< Usar o nome obtido
         is_active: true,
         profile_id: profileId, 
       },
     });
 
-    if (!created && !monitoredGroup.is_active) {
+    if (!created) {
       monitoredGroup.is_active = true;
+      monitoredGroup.name = finalGroupName; // Garante que o nome está atualizado
       await monitoredGroup.save();
-      logger.info(`[GroupService] Monitoramento REATIVADO (e único) para o grupo: ${groupDetails.name} no Perfil ${profileId}`);
+      logger.info(`[GroupService] Monitoramento REATIVADO (e único) para o grupo: ${finalGroupName} no Perfil ${profileId}`);
       return { message: 'Monitoramento reativado com sucesso para este perfil. Outros grupos deste perfil desativados.', group: monitoredGroup };
     }
-
-    if (!created) {
-        logger.info(`[GroupService] O grupo ${groupDetails.name} já estava sendo monitorado pelo Perfil ${profileId} e agora é o único ativo.`);
-        return { message: 'Este grupo já está sendo monitorado por este perfil (e agora é o único ativo).', group: monitoredGroup };
-    }
     
-    logger.info(`[GroupService] Novo monitoramento iniciado (e único) para o grupo: ${groupDetails.name} no Perfil ${profileId}`);
+    logger.info(`[GroupService] Novo monitoramento iniciado (e único) para o grupo: ${finalGroupName} no Perfil ${profileId}`);
     return { message: 'Grupo adicionado ao monitoramento com sucesso para este perfil. Outros grupos deste perfil desativados.', group: monitoredGroup };
   }
+
 }
 
 module.exports = new GroupService();

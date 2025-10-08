@@ -1,4 +1,3 @@
-
 // src/utils/whatsappService.js
 const axios = require('axios');
 const logger = require('./logger');
@@ -24,8 +23,6 @@ function checkCredentials() {
 
 /**
  * Envia uma mensagem de texto simples.
- * @param {string} phone - Número do destinatário ou ID do grupo.
- * @param {string} message - A mensagem a ser enviada.
  */
 async function sendWhatsappMessage(phone, message) {
   if (!checkCredentials() || !phone || !message) {
@@ -48,9 +45,6 @@ async function sendWhatsappMessage(phone, message) {
 
 /**
  * Envia uma lista de opções (menu).
- * @param {string} phone - O ID do grupo ou número de telefone.
- * @param {string} messageText - A mensagem principal.
- * @param {object} optionListConfig - Configurações da lista.
  */
 async function sendOptionList(phone, messageText, optionListConfig) {
     if (!checkCredentials() || !phone || !messageText || !optionListConfig) {
@@ -86,14 +80,12 @@ async function listGroups() {
   if (!checkCredentials()) return null;
   
   const endpoint = `${BASE_URL}/groups`;
-  const params = { pageSize: 500 }; // Parâmetro para buscar até 500 grupos
+  const params = { pageSize: 500 };
 
   try {
     logger.info('[WhatsAppService] Buscando lista de grupos com paginação...');
     const response = await axios.get(endpoint, { headers, params });
-
     const groups = response.data || [];
-
     logger.info(`[WhatsAppService] ${groups.length} grupos encontrados.`);
     return groups;
   } catch (error) {
@@ -106,8 +98,6 @@ async function listGroups() {
 
 /**
  * Baixa uma mídia a partir de uma URL da Z-API.
- * @param {string} mediaUrl A URL da mídia.
- * @returns {Promise<Buffer|null>} O buffer do arquivo.
  */
 async function downloadZapiMedia(mediaUrl) {
   if (!checkCredentials() || !mediaUrl) {
@@ -134,9 +124,6 @@ async function downloadZapiMedia(mediaUrl) {
 
 /**
  * Envia uma mensagem com botões simples.
- * @param {string} phone - O ID do grupo.
- * @param {string} messageText - A mensagem principal.
- * @param {Array<{id: string, label: string}>} buttons - Um array de objetos de botão.
  */
 async function sendButtonList(phone, messageText, buttons) {
   if (!checkCredentials() || !phone || !messageText || !buttons) {
@@ -165,10 +152,6 @@ async function sendButtonList(phone, messageText, buttons) {
 
 /**
  * Envia um documento (arquivo) via WhatsApp.
- * @param {string} phone - O número do destinatário ou ID do grupo.
- * @param {string} filePath - O caminho completo para o arquivo local a ser enviado.
- * @param {string} caption - A legenda (texto) que acompanha o documento.
- * @returns {Promise<object|null>} O resultado da API ou null em caso de erro.
  */
 async function sendDocument(phone, filePath, caption = '') {
   if (!checkCredentials() || !phone || !filePath || !fs.existsSync(filePath)) {
@@ -203,7 +186,8 @@ async function sendDocument(phone, filePath, caption = '') {
   }
 }
 
-async function getGroupMetadata(groupId) {
+// <<< FUNÇÃO ANTIGA MANTIDA (PODE SER ÚTIL) >>>
+async function getGroupMetadataOld(groupId) {
     if (!checkCredentials() || !groupId) {
         logger.error('[WhatsAppService] ID do grupo é obrigatório para obter metadados.');
         return null;
@@ -220,6 +204,24 @@ async function getGroupMetadata(groupId) {
     }
 }
 
+// <<< NOVA FUNÇÃO IMPLEMENTADA CONFORME SOLICITADO >>>
+async function getGroupMetadata(groupId) {
+    if (!checkCredentials() || !groupId) {
+        logger.error('[WhatsAppService] ID do grupo é obrigatório para obter metadados.');
+        return null;
+    }
+    const endpoint = `${BASE_URL}/group-metadata/${groupId}`;
+    try {
+        logger.info(`[WhatsAppService] Buscando metadados do grupo: ${groupId}`);
+        const response = await axios.get(endpoint, { headers });
+        logger.info(`[WhatsAppService] Metadados do grupo ${groupId} obtidos com sucesso.`);
+        return response.data;
+    } catch (error) {
+        const errorData = error.response ? error.response.data : error.message;
+        logger.error(`[WhatsAppService] Erro ao obter metadados para ${groupId}:`, errorData);
+        return null; // Retorna nulo para que o chamador possa tratar o erro
+    }
+}
 
 module.exports = {
   sendWhatsappMessage,
@@ -228,5 +230,5 @@ module.exports = {
   downloadZapiMedia,
   sendButtonList,
   sendDocument,
-  getGroupMetadata
+  getGroupMetadata // Exporta a nova função
 };

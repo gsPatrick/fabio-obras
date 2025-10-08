@@ -16,8 +16,8 @@ class OnboardingState extends Model {
       },
       status: {
         type: DataTypes.ENUM(
-          'awaiting_pending_payment',       // <<< NOVO: Usuário pendente interagindo
           'awaiting_email',
+          'awaiting_password',              // <<< NOVO ESTADO
           'awaiting_profile_choice',
           'awaiting_new_profile_name',
           'awaiting_category_creation_start',
@@ -25,6 +25,11 @@ class OnboardingState extends Model {
           'awaiting_new_category_type'
         ),
         allowNull: false,
+      },
+      // <<< NOVO CAMPO >>>
+      temp_user_email: {
+          type: DataTypes.STRING,
+          allowNull: true,
       },
       profile_id: {
           type: DataTypes.INTEGER,

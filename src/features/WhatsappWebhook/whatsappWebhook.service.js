@@ -69,8 +69,13 @@ class WebhookService {
 
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
-    const initiatorPhone = payload.connectedPhone;
-    if (!initiatorPhone) { logger.error(`[Onboarding] Falha crítica: 'connectedPhone' não encontrado.`); return; }
+    // <<< CORREÇÃO DE IDENTIFICAÇÃO DO USUÁRIO >>>
+    // A Z-API usa 'author' para quem fez a ação. Ele vem sem o @s.whatsapp.net
+    const initiatorPhone = payload.author ? payload.author.replace(/@s.whatsapp.net$/, '') : null;
+    if (!initiatorPhone) { 
+      logger.error(`[Onboarding] Falha crítica: 'author' não encontrado no payload de criação de grupo.`); 
+      return; 
+    }
     
     const user = await User.findOne({ where: { whatsapp_phone: initiatorPhone, status: 'active' } });
 

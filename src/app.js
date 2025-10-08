@@ -48,7 +48,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: true}); 
+      await db.sequelize.sync({ force: false}); 
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser();
     } catch (error) {
@@ -73,17 +73,16 @@ class App {
                 email: adminEmail, 
                 password: adminPassword,
                 whatsapp_phone: adminWhatsappPhone,
-                status: 'active' // <<< CORREÇÃO AQUI
+                status: 'active'
             });
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' criado com sucesso.`);
         } else {
-            // Garante que o usuário admin existente esteja sempre ativo
             if (user.status !== 'active' || user.whatsapp_phone !== adminWhatsappPhone) {
                  await user.update({ 
                      status: 'active',
                      whatsapp_phone: adminWhatsappPhone
                  });
-                 console.log(`[SEEDER] Status e telefone do administrador '${adminEmail}' atualizados.`);
+                 console.log(`[SEEDER] Status e telefone do administrador '${adminEmail}' foram atualizados.`);
             }
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' já existe e está ativo.`);
         }

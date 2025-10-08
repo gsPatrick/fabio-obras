@@ -61,7 +61,7 @@ class App {
     const { User, Profile } = db;
     const adminEmail = 'fabio@gmail.com'; 
     const adminPassword = 'Fabio123'; 
-    const adminWhatsappPhone = '5571982862912'; 
+    const adminWhatsappPhone = '5521983311000';  
     console.log('[SEEDER] Verificando usuário administrador...');
     
     try {

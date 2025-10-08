@@ -22,30 +22,44 @@ const ONBOARDING_WAIT_TIME_MINUTES = 10;
 class WebhookService {
 
   async processIncomingMessage(payload) {
-    if (payload.fromMe && payload.document && payload.document.mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') { return; }
+    if (payload.fromMe) { return; }
     if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
     if (!payload.isGroup) { return; }
+
     const onboardingState = await OnboardingState.findOne({ where: { group_id: payload.phone } });
     if (onboardingState) { return this.handleOnboardingResponse(payload, onboardingState); }
-    if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
+
     const participantPhone = payload.participantPhone;
     if (!participantPhone) { return; }
-    const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true }, include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] });
-    if (!monitoredGroup || !monitoredGroup.profile || !monitoredGroup.profile.user) { logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou não tem perfil/usuário associado.`); return; }
-    const ownerUserId = monitoredGroup.profile.user.id;
-    const isPlanActive = await subscriptionService.isUserActive(ownerUserId);
 
-    // <<< CORREÇÃO: Responde ao usuário com plano inativo em vez de ignorar >>>
-    if (!isPlanActive) {
-      logger.warn(`[Webhook] Acesso negado para ${monitoredGroup.profile.user.email} no grupo ${payload.phone}. Plano inativo.`);
-      const checkout = await subscriptionService.createSubscriptionCheckout(ownerUserId);
-      const paymentLink = checkout.checkoutUrl;
-      const paymentMessage = `Sua assinatura não está ativa. Para continuar registrando despesas, por favor, renove seu plano através do link abaixo:\n\n${paymentLink}`;
-      await whatsappService.sendWhatsappMessage(payload.phone, paymentMessage);
-      return; // Interrompe a execução
+    const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
+    if (!monitoredGroup) {
+        const pendingUser = await User.findOne({ where: { whatsapp_phone: participantPhone, status: 'pending' } });
+        if (pendingUser) {
+            logger.info(`[Webhook] Mensagem de usuário pendente (${pendingUser.email}) em grupo não monitorado.`);
+            await this.startPendingPaymentFlow(payload.phone, participantPhone, pendingUser);
+            return;
+        }
+        logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado e o participante não está pendente.`);
+        return;
     }
 
-    payload.profileId = monitoredGroup.profile.id;
+    if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
+
+    const groupWithDetails = await MonitoredGroup.findOne({ where: { id: monitoredGroup.id }, include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] });
+    if (!groupWithDetails.profile || !groupWithDetails.profile.user) { logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil ou usuário associado.`); return; }
+
+    const ownerUserId = groupWithDetails.profile.user.id;
+    const isPlanActive = await subscriptionService.isUserActive(ownerUserId);
+    if (!isPlanActive) {
+      logger.warn(`[Webhook] Acesso negado para ${groupWithDetails.profile.user.email}. Plano inativo.`);
+      const checkout = await subscriptionService.createSubscriptionCheckout(ownerUserId);
+      const paymentMessage = `Sua assinatura não está ativa. Para continuar registrando despesas, por favor, renove seu plano através do link abaixo:\n\n${checkout.checkoutUrl}`;
+      await whatsappService.sendWhatsappMessage(payload.phone, paymentMessage);
+      return;
+    }
+
+    payload.profileId = groupWithDetails.profile.id;
     if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
     if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
   }
@@ -58,14 +72,11 @@ class WebhookService {
 
     if (!user || user.status === 'pending') {
       if (user && user.status === 'pending') {
-          logger.warn(`[Onboarding] Usuário pendente (${user.email}) tentou re-iniciar.`);
-          const checkout = await subscriptionService.createSubscriptionCheckout(user.id);
-          const paymentLink = checkout.checkoutUrl;
-          await whatsappService.sendWhatsappMessage(groupId, `Olá! Seu cadastro ainda está pendente de pagamento. Por favor, use o novo link abaixo para ativar sua assinatura:\n\n${paymentLink}`);
+          logger.warn(`[Onboarding] Usuário pendente (${user.email}) criou um novo grupo.`);
+          await this.startPendingPaymentFlow(groupId, initiatorPhone, user);
           return;
       }
       logger.warn(`[Onboarding] Novo usuário não registrado (${initiatorPhone}). Iniciando fluxo de pré-cadastro.`);
-      await OnboardingState.destroy({ where: { group_id: groupId } });
       await OnboardingState.create({
           group_id: groupId,
           initiator_phone: initiatorPhone,
@@ -80,14 +91,12 @@ class WebhookService {
     const isPlanActive = await subscriptionService.isUserActive(user.id);
     if (!isPlanActive) {
         logger.warn(`[Onboarding] Acesso negado para ${user.email}. Plano inativo.`);
-        // <<< CORREÇÃO: Envia link de checkout dinâmico >>>
         const checkout = await subscriptionService.createSubscriptionCheckout(user.id);
-        const paymentLink = checkout.checkoutUrl;
-        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos, sua conta precisa de uma assinatura ativa.\n\nClique no link abaixo para escolher seu plano e realizar o pagamento:\n\n${paymentLink}\n\nApós a confirmação, basta me remover e adicionar novamente a este grupo para iniciarmos a configuração.`;
+        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos, sua conta precisa de uma assinatura ativa.\n\nClique no link abaixo para escolher seu plano e realizar o pagamento:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, basta me remover e adicionar novamente a este grupo para iniciarmos a configuração.`;
         await whatsappService.sendWhatsappMessage(groupId, paymentMessage);
         return;
     }
-
+    
     await OnboardingState.destroy({ where: { group_id: groupId } });
     await OnboardingState.create({
         group_id: groupId,
@@ -101,14 +110,39 @@ class WebhookService {
     await whatsappService.sendButtonList(groupId, welcomeMessage, buttons);
     logger.info(`[Onboarding] Iniciei o processo de onboarding para o grupo ${groupId}, iniciado pelo usuário ${user.email}.`);
   }
-  
+
+  async startPendingPaymentFlow(groupId, initiatorPhone, user) {
+      await OnboardingState.destroy({ where: { group_id: groupId } });
+      await OnboardingState.create({
+          group_id: groupId,
+          initiator_phone: initiatorPhone,
+          user_id: user.id,
+          status: 'awaiting_pending_payment',
+          expires_at: new Date(Date.now() + ONBOARDING_WAIT_TIME_MINUTES * 60 * 1000),
+      });
+      const message = `Olá! 👋 Vi que seu cadastro para o e-mail *${user.email}* ainda está pendente de pagamento.\n\nPara ativar sua conta, por favor, finalize a assinatura.`;
+      const buttons = [{ id: `pending_generate_link_${user.id}`, label: '💳 Gerar novo link de pagamento' }];
+      await whatsappService.sendButtonList(groupId, message, buttons);
+  }
+
   async handleOnboardingResponse(payload, state) {
     if (payload.fromMe) { return; }
     const groupId = payload.phone;
     const textMessage = payload.text ? payload.text.message : null;
     const buttonId = payload.buttonsResponseMessage ? payload.buttonsResponseMessage.buttonId : null;
     const selectedRowId = payload.listResponseMessage ? payload.listResponseMessage.selectedRowId : null;
+    
     switch (state.status) {
+      case 'awaiting_pending_payment':
+          if (buttonId && buttonId.startsWith('pending_generate_link_')) {
+              const userId = buttonId.split('_')[3];
+              const checkout = await subscriptionService.createSubscriptionCheckout(userId);
+              const linkMessage = `Aqui está seu novo link para pagamento:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, remova-me e adicione-me novamente ao grupo para começar!`;
+              await whatsappService.sendWhatsappMessage(groupId, linkMessage);
+              await state.destroy();
+          }
+          break;
+
       case 'awaiting_email':
         if (textMessage) { 
             if (textMessage.includes('@') && textMessage.includes('.')) {
@@ -130,6 +164,7 @@ class WebhookService {
             }
         }
         break;
+      
       case 'awaiting_profile_choice':
         const userId = state.user_id;
         if (buttonId === 'onboarding_create_profile') {
@@ -162,16 +197,25 @@ class WebhookService {
           await this.startCategoryCreationFlow(state, newProfile.id);
         }
         break;
+      
+      // <<< MUDANÇA PRINCIPAL AQUI >>>
       case 'awaiting_category_creation_start':
         if (buttonId === 'onboarding_add_category') {
             state.status = 'awaiting_new_category_name';
             await state.save();
             await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria?');
         } else if (buttonId === 'onboarding_finish') {
-            await whatsappService.sendWhatsappMessage(groupId, '👍 Configuração concluída! Já pode começar a registrar seus custos.');
+            const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos.
+
+*Dica:* Você sabia que também pode acessar um painel web completo para ver gráficos, relatórios e gerenciar todos os seus dados?
+
+Acesse em: https://obras-fabio.vercel.app/login`;
+
+            await whatsappService.sendWhatsappMessage(groupId, finalMessage);
             await state.destroy();
         }
         break;
+
       case 'awaiting_new_category_name':
           if (textMessage) {
               state.status = 'awaiting_new_category_type';
@@ -196,8 +240,7 @@ class WebhookService {
     }
   }
 
-  // O restante do arquivo (funções de processamento de despesa) permanece o mesmo.
-  // ...
+  // O restante do arquivo permanece inalterado
   async startCategoryCreationFlow(state, profileId, isFirstTime = true) {
     state.status = 'awaiting_category_creation_start';
     state.profile_id = profileId;
@@ -216,6 +259,13 @@ class WebhookService {
     }
     if (buttonId.startsWith('new_cat_')) {
       return this.handleNewCategoryDecisionFlow(payload);
+    }
+    if (buttonId.startsWith('pending_generate_link_')) {
+        const userId = buttonId.split('_')[3];
+        const checkout = await subscriptionService.createSubscriptionCheckout(userId);
+        const linkMessage = `Aqui está seu novo link para pagamento:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, remova-me e adicione-me novamente ao grupo para começar!`;
+        await whatsappService.sendWhatsappMessage(payload.phone, linkMessage);
+        await OnboardingState.destroy({ where: { group_id: payload.phone } });
     }
   }
 

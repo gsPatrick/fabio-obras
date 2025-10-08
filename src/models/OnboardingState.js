@@ -16,7 +16,8 @@ class OnboardingState extends Model {
       },
       status: {
         type: DataTypes.ENUM(
-          'awaiting_email',                 // <<< NOVO: Esperando o email para pré-cadastro
+          'awaiting_pending_payment',       // <<< NOVO: Usuário pendente interagindo
+          'awaiting_email',
           'awaiting_profile_choice',
           'awaiting_new_profile_name',
           'awaiting_category_creation_start',

@@ -1,8 +1,5 @@
 // src/models/OnboardingState.js
 
-const { Model, DataTypes } = require('sequelize');
-
-class OnboardingState extends Model {
   static init(sequelize) {
     super.init({
       group_id: {
@@ -22,11 +19,11 @@ class OnboardingState extends Model {
           'awaiting_new_profile_name',
           'awaiting_category_creation_start',
           'awaiting_new_category_name',
-          'awaiting_new_category_type'
+          'awaiting_new_category_type',
+          'awaiting_pending_payment' // <<< Adicionado para consistência
         ),
         allowNull: false,
       },
-      // <<< NOVO CAMPO >>>
       temp_user_email: {
           type: DataTypes.STRING,
           allowNull: true,
@@ -49,11 +46,3 @@ class OnboardingState extends Model {
       tableName: 'onboarding_states',
     });
   }
-
-  static associate(models) {
-    this.belongsTo(models.User, { foreignKey: 'user_id', as: 'user' });
-    this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' });
-  }
-}
-
-module.exports = OnboardingState;

@@ -64,8 +64,6 @@ class WebhookService {
         return;
     }
 
-    if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
-
     const groupWithDetails = await MonitoredGroup.findOne({ where: { id: monitoredGroup.id }, include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] });
     if (!groupWithDetails.profile || !groupWithDetails.profile.user) { logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil ou usuário associado.`); return; }
 
@@ -80,6 +78,8 @@ class WebhookService {
     }
 
     payload.profileId = groupWithDetails.profile.id;
+    
+    if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
     if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
     if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
   }

@@ -64,61 +64,87 @@ class WebhookService {
     if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
   }
 
+  // <<< INÍCIO DA VERSÃO CORRIGIDA E FINAL DA FUNÇÃO >>>
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
-
+    logger.info(`[Onboarding] Bot adicionado ao grupo ${groupId}. Verificando participantes...`);
+  
     const metadata = await whatsappService.getGroupMetadata(groupId);
-    if (!metadata || !metadata.owner) {
-        logger.error(`[Onboarding] Não foi possível obter os metadados ou o criador do grupo ${groupId}.`);
-        return;
+    if (!metadata || !metadata.participants) {
+      logger.error(`[Onboarding] Falha ao obter metadados para o grupo ${groupId}. Abortando.`);
+      return;
     }
-    const initiatorPhone = metadata.owner;
-    
-    const user = await User.findOne({ where: { whatsapp_phone: initiatorPhone, status: 'active' } });
+  
+    // ETAPA 1: Procurar por QUALQUER usuário com plano ativo ou admin no grupo.
+    // Eles têm prioridade máxima para assumir o onboarding.
+    let responsibleUser = null;
+    let initiatorPhone = null;
 
-    if (!user) {
-        const pendingUser = await User.findOne({ where: { whatsapp_phone: initiatorPhone, status: 'pending' } });
-        if (pendingUser) {
-            logger.warn(`[Onboarding] Usuário pendente (${pendingUser.email}) criou um novo grupo.`);
-            await this.startPendingPaymentFlow(groupId, initiatorPhone, pendingUser);
-            return;
+    for (const participant of metadata.participants) {
+      if (!participant.phone) continue;
+      const user = await User.findOne({ where: { whatsapp_phone: participant.phone } });
+      if (user) {
+        const isPlanActive = await subscriptionService.isUserActive(user.id);
+        if (isPlanActive) {
+          responsibleUser = user;
+          initiatorPhone = participant.phone;
+          logger.info(`[Onboarding] Usuário prioritário (Admin/Ativo) encontrado: ${user.email}.`);
+          break; // Encontramos o melhor candidato, podemos parar.
         }
-
-        logger.warn(`[Onboarding] Novo usuário não registrado (${initiatorPhone}). Iniciando fluxo de pré-cadastro.`);
-        await OnboardingState.destroy({ where: { group_id: groupId } });
-        await OnboardingState.create({
-            group_id: groupId,
-            initiator_phone: initiatorPhone,
-            status: 'awaiting_email',
-            expires_at: new Date(Date.now() + ONBOARDING_WAIT_TIME_MINUTES * 60 * 1000),
-        });
-        const welcomeMessage = `Olá! 👋 Sou seu assistente de gestão de custos. Vi que você é novo por aqui!\n\nPara começarmos, por favor, me informe seu melhor e-mail para criarmos sua conta.`;
-        await whatsappService.sendWhatsappMessage(groupId, welcomeMessage);
-        return;
+      }
     }
-
-    const isPlanActive = await subscriptionService.isUserActive(user.id);
-    if (!isPlanActive) {
-        logger.warn(`[Onboarding] Acesso negado para ${user.email}. Plano inativo.`);
-        const checkout = await subscriptionService.createSubscriptionCheckout(user.id);
-        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos, sua conta precisa de uma assinatura ativa.\n\nClique no link abaixo para escolher seu plano e realizar o pagamento:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, basta me remover e adicionar novamente a este grupo para iniciarmos a configuração.`;
-        await whatsappService.sendWhatsappMessage(groupId, paymentMessage);
-        return;
-    }
-    
-    await OnboardingState.destroy({ where: { group_id: groupId } });
-    await OnboardingState.create({
+  
+    if (responsibleUser) {
+      // CENÁRIO 1: Encontramos um usuário ativo/admin. Iniciar onboarding de perfil para ele.
+      logger.info(`[Onboarding] Iniciando fluxo de configuração de perfil para ${responsibleUser.email}.`);
+      await OnboardingState.destroy({ where: { group_id: groupId } });
+      await OnboardingState.create({
         group_id: groupId,
         initiator_phone: initiatorPhone,
-        user_id: user.id,
+        user_id: responsibleUser.id,
         status: 'awaiting_profile_choice',
         expires_at: new Date(Date.now() + ONBOARDING_WAIT_TIME_MINUTES * 60 * 1000),
-    });
-    const welcomeMessage = `Olá! 👋 Sou seu novo assistente de gestão de custos.\n\nPara começar, precisamos vincular este grupo a um perfil de custos.\n\nO que você deseja fazer?`;
-    const buttons = [ { id: 'onboarding_create_profile', label: '➕ Criar um novo Perfil' }, { id: 'onboarding_use_existing', label: '📂 Usar Perfil existente' } ];
-    await whatsappService.sendButtonList(groupId, welcomeMessage, buttons);
-    logger.info(`[Onboarding] Iniciei o processo de onboarding para o grupo ${groupId}, iniciado pelo usuário ${user.email}.`);
+      });
+      const welcomeMessage = `Olá! 👋 Sou seu novo assistente de gestão de custos.\n\nNotei que você, um usuário com plano ativo, está neste grupo. Para começar, vamos vincular este grupo a um perfil de custos.\n\nO que você deseja fazer?`;
+      const buttons = [ { id: 'onboarding_create_profile', label: '➕ Criar um novo Perfil' }, { id: 'onboarding_use_existing', label: '📂 Usar Perfil existente' } ];
+      await whatsappService.sendButtonList(groupId, welcomeMessage, buttons);
+      return;
+    }
+  
+    // ETAPA 2: Nenhum usuário ativo foi encontrado. Agora, focamos no DONO do grupo.
+    const ownerPhone = metadata.owner;
+    if (!ownerPhone) {
+      logger.error(`[Onboarding] Não foi possível identificar o dono (owner) do grupo ${groupId}. Abortando.`);
+      return;
+    }
+  
+    const ownerUser = await User.findOne({ where: { whatsapp_phone: ownerPhone } });
+  
+    if (ownerUser) {
+      // CENÁRIO 2: O dono do grupo JÁ É um usuário do nosso sistema, mas com plano inativo/pendente.
+      if (ownerUser.status === 'pending') {
+        logger.warn(`[Onboarding] O dono do grupo (${ownerUser.email}) tem um cadastro pendente de pagamento.`);
+        await this.startPendingPaymentFlow(groupId, ownerPhone, ownerUser);
+      } else {
+        logger.warn(`[Onboarding] O dono do grupo (${ownerUser.email}) tem um plano inativo/expirado.`);
+        const checkout = await subscriptionService.createSubscriptionCheckout(ownerUser.id);
+        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos neste grupo, sua conta precisa de uma assinatura ativa.\n\nClique no link abaixo para reativar seu plano:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, basta me remover e adicionar novamente a este grupo para iniciarmos a configuração.`;
+        await whatsappService.sendWhatsappMessage(groupId, paymentMessage);
+      }
+    } else {
+      // CENÁRIO 3: O dono do grupo NÃO está em nosso banco de dados. É um usuário genuinamente novo.
+      logger.warn(`[Onboarding] Dono do grupo (${ownerPhone}) não encontrado. Iniciando fluxo de novo cadastro.`);
+      await OnboardingState.create({
+        group_id: groupId,
+        initiator_phone: ownerPhone,
+        status: 'awaiting_email',
+        expires_at: new Date(Date.now() + ONBOARDING_WAIT_TIME_MINUTES * 60 * 1000),
+      });
+      const welcomeMessage = `Olá! 👋 Sou seu assistente de gestão de custos. Vi que você é novo por aqui!\n\nPara começarmos, por favor, me informe seu melhor e-mail para criarmos sua conta.`;
+      await whatsappService.sendWhatsappMessage(groupId, welcomeMessage);
+    }
   }
+  // <<< FIM DA VERSÃO CORRIGIDA E FINAL DA FUNÇÃO >>>
 
   async startPendingPaymentFlow(groupId, initiatorPhone, user) {
       await OnboardingState.destroy({ where: { group_id: groupId } });
@@ -153,22 +179,48 @@ class WebhookService {
           break;
 
       case 'awaiting_email':
-        if (textMessage && textMessage.includes('@') && textMessage.includes('.')) {
-            const email = textMessage.trim();
-            const existingUser = await User.findOne({ where: { email } });
-            if (existingUser) {
-                await whatsappService.sendWhatsappMessage(groupId, `O e-mail ${email} já está em uso. Por favor, informe um e-mail diferente, ou, se você já tem uma conta, adicione este número de telefone ao seu perfil no nosso site.`);
-                await state.destroy();
+        if (textMessage) { 
+            if (textMessage.includes('@') && textMessage.includes('.')) {
+                const email = textMessage.trim();
+                const existingUser = await User.findOne({ where: { email } });
+                if (existingUser) {
+                    await whatsappService.sendWhatsappMessage(groupId, `O e-mail ${email} já está cadastrado. Se você é o dono desta conta, por favor, adicione o número ${state.initiator_phone} ao seu perfil em nosso site e tente novamente.`);
+                    await state.destroy();
+                    return;
+                }
+                state.status = 'awaiting_password';
+                state.temp_user_email = email;
+                await state.save();
+                await whatsappService.sendWhatsappMessage(groupId, `✅ E-mail recebido! Agora, por favor, crie uma *senha* para sua conta (mínimo de 6 caracteres).`);
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, "Isso não parece um e-mail válido. Por favor, tente novamente.");
+            }
+        }
+        break;
+
+      case 'awaiting_password':
+        if (textMessage) {
+            const password = textMessage.trim();
+            const email = state.temp_user_email;
+
+            if (password.length < 6) {
+                await whatsappService.sendWhatsappMessage(groupId, "Senha muito curta. Por favor, escolha uma senha com pelo menos 6 caracteres.");
                 return;
             }
-            const newUser = await User.create({ email, whatsapp_phone: state.initiator_phone, status: 'pending' });
+
+            const newUser = await User.create({ 
+                email, 
+                password,
+                whatsapp_phone: state.initiator_phone, 
+                status: 'pending' 
+            });
+
             const checkout = await subscriptionService.createSubscriptionCheckout(newUser.id);
             const paymentLink = checkout.checkoutUrl;
-            const linkMessage = `✅ Ótimo! Criei um pré-cadastro para você com o e-mail: *${email}*\n\nAgora, o último passo para ativar sua conta:\n\n1️⃣ *Clique no link abaixo* para realizar o pagamento e ativar sua assinatura:\n${paymentLink}\n\n2️⃣ Após a confirmação do pagamento, sua conta será ativada automaticamente.\n\n3️⃣ Em seguida, basta me *remover e adicionar novamente a este grupo* para começarmos a configuração do seu primeiro projeto!`;
+            const linkMessage = `✅ Ótimo! Seu pré-cadastro para o e-mail *${email}* foi criado com sucesso.\n\nAgora, o último passo para ativar sua conta:\n\n1️⃣ *Clique no link abaixo* para realizar o pagamento e ativar sua assinatura:\n${paymentLink}\n\n2️⃣ Após a confirmação do pagamento, sua conta será ativada automaticamente.\n\n3️⃣ Em seguida, basta me *remover e adicionar novamente a este grupo* para começarmos a configuração do seu primeiro projeto!`;
+            
             await whatsappService.sendWhatsappMessage(groupId, linkMessage);
             await state.destroy();
-        } else {
-            await whatsappService.sendWhatsappMessage(groupId, "Isso não parece um e-mail válido. Por favor, tente novamente.");
         }
         break;
       
@@ -211,7 +263,12 @@ class WebhookService {
             await state.save();
             await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria?');
         } else if (buttonId === 'onboarding_finish') {
-            const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos.\n\n*Dica:* Você sabia que também pode acessar um painel web completo para ver gráficos, relatórios e gerenciar todos os seus dados?\n\nAcesse em: https://obras-fabio.vercel.app/login`;
+            const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos.
+
+*Dica:* Você sabia que também pode acessar um painel web completo para ver gráficos, relatórios e gerenciar todos os seus dados?
+
+Acesse em: https://obras-fabio.vercel.app/login`;
+
             await whatsappService.sendWhatsappMessage(groupId, finalMessage);
             await state.destroy();
         }

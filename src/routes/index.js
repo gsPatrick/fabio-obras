@@ -13,6 +13,8 @@ const goalRoutes = require('../features/GoalManager/goal.routes');
 const importRoutes = require('../features/ExcelImport/excelImport.routes');
 const guestUserRoutes = require('../features/GuestUserManager/guestUser.routes'); // <<< NOVO
 const testRoutes = require('../features/GroupManager/grou.routesteste');
+const adminRoutes = require('../features/Admin/admin.routes'); // <<< NOVA IMPORTAÇÃO
+
 const router = Router();
 
 router.get('/', (req, res) => res.json({ status: 'online' }));
@@ -37,5 +39,6 @@ router.use('/users', userRoutes);
 router.use('/goals', goalRoutes);
 router.use('/import', importRoutes);
 router.use('/guests', guestUserRoutes); // <<< NOVA ROTA DE GESTÃO DE CONVIDADOS
+router.use('/admin', adminRoutes);
 
 module.exports = router;

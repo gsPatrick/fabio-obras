@@ -22,7 +22,9 @@ const ONBOARDING_WAIT_TIME_MINUTES = 10;
 class WebhookService {
 
   async processIncomingMessage(payload) {
-    if (payload.fromMe) { return; } // Ignora universalmente mensagens do próprio bot primeiro
+    if (payload.fromMe) { 
+        return; 
+    }
 
     if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
     if (!payload.isGroup) { return; }
@@ -35,12 +37,11 @@ class WebhookService {
 
     const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
     if (!monitoredGroup) {
-        // Se o grupo não é monitorado E não está em onboarding, verifica se o participante está pendente
         const pendingUser = await User.findOne({ where: { whatsapp_phone: participantPhone, status: 'pending' } });
         if (pendingUser) {
             logger.info(`[Webhook] Mensagem de usuário pendente (${pendingUser.email}) em grupo não monitorado.`);
             await this.startPendingPaymentFlow(payload.phone, participantPhone, pendingUser);
-            return; // Interrompe o fluxo aqui
+            return;
         }
         logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado e o participante não está pendente.`);
         return;

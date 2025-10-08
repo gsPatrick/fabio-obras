@@ -1,16 +1,10 @@
 // src/app.js
 
-// ===================================================================
-// <<< CORREÇÃO DEFINITIVA PARA O ERRO 'File is not defined' >>>
-// Definimos a classe 'File' globalmente no início da aplicação.
-// Isso garante que a biblioteca da OpenAI a encontre sempre.
-// ===================================================================
 const { File } = require('node:buffer');
 if (typeof globalThis.File === 'undefined') {
   globalThis.File = File;
 }
 
-// Carrega as variáveis de ambiente do arquivo .env
 require('dotenv').config();
 
 const express = require('express');
@@ -18,8 +12,6 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const db = require('./models');
 const mainRouter = require('./routes');
-
-// Movido para o topo para ser acessível dentro da classe
 const { Op } = require('sequelize');
 
 class App {
@@ -28,9 +20,9 @@ class App {
     this.connectAndSeedDatabase();
     this.middlewares();
     this.routes();
-    this.exposeModels(); // Expõe modelos para o controller de Perfil
+    this.exposeModels();
     this.startPendingExpenseWorker();
-    this.startOnboardingWorker(); // <<< NOVO: Iniciar worker de onboarding
+    this.startOnboardingWorker();
   }
 
   middlewares() {
@@ -38,9 +30,8 @@ class App {
       origin: true,
       credentials: true,
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type', 'Authorization', 'X-Profile-Id'], // Adiciona o novo header
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Profile-Id'],
     }));
-
     this.server.use(express.json());
     this.server.use(cookieParser());
   }
@@ -49,7 +40,6 @@ class App {
     this.server.use(mainRouter);
   }
 
-  // Expõe modelos no contexto do Express
   exposeModels() {
     this.server.locals.models = db;
   }
@@ -60,7 +50,7 @@ class App {
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
       await db.sequelize.sync({ force: true}); 
       console.log('🔄 Modelos sincronizados com o banco de dados.');
-      await this.seedAdminUser(); // Agora também cria categorias/perfil
+      await this.seedAdminUser();
     } catch (error) {
       console.error('❌ Não foi possível conectar, sincronizar ou popular o banco de dados:', error);
       process.exit(1);
@@ -68,10 +58,10 @@ class App {
   }
   
   async seedAdminUser() {
-    const { User, Profile } = db; // Inclui Profile
+    const { User, Profile } = db;
     const adminEmail = 'fabio@gmail.com'; 
     const adminPassword = 'Fabio123'; 
-    const adminWhatsappPhone = '5521983311000'; 
+    const adminWhatsappPhone = '5571982862912'; 
     console.log('[SEEDER] Verificando usuário administrador...');
     
     try {
@@ -82,32 +72,32 @@ class App {
             user = await User.create({ 
                 email: adminEmail, 
                 password: adminPassword,
-                whatsapp_phone: adminWhatsappPhone
+                whatsapp_phone: adminWhatsappPhone,
+                status: 'active' // <<< CORREÇÃO AQUI
             });
             console.log(`[SEEDER] Usuário administrador '${adminEmail}' criado com sucesso.`);
         } else {
-            if (user.whatsapp_phone !== adminWhatsappPhone) {
-                 await user.update({ whatsapp_phone: adminWhatsappPhone });
-                 console.log(`[SEEDER] Número do administrador '${adminEmail}' atualizado.`);
+            // Garante que o usuário admin existente esteja sempre ativo
+            if (user.status !== 'active' || user.whatsapp_phone !== adminWhatsappPhone) {
+                 await user.update({ 
+                     status: 'active',
+                     whatsapp_phone: adminWhatsappPhone
+                 });
+                 console.log(`[SEEDER] Status e telefone do administrador '${adminEmail}' atualizados.`);
             }
-            console.log(`[SEEDER] Usuário administrador '${adminEmail}' já existe.`);
+            console.log(`[SEEDER] Usuário administrador '${adminEmail}' já existe e está ativo.`);
         }
         
         let profile = await Profile.findOne({ where: { user_id: user.id } });
         if (!profile) {
             console.log(`[SEEDER] Criando perfil padrão para o usuário ${user.email}...`);
             profile = await Profile.create({ name: 'Perfil Padrão', user_id: user.id });
-            
-            // <<< CORREÇÃO 1: Passar o ID do perfil recém-criado para o seeder de categorias.
             await this.seedCategories(profile.id); 
-            
             console.log('[SEEDER] Perfil Padrão e Categorias iniciais criadas.');
         } else {
             console.log(`[SEEDER] Perfil padrão já existe para o usuário ${user.email}.`);
-            // <<< MELHORIA: Garantir que as categorias existam mesmo se o perfil já existir
             await this.seedCategories(profile.id);
         }
-        
     } catch (error) {
         console.error('[SEEDER] ❌ Falha ao verificar ou criar o usuário/perfil administrador:', error);
     }
@@ -118,35 +108,9 @@ class App {
         console.error('[SEEDER] Erro: profileId não foi fornecido para o seeder de categorias.');
         return;
     }
-
     const { Category } = db;
     const categoriesToSeed = [
-        { name: 'Mão de obra estrutural', type: 'Mão de Obra' },
-        { name: 'Mão de obra cinza', type: 'Mão de Obra' },
-        { name: 'Mão de obra acabamento', type: 'Mão de Obra' },
-        { name: 'Mão de obra gesso', type: 'Mão de Obra' },
-        { name: 'Mão de obra pintura', type: 'Mão de Obra' },
-        { name: 'Mão de obra vidro', type: 'Mão de Obra' },
-        { name: 'Mão de obra esquadrias', type: 'Mão de Obra' },
-        { name: 'Mão de obra hidráulica e elétrica', type: 'Mão de Obra' },
-        { name: 'Material ferro', type: 'Material' },
-        { name: 'Material concreto', type: 'Material' },
-        { name: 'Material bruto', type: 'Material' },
-        { name: 'Material piso', type: 'Material' },
-        { name: 'Material argamassa', type: 'Material' },
-        { name: 'Material gesso', type: 'Material' },
-        { name: 'Material esquadria', type: 'Material' },
-        { name: 'Material pintura', type: 'Material' },
-        { name: 'Material fios', type: 'Material' },
-        { name: 'Material iluminação', type: 'Material' },
-        { name: 'Material pedras granitos', type: 'Material' },
-        { name: 'Material louças e metais', type: 'Material' },
-        { name: 'Material equipamentos', type: 'Material' },
-        { name: 'Material ar condicionado', type: 'Material' },
-        { name: 'Material hidráulica', type: 'Material' },
-        { name: 'Marcenaria', type: 'Serviços/Equipamentos' },
-        { name: 'Eletros', type: 'Serviços/Equipamentos' },
-        { name: 'Outros', type: 'Outros' },
+        { name: 'Mão de obra estrutural', type: 'Mão de Obra' }, { name: 'Mão de obra cinza', type: 'Mão de Obra' }, { name: 'Mão de obra acabamento', type: 'Mão de Obra' }, { name: 'Mão de obra gesso', type: 'Mão de Obra' }, { name: 'Mão de obra pintura', type: 'Mão de Obra' }, { name: 'Mão de obra vidro', type: 'Mão de Obra' }, { name: 'Mão de obra esquadrias', type: 'Mão de Obra' }, { name: 'Mão de obra hidráulica e elétrica', type: 'Mão de Obra' }, { name: 'Material ferro', type: 'Material' }, { name: 'Material concreto', type: 'Material' }, { name: 'Material bruto', type: 'Material' }, { name: 'Material piso', type: 'Material' }, { name: 'Material argamassa', type: 'Material' }, { name: 'Material gesso', type: 'Material' }, { name: 'Material esquadria', type: 'Material' }, { name: 'Material pintura', type: 'Material' }, { name: 'Material fios', type: 'Material' }, { name: 'Material iluminação', type: 'Material' }, { name: 'Material pedras granitos', type: 'Material' }, { name: 'Material louças e metais', type: 'Material' }, { name: 'Material equipamentos', type: 'Material' }, { name: 'Material ar condicionado', type: 'Material' }, { name: 'Material hidráulica', type: 'Material' }, { name: 'Marcenaria', type: 'Serviços/Equipamentos' }, { name: 'Eletros', type: 'Serviços/Equipamentos' }, { name: 'Outros', type: 'Outros' },
     ];
     console.log('[SEEDER] Verificando e criando categorias essenciais...');
     for (const categoryData of categoriesToSeed) {
@@ -161,68 +125,34 @@ class App {
   startPendingExpenseWorker() {
     const { PendingExpense, Expense, Category } = db;
     const whatsappService = require('./utils/whatsappService');
-
     const runWorker = async () => {
-      console.log('[WORKER] ⚙️ Verificando despesas pendentes expiradas...');
       const now = new Date();
       try {
-        const expiredValidations = await PendingExpense.findAll({
-          where: { 
-            status: 'awaiting_validation', 
-            expires_at: { [Op.lte]: now } 
-          },
-          include: [{ model: Category, as: 'suggestedCategory' }, { model: Expense, as: 'expense' }]
-        });
-
-        for (const pending of expiredValidations) {
-          console.log(`[WORKER] ✅ Confirmando automaticamente a despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
-          await pending.destroy(); 
-        }
-
-        const expiredReplies = await PendingExpense.findAll({
-          where: { 
-            status: 'awaiting_category_reply', 
-            expires_at: { [Op.lte]: now } 
-          },
-          include: [{ model: Category, as: 'suggestedCategory' }, { model: Expense, as: 'expense' }]
-        });
-
+        await PendingExpense.destroy({ where: { status: 'awaiting_validation', expires_at: { [Op.lte]: now } } });
+        const expiredReplies = await PendingExpense.findAll({ where: { status: 'awaiting_category_reply', expires_at: { [Op.lte]: now } }, include: [{ model: Category, as: 'suggestedCategory' }, { model: Expense, as: 'expense' }] });
         for (const pending of expiredReplies) {
-          console.log(`[WORKER] ⏰ Finalizando edição não respondida da despesa ID: ${pending.expense_id} (pendência ${pending.id})`);
           const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
-          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa *já salva* de *${formattedValue}* foi mantida com a categoria original: *${pending.suggestedCategory.name}*.`;
+          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa de *${formattedValue}* foi mantida com a categoria original: *${pending.suggestedCategory.name}*.`;
           await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
           await pending.destroy();
         }
-
-        await PendingExpense.destroy({
-          where: { status: 'awaiting_context', expires_at: { [Op.lte]: now } }
-        });
-
+        await PendingExpense.destroy({ where: { status: 'awaiting_context', expires_at: { [Op.lte]: now } } });
       } catch (error) {
         console.error('[WORKER] ❌ Erro ao processar despesas pendentes:', error);
       }
     };
-    
     setInterval(runWorker, 30000); 
   }
 
-  // <<< NOVO MÉTODO PARA LIMPAR ONBOARDINGS EXPIRADOS >>>
   startOnboardingWorker() {
     const { OnboardingState } = db;
     const runWorker = async () => {
         try {
-            const deletedCount = await OnboardingState.destroy({
-                where: { expires_at: { [Op.lte]: new Date() } }
-            });
-            if (deletedCount > 0) {
-                console.log(`[WORKER-ONBOARDING] 🧹 Limpeza de ${deletedCount} estado(s) de onboarding expirado(s) concluída.`);
-            }
+            await OnboardingState.destroy({ where: { expires_at: { [Op.lte]: new Date() } } });
         } catch (error) {
             console.error('[WORKER-ONBOARDING] ❌ Erro ao limpar estados de onboarding:', error);
         }
     };
-    // Roda a cada 5 minutos
     setInterval(runWorker, 5 * 60 * 1000);
   }
 }
@@ -231,7 +161,6 @@ const instance = new App();
 const app = instance.server;
 
 const port = process.env.API_PORT || 5000;
-
 app.listen(port, () => {
   console.log(`🚀 Servidor rodando na porta ${port}`);
   const publicUrl = process.env.PUBLIC_URL || `http://localhost:${port}`;

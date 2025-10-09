@@ -11,4 +11,9 @@ router.use(adminMiddleware);
 router.get('/users', adminController.getAllUsers);
 router.get('/profits', adminController.getProfits);
 
+// <<< NOVA ROTA >>>
+// Rota para o admin ativar/desativar a assinatura de um usuário
+router.put('/users/:id/subscription/status', adminController.updateUserSubscriptionStatus);
+
+
 module.exports = router;

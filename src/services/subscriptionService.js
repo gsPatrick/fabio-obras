@@ -177,6 +177,65 @@ const subscriptionService = {
   },
 
   /**
+   * <<< NOVA FUNÇÃO >>>
+   * Permite que um admin ative ou desative a assinatura de um usuário.
+   * @param {number} userId - ID do usuário a ser modificado.
+   * @param {'active' | 'cancelled'} newStatus - O novo status da assinatura.
+   * @returns {Promise<Subscription>} A assinatura atualizada.
+   */
+  async adminUpdateUserSubscription(userId, newStatus) {
+    const user = await User.findByPk(userId);
+    if (!user) {
+        throw new Error("Usuário não encontrado.");
+    }
+    if (user.email === 'fabio@gmail.com') {
+        throw new Error("Não é possível alterar a assinatura do administrador principal.");
+    }
+    
+    const [subscription] = await Subscription.findOrCreate({
+        where: { user_id: userId },
+        defaults: { user_id: userId, status: 'pending' }
+    });
+    
+    if (newStatus === 'active') {
+        // ATIVAR A ASSINATURA
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 30); // Define a expiração para 30 dias a partir de hoje
+
+        await subscription.update({
+            status: 'active',
+            expires_at: expiresAt
+        });
+        
+        // Ativa o usuário se ele estava pendente
+        if (user.status === 'pending') {
+            user.status = 'active';
+            await user.save();
+        }
+
+        // Envia mensagem de onboarding para o WhatsApp do usuário
+        if (user.whatsapp_phone) {
+            const onboardingMessage = `Olá! 👋 Seu plano na plataforma Obra.AI foi ativado por um administrador.\n\nPara começar a monitorar os custos, siga os passos:\n\n1️⃣ Crie um grupo no WhatsApp para sua obra.\n2️⃣ Me adicione ao grupo.\n\nEu irei te guiar na configuração do seu perfil diretamente por lá!`;
+            await whatsappService.sendWhatsappMessage(user.whatsapp_phone, onboardingMessage);
+            logger.info(`[Admin] Onboarding por ativação manual enviado para ${user.email} no número ${user.whatsapp_phone}`);
+        } else {
+            logger.warn(`[Admin] Usuário ${user.email} ativado, mas sem número de WhatsApp para notificação.`);
+        }
+
+    } else { // newStatus === 'cancelled'
+        // DESATIVAR A ASSINATURA
+        await subscription.update({
+            status: 'cancelled',
+            expires_at: new Date() // Expira imediatamente
+        });
+        logger.info(`[Admin] Assinatura do usuário ${user.email} foi desativada.`);
+    }
+    
+    return subscription.reload();
+  },
+
+
+  /**
    * Processa o Webhook de Pré-Aprovação do Mercado Pago (Criação/Cancelamento).
    * @param {object} data - Dados do webhook.
    */

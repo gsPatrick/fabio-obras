@@ -2,6 +2,7 @@
 const { User, Subscription } = require('../../models');
 const mercadopago = require('../../config/mercadoPago');
 const logger = require('../../utils/logger');
+const subscriptionService = require('../../services/subscriptionService'); // <<< IMPORTAR O SERVIÇO
 
 class AdminController {
   
@@ -38,6 +39,25 @@ class AdminController {
     } catch (error) {
       logger.error('[AdminController] Erro ao buscar pagamentos do Mercado Pago:', error);
       res.status(500).json({ error: 'Erro ao buscar dados de lucros.' });
+    }
+  }
+
+  // <<< NOVO MÉTODO >>>
+  // PUT /admin/users/:id/subscription/status
+  async updateUserSubscriptionStatus(req, res) {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status || !['active', 'cancelled'].includes(status)) {
+        return res.status(400).json({ error: "O status deve ser 'active' ou 'cancelled'." });
+    }
+
+    try {
+        const updatedSubscription = await subscriptionService.adminUpdateUserSubscription(id, status);
+        res.status(200).json({ message: 'Status da assinatura atualizado com sucesso.', subscription: updatedSubscription });
+    } catch (error) {
+        logger.error(`[AdminController] Erro ao atualizar assinatura para usuário ${id}:`, error);
+        res.status(500).json({ error: error.message });
     }
   }
 }

@@ -42,6 +42,68 @@ class AdminController {
     }
   }
 
+  // <<< NOVO: POST /admin/users >>>
+  async createUser(req, res) {
+    const { email, password, whatsapp_phone } = req.body;
+    if (!email || !password || !whatsapp_phone) {
+      return res.status(400).json({ error: 'Email, senha e WhatsApp são obrigatórios.' });
+    }
+    try {
+      const newUser = await User.create({ email, password, whatsapp_phone, status: 'pending' });
+      // Admin cria o usuário, mas o primeiro perfil pode ser criado depois ou pelo próprio usuário.
+      // Vamos criar um perfil padrão para consistência.
+      await Profile.create({ name: 'Perfil Principal', user_id: newUser.id });
+      logger.info(`[Admin] Usuário ${email} criado pelo administrador.`);
+      res.status(201).json(newUser);
+    } catch (error) {
+      logger.error('[AdminController] Erro ao criar usuário:', error);
+      res.status(500).json({ error: 'Erro ao criar usuário.' });
+    }
+  }
+
+  // <<< NOVO: PUT /admin/users/:id >>>
+  async updateUser(req, res) {
+    const { id } = req.params;
+    const { email, password, whatsapp_phone } = req.body;
+    try {
+      const user = await User.findByPk(id);
+      if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+      
+      if (email) user.email = email;
+      // Se uma nova senha for fornecida, ela será hasheada pelo hook do model
+      if (password) user.password = password; 
+      if (whatsapp_phone) user.whatsapp_phone = whatsapp_phone;
+
+      await user.save();
+      logger.info(`[Admin] Usuário ${user.email} (ID: ${id}) atualizado pelo administrador.`);
+      res.status(200).json(user);
+    } catch (error) {
+      logger.error(`[AdminController] Erro ao atualizar usuário ${id}:`, error);
+      res.status(500).json({ error: 'Erro ao atualizar usuário.' });
+    }
+  }
+
+  // <<< NOVO: DELETE /admin/users/:id >>>
+  async deleteUser(req, res) {
+    const { id } = req.params;
+    try {
+      const user = await User.findByPk(id);
+      if (!user) return res.status(404).json({ error: 'Usuário não encontrado.' });
+      if (user.email === 'fabio@gmail.com') {
+        return res.status(403).json({ error: 'Não é possível deletar o administrador principal.' });
+      }
+
+      await user.destroy(); // Isso deve deletar em cascata os perfis, assinaturas, etc. (se configurado no DB)
+      logger.info(`[Admin] Usuário ${user.email} (ID: ${id}) deletado pelo administrador.`);
+      res.status(200).json({ message: 'Usuário deletado com sucesso.' });
+    } catch (error) {
+      logger.error(`[AdminController] Erro ao deletar usuário ${id}:`, error);
+      res.status(500).json({ error: 'Erro ao deletar usuário.' });
+    }
+  }
+
+  
+
   // <<< NOVO MÉTODO >>>
   // PUT /admin/users/:id/subscription/status
   async updateUserSubscriptionStatus(req, res) {

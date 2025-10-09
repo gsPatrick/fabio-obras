@@ -1,5 +1,5 @@
 // src/features/Admin/admin.controller.js
-const { User, Subscription } = require('../../models');
+const { User, Subscription, Profile } = require('../../models');
 const mercadopago = require('../../config/mercadoPago');
 const logger = require('../../utils/logger');
 const subscriptionService = require('../../services/subscriptionService'); // <<< IMPORTAR O SERVIÇO

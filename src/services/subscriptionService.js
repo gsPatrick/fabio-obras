@@ -3,6 +3,7 @@ const { User, Subscription } = require('../models');
 const mercadopago = require('../config/mercadoPago'); 
 const logger = require('../utils/logger');
 const { Op } = require('sequelize');
+const whatsappService = require('../utils/whatsappService');
 
 
 // ===================================================================

@@ -42,22 +42,30 @@ class AdminController {
     }
   }
 
-  // <<< NOVO: POST /admin/users >>>
+  // <<< POST /admin/users - MÉTODO CORRIGIDO >>>
   async createUser(req, res) {
     const { email, password, whatsapp_phone } = req.body;
     if (!email || !password || !whatsapp_phone) {
       return res.status(400).json({ error: 'Email, senha e WhatsApp são obrigatórios.' });
     }
     try {
+      // <<< INÍCIO DA CORREÇÃO >>>
+      // 1. Verificar se o email já existe no banco de dados
+      const existingUser = await User.findOne({ where: { email } });
+      if (existingUser) {
+          // 2. Se existir, retornar um erro 409 (Conflict) com uma mensagem clara
+          return res.status(409).json({ error: 'Este email já está em uso. Por favor, utilize outro.' });
+      }
+      // <<< FIM DA CORREÇÃO >>>
+
       const newUser = await User.create({ email, password, whatsapp_phone, status: 'pending' });
-      // Admin cria o usuário, mas o primeiro perfil pode ser criado depois ou pelo próprio usuário.
-      // Vamos criar um perfil padrão para consistência.
       await Profile.create({ name: 'Perfil Principal', user_id: newUser.id });
       logger.info(`[Admin] Usuário ${email} criado pelo administrador.`);
       res.status(201).json(newUser);
     } catch (error) {
+      // O catch agora lidará com outros erros inesperados, não mais com a violação de unicidade.
       logger.error('[AdminController] Erro ao criar usuário:', error);
-      res.status(500).json({ error: 'Erro ao criar usuário.' });
+      res.status(500).json({ error: 'Erro interno ao criar usuário.' });
     }
   }
 

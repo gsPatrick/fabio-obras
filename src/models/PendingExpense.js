@@ -72,14 +72,21 @@ class PendingExpense extends Model {
       },
       status: {
         type: DataTypes.ENUM(
-          'awaiting_context', 
-          'awaiting_validation', 
-          'awaiting_category_reply',
-          'awaiting_new_category_decision', 
-          'awaiting_new_category_type',
-          'awaiting_category_flow_decision', // NOVO: Aguardando fluxo (despesa/receita) da nova categoria
-          'awaiting_credit_card_choice',     // NOVO: Aguardando escolha do cartão
-          'awaiting_installment_count'       // NOVO: Aguardando o número de parcelas
+          'awaiting_context',                         // Aguardando descrição para uma mídia
+          'awaiting_validation',                      // Despesa/Receita salva, aguardando confirmação/edição
+          'awaiting_category_reply',                  // Aguardando escolha de categoria da lista
+          'awaiting_new_category_decision',           // Categoria nova sugerida, aguardando decisão (criar/escolher/outros)
+          'awaiting_new_category_type',               // Aguardando tipo da nova categoria
+          'awaiting_category_flow_decision',          // Aguardando fluxo (despesa/receita) da nova categoria
+          'awaiting_new_category_goal',               // Aguardando meta da nova categoria (se for despesa)
+          'awaiting_credit_card_choice',              // Aguardando escolha do cartão de crédito
+          'awaiting_installment_count',               // Aguardando o número de parcelas
+          'awaiting_ai_analysis',                     // Mensagem enviada para IA analisar (temporário)
+          'awaiting_context_analysis_complete',       // Análise da IA concluída, pronto para decidir ação
+          'awaiting_new_card_name',                   // Fluxo de criação de cartão: aguardando nome
+          'awaiting_new_card_closing_day',            // Fluxo de criação de cartão: aguardando dia de fechamento
+          'awaiting_new_card_due_day',                // Fluxo de criação de cartão: aguardando dia de vencimento
+          'awaiting_card_creation_confirmation'       // Aguardando confirmação da IA para criar cartão
         ),
         defaultValue: 'awaiting_context',
         allowNull: false,
@@ -97,6 +104,10 @@ class PendingExpense extends Model {
         type: DataTypes.STRING,
         allowNull: true,
       },
+      temp_ai_parsed_flow: { // Fluxo (expense/revenue) parseado pela IA
+        type: DataTypes.ENUM('expense', 'revenue'),
+        allowNull: true,
+      },
       temp_ai_parsed_is_installment: { // Se a IA sugeriu que é parcelado
         type: DataTypes.BOOLEAN,
         allowNull: true,
@@ -107,6 +118,18 @@ class PendingExpense extends Model {
       },
       temp_ai_parsed_card_name: { // Nome do cartão sugerido pela IA
         type: DataTypes.STRING,
+        allowNull: true,
+      },
+      temp_card_name: { // Usado durante o fluxo de criação de cartão
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      temp_card_closing_day: { // Usado durante o fluxo de criação de cartão
+        type: DataTypes.INTEGER,
+        allowNull: true,
+      },
+      temp_card_due_day: { // Usado durante o fluxo de criação de cartão
+        type: DataTypes.INTEGER,
         allowNull: true,
       }
     }, {
@@ -119,9 +142,8 @@ class PendingExpense extends Model {
   static associate(models) {
     this.belongsTo(models.Category, { foreignKey: 'suggested_category_id', as: 'suggestedCategory' });
     this.belongsTo(models.Expense, { foreignKey: 'expense_id', as: 'expense' });
-    this.belongsTo(models.Revenue, { foreignKey: 'revenue_id', as: 'revenue' }); // NOVA ASSOCIAÇÃO
+    this.belongsTo(models.Revenue, { foreignKey: 'revenue_id', as: 'revenue' });
     this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' });
-    // NOVA ASSOCIAÇÃO: para o cartão de crédito
     this.belongsTo(models.CreditCard, { foreignKey: 'credit_card_id', as: 'creditCard' });
   }
 }

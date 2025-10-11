@@ -67,9 +67,7 @@ class Expense extends Model {
     this.belongsTo(models.Category, { foreignKey: 'category_id', as: 'category' });
     this.hasMany(models.Attachment, { foreignKey: 'expense_id', as: 'attachments' });
     this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' });
-    // NOVA ASSOCIAÇÃO: Despesa pode estar associada a um Cartão de Crédito
     this.belongsTo(models.CreditCard, { foreignKey: 'credit_card_id', as: 'creditCard' });
-    // Auto-associação para despesas parceladas (uma despesa original tem muitas parcelas)
     this.hasMany(models.Expense, { foreignKey: 'original_expense_id', as: 'installments' });
     this.belongsTo(models.Expense, { foreignKey: 'original_expense_id', as: 'originalExpense' });
   }

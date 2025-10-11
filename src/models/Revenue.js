@@ -18,7 +18,7 @@ class Revenue extends Model {
         allowNull: false,
         defaultValue: DataTypes.NOW,
       },
-      whatsapp_message_id: { // Para receitas via WhatsApp, se for o caso
+      whatsapp_message_id: {
         type: DataTypes.STRING,
         allowNull: true,
       }
@@ -31,7 +31,6 @@ class Revenue extends Model {
   
   static associate(models) {
       this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' });
-      // NOVA ASSOCIAÇÃO: Receita também tem uma Categoria
       this.belongsTo(models.Category, { foreignKey: 'category_id', as: 'category' }); 
   }
 }

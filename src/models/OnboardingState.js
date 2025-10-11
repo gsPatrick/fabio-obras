@@ -23,7 +23,7 @@ class OnboardingState extends Model {
           'awaiting_category_creation_start',
           'awaiting_new_category_name',
           'awaiting_new_category_type',
-          'awaiting_category_flow_decision', // NOVO: Aguardando se é Despesa/Receita
+          'awaiting_category_flow_decision',
           'awaiting_new_category_goal',
           'awaiting_pending_payment'
         ),
@@ -45,7 +45,7 @@ class OnboardingState extends Model {
           type: DataTypes.STRING,
           allowNull: true,
       },
-      temp_category_flow: { // NOVO: Fluxo temporário da categoria (expense/revenue)
+      temp_category_flow: {
           type: DataTypes.ENUM('expense', 'revenue'),
           allowNull: true,
       },

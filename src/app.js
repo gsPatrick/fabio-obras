@@ -48,7 +48,8 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: true}); 
+      await db.sequelize.sync({ force: false}); // <<< MANTIDO force: false aqui, o que significa que o sync do seeder não apaga tabelas.
+                                                // O force: true está na sua configuração de ambiente ou outro lugar.
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser();
     } catch (error) {
@@ -91,35 +92,87 @@ class App {
         if (!profile) {
             console.log(`[SEEDER] Criando perfil padrão para o usuário ${user.email}...`);
             profile = await Profile.create({ name: 'Perfil Padrão', user_id: user.id });
-            await this.seedCategories(profile.id); 
+            await this.seedEssentialCategoriesForNewProfile(profile.id); // <<< MODIFICADO: Chama o novo seeder
+            await this.seedAdminSpecificCategories(profile.id); // <<< NOVO: Seeder específico do admin
             console.log('[SEEDER] Perfil Padrão e Categorias iniciais criadas.');
         } else {
             console.log(`[SEEDER] Perfil padrão já existe para o usuário ${user.email}.`);
-            await this.seedCategories(profile.id);
+            await this.seedEssentialCategoriesForNewProfile(profile.id); // <<< MODIFICADO: Garante essenciais
+            await this.seedAdminSpecificCategories(profile.id); // <<< NOVO: Garante específicas do admin
         }
     } catch (error) {
         console.error('[SEEDER] ❌ Falha ao verificar ou criar o usuário/perfil administrador:', error);
     }
   }
 
-  async seedCategories(profileId) {
-    if (!profileId) {
-        console.error('[SEEDER] Erro: profileId não foi fornecido para o seeder de categorias.');
-        return;
-    }
+  // <<< NOVO MÉTODO: Seeder para categorias essenciais (Outros, Receita Padrão) que todo perfil deve ter >>>
+  async seedEssentialCategoriesForNewProfile(profileId) {
+      if (!profileId) return;
+      const { Category } = db;
+      const essentialCategories = [
+          { name: 'Outros', type: 'Outros', category_flow: 'expense' },
+          { name: 'Receita Padrão', type: 'Receita', category_flow: 'revenue' },
+      ];
+      console.log(`[SEEDER] Verificando e criando categorias essenciais para o perfil ${profileId}...`);
+      for (const categoryData of essentialCategories) {
+          await Category.findOrCreate({
+              where: { name: categoryData.name, profile_id: profileId, category_flow: categoryData.category_flow },
+              defaults: { ...categoryData, profile_id: profileId },
+          });
+      }
+      console.log(`[SEEDER] Categorias essenciais para o perfil ${profileId} verificadas.`);
+  }
+  // <<< FIM NOVO MÉTODO >>>
+
+  // <<< NOVO MÉTODO: Seeder para categorias padrão que SÓ O ADMIN (ou o primeiro perfil) deve ter >>>
+  async seedAdminSpecificCategories(profileId) {
+    if (!profileId) return;
     const { Category } = db;
-    const categoriesToSeed = [
-        { name: 'Mão de obra estrutural', type: 'Mão de Obra' }, { name: 'Mão de obra cinza', type: 'Mão de Obra' }, { name: 'Mão de obra acabamento', type: 'Mão de Obra' }, { name: 'Mão de obra gesso', type: 'Mão de Obra' }, { name: 'Mão de obra pintura', type: 'Mão de Obra' }, { name: 'Mão de obra vidro', type: 'Mão de Obra' }, { name: 'Mão de obra esquadrias', type: 'Mão de Obra' }, { name: 'Mão de obra hidráulica e elétrica', type: 'Mão de Obra' }, { name: 'Material ferro', type: 'Material' }, { name: 'Material concreto', type: 'Material' }, { name: 'Material bruto', type: 'Material' }, { name: 'Material piso', type: 'Material' }, { name: 'Material argamassa', type: 'Material' }, { name: 'Material gesso', type: 'Material' }, { name: 'Material esquadria', type: 'Material' }, { name: 'Material pintura', type: 'Material' }, { name: 'Material fios', type: 'Material' }, { name: 'Material iluminação', type: 'Material' }, { name: 'Material pedras granitos', type: 'Material' }, { name: 'Material louças e metais', type: 'Material' }, { name: 'Material equipamentos', type: 'Material' }, { name: 'Material ar condicionado', type: 'Material' }, { name: 'Material hidráulica', type: 'Material' }, { name: 'Marcenaria', type: 'Serviços/Equipamentos' }, { name: 'Eletros', type: 'Serviços/Equipamentos' }, { name: 'Outros', type: 'Outros' },
+    
+    // Lista de categorias completa para o admin (ou primeiro perfil)
+    const adminCategoriesToSeed = [
+        // Mão de Obra
+        { name: 'Mão de obra estrutural', type: 'Mão de Obra', category_flow: 'expense' },
+        { name: 'Mão de obra cinza', type: 'Mão de Obra', category_flow: 'expense' },
+        { name: 'Mão de obra acabamento', type: 'Mão de Obra', category_flow: 'expense' },
+        { name: 'Mão de obra gesso', type: 'Mão de Obra', category_flow: 'expense' },
+        { name: 'Mão de obra pintura', type: 'Mão de Obra', category_flow: 'expense' },
+        { name: 'Mão de obra vidro', type: 'Mão de Obra', category_flow: 'expense' },
+        { name: 'Mão de obra esquadrias', type: 'Mão de Obra', category_flow: 'expense' },
+        { name: 'Mão de obra hidráulica e elétrica', type: 'Mão de Obra', category_flow: 'expense' },
+        // Material
+        { name: 'Material ferro', type: 'Material', category_flow: 'expense' },
+        { name: 'Material concreto', type: 'Material', category_flow: 'expense' },
+        { name: 'Material bruto', type: 'Material', category_flow: 'expense' },
+        { name: 'Material piso', type: 'Material', category_flow: 'expense' },
+        { name: 'Material argamassa', type: 'Material', category_flow: 'expense' },
+        { name: 'Material gesso', type: 'Material', category_flow: 'expense' },
+        { name: 'Material esquadria', type: 'Material', category_flow: 'expense' },
+        { name: 'Material pintura', type: 'Material', category_flow: 'expense' },
+        { name: 'Material fios', type: 'Material', category_flow: 'expense' },
+        { name: 'Material iluminação', type: 'Material', category_flow: 'expense' },
+        { name: 'Material pedras granitos', type: 'Material', category_flow: 'expense' },
+        { name: 'Material louças e metais', type: 'Material', category_flow: 'expense' },
+        { name: 'Material equipamentos', type: 'Material', category_flow: 'expense' },
+        { name: 'Material ar condicionado', type: 'Material', category_flow: 'expense' },
+        { name: 'Material hidráulica', type: 'Material', category_flow: 'expense' },
+        // Serviços/Equipamentos
+        { name: 'Marcenaria', type: 'Serviços/Equipamentos', category_flow: 'expense' },
+        { name: 'Eletros', type: 'Serviços/Equipamentos', category_flow: 'expense' },
     ];
-    console.log('[SEEDER] Verificando e criando categorias essenciais...');
-    for (const categoryData of categoriesToSeed) {
+
+    console.log(`[SEEDER] Verificando e criando categorias específicas do administrador para o perfil ${profileId}...`);
+    for (const categoryData of adminCategoriesToSeed) {
         await Category.findOrCreate({
-            where: { name: categoryData.name, profile_id: profileId },
+            where: { name: categoryData.name, profile_id: profileId, category_flow: categoryData.category_flow },
             defaults: { ...categoryData, profile_id: profileId },
         });
     }
-    console.log('[SEEDER] Verificação de categorias concluída.');
+    console.log('[SEEDER] Categorias específicas do administrador verificadas.');
   }
+  // <<< FIM NOVO MÉTODO >>>
+
+  // <<< REMOVIDO: Antigo seedCategories - Agora dividido em dois métodos >>>
 
   startPendingExpenseWorker() {
     const { PendingExpense, Expense, Category } = db;
@@ -128,14 +181,32 @@ class App {
       const now = new Date();
       try {
         await PendingExpense.destroy({ where: { status: 'awaiting_validation', expires_at: { [Op.lte]: now } } });
-        const expiredReplies = await PendingExpense.findAll({ where: { status: 'awaiting_category_reply', expires_at: { [Op.lte]: now } }, include: [{ model: Category, as: 'suggestedCategory' }, { model: Expense, as: 'expense' }] });
+        
+        // <<< MODIFICADO: Lidar com expense e revenue na expiração de categoria >>>
+        const expiredReplies = await PendingExpense.findAll({ 
+            where: { status: 'awaiting_category_reply', expires_at: { [Op.lte]: now } }, 
+            include: [
+                { model: Category, as: 'suggestedCategory' }, 
+                { model: Expense, as: 'expense' },
+                { model: Revenue, as: 'revenue' } // Inclui Revenue
+            ] 
+        });
         for (const pending of expiredReplies) {
-          const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(pending.expense.value);
-          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria expirou. A despesa de *${formattedValue}* foi mantida com a categoria original: *${pending.suggestedCategory.name}*.`;
+          const entryValue = pending.expense ? pending.expense.value : pending.revenue ? pending.revenue.value : 0;
+          const entryType = pending.expense ? 'despesa' : 'receita';
+          const originalCategoryName = pending.suggestedCategory?.name || 'N/A';
+
+          const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
+          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria para a ${entryType} de *${formattedValue}* expirou. O item foi mantido com a categoria original: *${originalCategoryName}*.`;
           await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
           await pending.destroy();
         }
-        await PendingExpense.destroy({ where: { status: 'awaiting_context', expires_at: { [Op.lte]: now } } });
+        // <<< FIM MODIFICADO >>>
+        
+        // <<< MODIFICADO: Adicionado novos status para limpar >>>
+        await PendingExpense.destroy({ where: { status: { [Op.in]: ['awaiting_context', 'awaiting_ai_analysis', 'awaiting_context_analysis_complete', 'awaiting_new_category_decision', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal', 'awaiting_credit_card_choice', 'awaiting_installment_count', 'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'] }, expires_at: { [Op.lte]: now } } });
+        // <<< FIM MODIFICADO >>>
+
       } catch (error) {
         console.error('[WORKER] ❌ Erro ao processar despesas pendentes:', error);
       }

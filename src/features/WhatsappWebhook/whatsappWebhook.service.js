@@ -2,11 +2,12 @@
 'use strict';
 
 const logger = require('../../utils/logger');
-const { MonitoredGroup, Category, PendingExpense, Expense, Profile, User, OnboardingState } = require('../../models');
+const { MonitoredGroup, Category, PendingExpense, Expense, Revenue, Profile, User, OnboardingState, MonthlyGoal, CreditCard } = require('../../models');
 const subscriptionService = require('../../services/subscriptionService');
 const profileService = require('../ProfileManager/profile.service');
 const groupService = require('../GroupManager/group.service');
 const categoryService = require('../CategoryManager/category.service');
+const creditCardService = require('../CreditCardManager/creditCard.service'); // Importar CreditCardService
 const { Op } = require('sequelize');
 const aiService = require('../../utils/aiService');
 const whatsappService = require('../../utils/whatsappService');
@@ -14,27 +15,37 @@ const dashboardService = require('../../features/Dashboard/dashboard.service');
 const excelService = require('../../utils/excelService');
 const fs = require('fs');
 const path = require('path');
+const { startOfMonth, format, getMonth, getYear, addMonths, setDate, isAfter, endOfDay, startOfDay, subDays, eachDayOfInterval } = require('date-fns');
 
 const CONTEXT_WAIT_TIME_MINUTES = 2;
 const EXPENSE_EDIT_WAIT_TIME_MINUTES = 5;
 const ONBOARDING_WAIT_TIME_MINUTES = 10;
+const MENU_COMMAND = 'MENU';
 
 class WebhookService {
 
   async _findUserByFlexiblePhone(phone) {
     if (!phone) return null;
     const variations = new Set([phone]);
-    if (phone.startsWith('55') && phone.length === 12) {
+    // Adiciona variações de 8/9 dígitos para DDDs brasileiros
+    if (phone.startsWith('55') && phone.length === 12) { // Ex: 552188881111 (8 digitos local)
       const areaCode = phone.substring(2, 4);
       const localNumber = phone.substring(4);
       if (localNumber.length === 8) {
-        variations.add(`55${areaCode}9${localNumber}`);
+        variations.add(`55${areaCode}9${localNumber}`); // Add 9 na frente: 5521988881111
       }
-    } else if (phone.startsWith('55') && phone.length === 13) {
+    } else if (phone.startsWith('55') && phone.length === 13) { // Ex: 5521988881111 (9 digitos local)
       const areaCode = phone.substring(2, 4);
       const localNumber = phone.substring(4);
       if (localNumber.startsWith('9') && localNumber.length === 9) {
-        variations.add(`55${areaCode}${localNumber.substring(1)}`);
+        variations.add(`55${areaCode}${localNumber.substring(1)}`); // Remove 9: 552188881111
+      }
+    } else if (phone.length === 10 || phone.length === 11) { // DDD + Número sem 55
+      variations.add(`55${phone}`);
+      if (phone.length === 10) { // Ex: 2188881111
+        variations.add(`55${phone.substring(0,2)}9${phone.substring(2)}`);
+      } else if (phone.length === 11 && phone.startsWith('9', 2)) { // Ex: 21988881111
+        variations.add(`55${phone.substring(0,2)}${phone.substring(3)}`);
       }
     }
     logger.info(`[Auth] Buscando usuário com variações de telefone: ${Array.from(variations).join(', ')}`);
@@ -44,15 +55,29 @@ class WebhookService {
   async processIncomingMessage(payload) {
     if (payload.fromMe) { return; }
     if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
-    if (!payload.isGroup) { return; }
-
+    
     const onboardingState = await OnboardingState.findOne({ where: { group_id: payload.phone } });
-    if (onboardingState) { return this.handleOnboardingResponse(payload, onboardingState); }
+    if (onboardingState) { 
+        return this.handleOnboardingResponse(payload, onboardingState); 
+    }
+
+    if (!payload.isGroup) { 
+        const participantPhone = payload.participantPhone;
+        const user = await this._findUserByFlexiblePhone(participantPhone);
+        if (user && user.status === 'pending') {
+            logger.info(`[Webhook] Mensagem de usuário pendente (${user.email}) em grupo não monitorado.`);
+            await this.startPendingPaymentFlow(payload.phone, participantPhone, user);
+            return;
+        }
+        logger.debug(`[Webhook] Mensagem individual ou grupo não monitorado de ${payload.phone}. Ignorando.`);
+        return; 
+    }
 
     const participantPhone = payload.participantPhone;
     if (!participantPhone) { return; }
 
     const monitoredGroup = await MonitoredGroup.findOne({ where: { group_id: payload.phone, is_active: true } });
+    
     if (!monitoredGroup) {
         const user = await this._findUserByFlexiblePhone(participantPhone);
         if (user && user.status === 'pending') {
@@ -61,14 +86,22 @@ class WebhookService {
             return;
         }
         logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou participante não está pendente.`);
-        return;
+        return; 
     }
 
-    const groupWithDetails = await MonitoredGroup.findOne({ where: { id: monitoredGroup.id }, include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] });
-    if (!groupWithDetails.profile || !groupWithDetails.profile.user) { logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil ou usuário associado.`); return; }
+    const groupWithDetails = await MonitoredGroup.findOne({ 
+        where: { id: monitoredGroup.id }, 
+        include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] 
+    });
+
+    if (!groupWithDetails.profile || !groupWithDetails.profile.user) { 
+        logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil ou usuário associado.`); 
+        return; 
+    }
 
     const ownerUserId = groupWithDetails.profile.user.id;
     const isPlanActive = await subscriptionService.isUserActive(ownerUserId);
+
     if (!isPlanActive) {
       logger.warn(`[Webhook] Acesso negado para ${groupWithDetails.profile.user.email}. Plano inativo.`);
       const checkout = await subscriptionService.createSubscriptionCheckout(ownerUserId);
@@ -79,11 +112,36 @@ class WebhookService {
 
     payload.profileId = groupWithDetails.profile.id;
     
-    if (payload.buttonsResponseMessage) { return this.handleButtonResponse(payload); }
-    if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
-    if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
+    if (payload.buttonsResponseMessage) { 
+        return this.handleButtonResponse(payload); 
+    }
+    
+    if (payload.text?.message?.toUpperCase().trim() === MENU_COMMAND) {
+        return this.sendMainMenu(payload.phone);
+    }
+
+    if (payload.image || payload.document) { 
+        return this.handleMediaArrival(payload); 
+    }
+    
+    if (payload.audio || payload.text) { 
+        return this.handleContextArrival(payload); 
+    }
   }
   
+  async sendMainMenu(groupId) {
+    const message = `Olá! O que você gostaria de fazer?`;
+    const buttons = [
+        { id: 'menu_create_expense_revenue', label: '💸 Lançar Despesa/Receita' },
+        { id: 'menu_view_report', label: '📊 Ver Relatório Mensal' },
+        { id: 'menu_export_excel', label: '📝 Exportar Planilha' },
+        { id: 'menu_create_category', label: '➕ Criar Categoria' },
+        { id: 'menu_manage_cards', label: '💳 Gerenciar Cartões' },
+    ];
+    await whatsappService.sendButtonList(groupId, message, buttons);
+    logger.info(`[Webhook] Menu principal enviado para ${groupId}.`);
+  }
+
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
     logger.info(`[Onboarding] Bot adicionado ao grupo ${groupId}. Verificando participantes...`);
@@ -185,11 +243,10 @@ class WebhookService {
     const buttonId = payload.buttonsResponseMessage ? payload.buttonsResponseMessage.buttonId : null;
     
     const userIsInitiator = await this._findUserByFlexiblePhone(payload.participantPhone);
-    if (!userIsInitiator || userIsInitiator.id !== state.user_id) {
-        if (!state.user_id && payload.participantPhone !== state.initiator_phone) {
-            logger.warn(`[Onboarding] Resposta ignorada. Participante ${payload.participantPhone} não é o iniciador ${state.initiator_phone}.`);
-            return;
-        }
+    if (!userIsInitiator || (state.user_id && userIsInitiator.id !== state.user_id) || (!state.user_id && payload.participantPhone !== state.initiator_phone)) {
+        logger.warn(`[Onboarding] Resposta ignorada. Participante ${payload.participantPhone} não é o iniciador/proprietário do estado de onboarding para o grupo ${groupId}.`);
+        await whatsappService.sendWhatsappMessage(groupId, `👋 Olá! Este fluxo de configuração foi iniciado por outra pessoa neste grupo. Por favor, aguarde o processo ser concluído.`);
+        return;
     }
     
     switch (state.status) {
@@ -259,7 +316,7 @@ class WebhookService {
             const profile = profiles[selectedIndex];
 
             if (profile) {
-                await groupService.startMonitoringGroup(groupId, profile.id, userId, groupName);
+                await groupService.startMonitoringGroup(groupId, profile.id, userId, groupName); 
                 await whatsappService.sendWhatsappMessage(groupId, `✅ Perfil "${profile.name}" selecionado!`);
                 await this.startCategoryCreationFlow(state, profile.id);
             } else {
@@ -302,9 +359,9 @@ class WebhookService {
         if (buttonId === 'onboarding_add_category') {
             state.status = 'awaiting_new_category_name';
             await state.save();
-            await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Alvenaria")');
+            await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Salário")');
         } else if (buttonId === 'onboarding_finish') {
-            const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos.
+            const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos e receitas.
 
 *Dica:* Você sabia que também pode acessar um painel web completo para ver gráficos, relatórios e gerenciar todos os seus dados?
 
@@ -320,49 +377,76 @@ Acesse em: https://obras-fabio.vercel.app/login`;
               state.status = 'awaiting_new_category_type';
               state.temp_category_name = textMessage;
               await state.save();
-              await whatsappService.sendWhatsappMessage(groupId, `Entendido. Agora, defina um *tipo* para a categoria "*${textMessage}*".\n\nIsso ajuda a agrupar seus custos nos relatórios (ex: "Mão de Obra", "Material Bruto", "Acabamentos").`);
+              await whatsappService.sendWhatsappMessage(groupId, `Entendido. Agora, defina um *tipo* para a categoria "*${textMessage}*".\n\nIsso ajuda a agrupar seus custos nos relatórios (ex: "Mão de Obra", "Material Bruto", "Acabamentos", "Salário").`);
           }
           break;
 
       case 'awaiting_new_category_type':
           if (textMessage) {
-              state.status = 'awaiting_new_category_goal';
+              state.status = 'awaiting_category_flow_decision';
               state.temp_category_type = textMessage.trim();
               await state.save();
-              await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${state.temp_category_name}*"?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+              const message = `A categoria "*${state.temp_category_name}*" será para *Despesas* ou *Receitas*?`;
+              const buttons = [{ id: `onboarding_flow_expense`, label: '💸 Despesa' }, { id: `onboarding_flow_revenue`, label: '💰 Receita' }];
+              await whatsappService.sendButtonList(groupId, message, buttons);
           }
           break;
       
+      case 'awaiting_category_flow_decision':
+        if (buttonId && (buttonId === 'onboarding_flow_expense' || buttonId === 'onboarding_flow_revenue')) {
+            state.temp_category_flow = (buttonId === 'onboarding_flow_expense' ? 'expense' : 'revenue');
+            if (state.temp_category_flow === 'expense') {
+                state.status = 'awaiting_new_category_goal';
+                await state.save();
+                await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${state.temp_category_name}*" (Despesa)?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+            } else {
+                await this.finalizeNewCategoryOnboarding(state);
+            }
+        } else {
+            await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, selecione "Despesa" ou "Receita".`);
+        }
+        break;
+
       case 'awaiting_new_category_goal':
           if (textMessage) {
               const goalValue = parseFloat(textMessage.replace(',', '.'));
-              if (isNaN(goalValue)) {
-                  await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números (ex: 1500 ou 0).`);
+              if (isNaN(goalValue) || goalValue < 0) {
+                  await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números positivos (ex: 1500 ou 0).`);
                   return;
               }
-
-              const goalService = require('../GoalManager/goal.service');
-
-              const newCategory = await categoryService.create(
-                  { name: state.temp_category_name, type: state.temp_category_type },
-                  state.profile_id
-              );
-              
-              let goalMessage = `✅ Categoria "*${state.temp_category_name}*" criada com sucesso!`;
-
-              if (goalValue > 0) {
-                  await goalService.createOrUpdateGoal(state.profile_id, {
-                      value: goalValue,
-                      categoryId: newCategory.id
-                  });
-                  goalMessage += `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
-              }
-              
-              await whatsappService.sendWhatsappMessage(groupId, goalMessage);
-              
-              await this.startCategoryCreationFlow(state, state.profile_id, false);
+              await this.finalizeNewCategoryOnboarding(state, goalValue);
           }
           break;
+    }
+  }
+
+  async finalizeNewCategoryOnboarding(state, goalValue = 0) {
+    const { group_id, profile_id, temp_category_name, temp_category_type, temp_category_flow } = state;
+
+    try {
+        const newCategory = await categoryService.create(
+            { name: temp_category_name, type: temp_category_type, category_flow: temp_category_flow },
+            profile_id
+        );
+        
+        let goalMessage = '';
+        if (temp_category_flow === 'expense' && goalValue > 0) {
+            const goalService = require('../GoalManager/goal.service');
+            await goalService.createOrUpdateGoal(profile_id, {
+                value: goalValue,
+                categoryId: newCategory.id,
+                isTotalGoal: false,
+            });
+            goalMessage = `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
+        }
+        
+        await whatsappService.sendWhatsappMessage(group_id, `✅ Categoria "*${temp_category_name}*" (Tipo: ${temp_category_type}, Fluxo: ${temp_category_flow === 'expense' ? 'Despesa' : 'Receita'}) criada com sucesso!${goalMessage}`);
+        
+        await this.startCategoryCreationFlow(state, profile_id, false);
+    } catch (error) {
+        logger.error('[Webhook] Erro ao finalizar criação de categoria de PendingExpense (Onboarding):', error);
+        await whatsappService.sendWhatsappMessage(group_id, `❌ Houve um erro ao criar a categoria "${temp_category_name}". ${error.message}`);
+        await state.destroy();
     }
   }
 
@@ -371,8 +455,9 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     state.profile_id = profileId;
     state.temp_category_name = null;
     state.temp_category_type = null;
+    state.temp_category_flow = null;
     await state.save();
-    const message = isFirstTime ? 'Agora, vamos configurar suas categorias de custo. Você pode criar quantas quiser.' : 'Deseja adicionar outra categoria?';
+    const message = isFirstTime ? 'Agora, vamos configurar suas categorias de custo e receita. Você pode criar quantas quiser.' : 'Deseja adicionar outra categoria, ou já podemos finalizar a configuração?';
     const buttons = [ { id: 'onboarding_add_category', label: '➕ Adicionar Categoria' }, { id: 'onboarding_finish', label: '🏁 Finalizar Configuração' } ];
     await whatsappService.sendButtonList(state.group_id, message, buttons);
   }
@@ -380,18 +465,198 @@ Acesse em: https://obras-fabio.vercel.app/login`;
   async handleButtonResponse(payload) {
     if (payload.fromMe) return;
     const buttonId = payload.buttonsResponseMessage.buttonId;
+    const groupId = payload.phone;
+    const profileId = payload.profileId;
+
+    if (buttonId.startsWith('menu_')) {
+        const action = buttonId.split('_')[1];
+        if (action === 'create_expense_revenue') {
+             await whatsappService.sendWhatsappMessage(groupId, `Ok! Por favor, me envie a despesa ou receita.\n\nVocê pode mandar o texto (ex: "R$ 500 Almoço", ou "Salário 3000"), um áudio ou um comprovante.`);
+        } else if (action === 'view_report') {
+            await this.sendSpendingReport(groupId, payload.participantPhone, profileId);
+        } else if (action === 'export_excel') {
+            await this.sendExpensesExcelReport(groupId, payload.participantPhone, profileId);
+        } else if (action === 'create_category') {
+             const pending = await PendingExpense.create({ 
+                whatsapp_message_id: payload.messageId + '_menu_cat',
+                whatsapp_group_id: groupId,
+                participant_phone: payload.participantPhone,
+                profile_id: profileId,
+                status: 'awaiting_new_category_name',
+                expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
+             });
+             await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Salário")');
+        } else if (action === 'manage_cards') {
+            return this.handleManageCardsAction(groupId, payload.participantPhone, profileId, payload.messageId);
+        }
+        return;
+    }
+
     if (buttonId.startsWith('edit_expense_')) {
       return this.handleEditButtonFlow(payload);
     }
+    
     if (buttonId.startsWith('new_cat_')) {
       return this.handleNewCategoryDecisionFlow(payload);
     }
+    
+    if (buttonId.startsWith('new_cat_flow_')) {
+        return this.handleNewCategoryFlowDecision(payload);
+    }
+
+    if (buttonId.startsWith('card_')) {
+        return this.handleCreditCardButtonResponse(payload);
+    }
+
     if (buttonId.startsWith('pending_generate_link_')) {
         const userId = buttonId.split('_')[3];
         const checkout = await subscriptionService.createSubscriptionCheckout(userId);
         const linkMessage = `Aqui está seu novo link para pagamento:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, remova-me e adicione-me novamente ao grupo para começar!`;
-        await whatsappService.sendWhatsappMessage(payload.phone, linkMessage);
+        await whatsappService.sendWhatsappMessage(groupId, linkMessage);
         await OnboardingState.destroy({ where: { group_id: payload.phone } });
+    }
+  }
+
+  async handleManageCardsAction(groupId, participantPhone, profileId, messageId) {
+    const cards = await creditCardService.getAllCreditCards(profileId);
+    let message = '💳 *Gerenciar Cartões de Crédito*\n\n';
+    const buttons = [];
+
+    if (cards.length > 0) {
+        message += 'Seus cartões cadastrados:\n';
+        cards.forEach((card, index) => {
+            message += `${index + 1} - ${card.name} (final ${card.last_four_digits || 'N/A'})\n`;
+        });
+        message += '\n';
+        // Futuras opções de editar/deletar um cartão existente podem ser adicionadas aqui
+    } else {
+        message += 'Você ainda não tem cartões de crédito cadastrados.\n\n';
+    }
+    
+    buttons.push({ id: `card_create_${messageId}`, label: '➕ Criar Novo Cartão' });
+    buttons.push({ id: `menu_back_to_main_${messageId}`, label: '↩️ Voltar ao Menu Principal' });
+
+    await whatsappService.sendButtonList(groupId, message, buttons);
+    logger.info(`[Webhook] Menu de gerenciamento de cartões enviado para ${groupId}.`);
+  }
+
+  async handleCreditCardButtonResponse(payload) {
+    const buttonId = payload.buttonsResponseMessage.buttonId;
+    const groupId = payload.phone;
+    const profileId = payload.profileId;
+    const participantPhone = payload.participantPhone;
+    const messageId = buttonId.split('_')[2];
+
+    if (buttonId.startsWith('card_create_')) {
+        await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId, status: { [Op.in]: ['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'] } } });
+
+        const pending = await PendingExpense.create({
+            whatsapp_message_id: messageId,
+            whatsapp_group_id: groupId,
+            participant_phone: participantPhone,
+            profile_id: profileId,
+            status: 'awaiting_new_card_name',
+            expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
+        });
+        await whatsappService.sendWhatsappMessage(groupId, `Ok! Qual será o *nome* do novo cartão? (ex: "Nubank", "Cartão da Obra")`);
+    } else if (buttonId.startsWith('card_confirm_create_')) {
+        const pendingExpenseId = buttonId.split('_')[3];
+        const pending = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
+
+        if (!pending || pending.status !== 'awaiting_card_creation_confirmation') {
+            await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou ou o fluxo foi interrompido.`);
+            if (pending) await pending.destroy();
+            return;
+        }
+
+        try {
+            const newCard = await creditCardService.createCreditCard(pending.profile_id, {
+                name: pending.temp_ai_parsed_card_name,
+                closing_day: pending.temp_card_closing_day,
+                due_day: pending.temp_card_due_day,
+                last_four_digits: null, 
+            });
+            await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
+            await pending.destroy();
+            await this.sendMainMenu(groupId);
+        } catch (error) {
+            logger.error('[Webhook] Erro ao criar cartão de crédito (confirmação):', error);
+            await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao criar o cartão. ${error.message}`);
+            await pending.destroy();
+            await this.sendMainMenu(groupId);
+        }
+
+    } else if (buttonId.startsWith('card_cancel_create_')) {
+        const pendingExpenseId = buttonId.split('_')[3];
+        const pending = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
+        if (pending) await pending.destroy();
+        await whatsappService.sendWhatsappMessage(groupId, `Criação de cartão cancelada.`);
+        await this.sendMainMenu(groupId);
+    } else if (buttonId.startsWith('menu_back_to_main_')) {
+        return this.sendMainMenu(groupId);
+    }
+  }
+
+  async handleCreditCardCreationFlowFromPending(payload, pending) {
+    const groupId = payload.phone;
+    const textMessage = payload.text?.message;
+
+    switch (pending.status) {
+        case 'awaiting_new_card_name':
+            if (textMessage) {
+                pending.temp_card_name = textMessage.trim();
+                pending.status = 'awaiting_new_card_closing_day';
+                await pending.save();
+                await whatsappService.sendWhatsappMessage(groupId, `Certo, o nome será "*${pending.temp_card_name}*".\n\nAgora, qual o *dia de fechamento da fatura*? (Responda apenas com o número do dia, de 1 a 31. Ex: 10)`);
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `Por favor, me diga o nome do cartão.`);
+            }
+            break;
+        case 'awaiting_new_card_closing_day':
+            if (textMessage && /^\d+$/.test(textMessage)) {
+                const day = parseInt(textMessage, 10);
+                if (day >= 1 && day <= 31) {
+                    pending.temp_card_closing_day = day;
+                    pending.status = 'awaiting_new_card_due_day';
+                    await pending.save();
+                    await whatsappService.sendWhatsappMessage(groupId, `Dia de fechamento definido para o dia *${day}*.\n\nE qual o *dia de vencimento da fatura*? (Responda apenas com o número do dia, de 1 a 31. Ex: 20)`);
+                } else {
+                    await whatsappService.sendWhatsappMessage(groupId, `Dia inválido. Por favor, responda com um número entre 1 e 31.`);
+                }
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `Por favor, responda com o dia de fechamento (número).`);
+            }
+            break;
+        case 'awaiting_new_card_due_day':
+            if (textMessage && /^\d+$/.test(textMessage)) {
+                const day = parseInt(textMessage, 10);
+                if (day >= 1 && day <= 31) {
+                    pending.temp_card_due_day = day;
+                    await pending.save();
+
+                    try {
+                        const newCard = await creditCardService.createCreditCard(pending.profile_id, {
+                            name: pending.temp_card_name,
+                            closing_day: pending.temp_card_closing_day,
+                            due_day: pending.temp_card_due_day,
+                            last_four_digits: null,
+                        });
+                        await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
+                        await pending.destroy();
+                        await this.sendMainMenu(groupId);
+                    } catch (error) {
+                        logger.error('[Webhook] Erro ao criar cartão de crédito:', error);
+                        await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao criar o cartão. ${error.message}`);
+                        await pending.destroy();
+                        await this.sendMainMenu(groupId);
+                    }
+                } else {
+                    await whatsappService.sendWhatsappMessage(groupId, `Dia inválido. Por favor, responda com um número entre 1 e 31.`);
+                }
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `Por favor, responda com o dia de vencimento (número).`);
+            }
+            break;
     }
   }
 
@@ -402,8 +667,24 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const profileId = payload.profileId;
     const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
     const mimeType = payload.image ? payload.image.mimeType : payload.document.mimeType;
-    await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId, status: 'awaiting_context' } });
-    await PendingExpense.create({
+    
+    // Limpa pendências anteriores para este participante no mesmo grupo
+    await PendingExpense.destroy({ 
+        where: { 
+            participant_phone: participantPhone, 
+            whatsapp_group_id: groupId, 
+            profile_id: profileId, 
+            status: { 
+                [Op.in]: [
+                    'awaiting_context', 'awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal', 
+                    'awaiting_credit_card_choice', 'awaiting_installment_count', 
+                    'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'
+                ] 
+            } 
+        } 
+    });
+    
+    const pending = await PendingExpense.create({
       whatsapp_message_id: payload.messageId,
       whatsapp_group_id: groupId,
       participant_phone: participantPhone,
@@ -413,7 +694,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       profile_id: profileId,
       expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
     });
-    const confirmationMessage = `📄 Qual a descrição para este documento?`;
+    const confirmationMessage = `📄 Recebi o documento. Qual a descrição para ele? (ex: "500 aluguel" ou "salário de 1000")`;
     await whatsappService.sendWhatsappMessage(groupId, confirmationMessage);
     logger.info(`[Webhook] Mídia (${mimeType}) de ${participantPhone} recebida. Mensagem de confirmação enviada.`);
   }
@@ -424,22 +705,61 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const participantPhone = payload.participantPhone;
     const profileId = payload.profileId;
     const textMessage = payload.text ? payload.text.message : null;
-    const pendingCategoryType = await PendingExpense.findOne({
-      where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId, status: 'awaiting_new_category_type' }
-    });
-    if (pendingCategoryType && textMessage) {
-      return this.finalizeNewCategoryCreation(pendingCategoryType, textMessage);
+    const audioUrl = payload.audio ? payload.audio.audioUrl : null;
+
+    if (!profileId) {
+        logger.warn(`[Webhook] ProfileId não encontrado para o grupo ${groupId}. Ignorando contexto.`);
+        return;
     }
+
+    // --- Tratamento de Comandos Específicos ---
     if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
         return this.sendSpendingReport(groupId, participantPhone, profileId);
     }
     if (textMessage && textMessage.toLowerCase().trim() === '#exportardespesas') {
         return this.sendExpensesExcelReport(groupId, participantPhone, profileId);
     }
+    if (textMessage && textMessage.toLowerCase().trim() === MENU_COMMAND) {
+        return this.sendMainMenu(groupId);
+    }
+
+    // --- Continuação de Fluxos de Criação de Categoria/Cartão Fora do Onboarding ---
+    const pendingFlow = await PendingExpense.findOne({
+        where: { 
+            participant_phone: participantPhone, 
+            whatsapp_group_id: groupId, 
+            profile_id: profileId, 
+            status: { 
+                [Op.in]: [
+                    'awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal',
+                    'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'
+                ] 
+            }
+        },
+        order: [['createdAt', 'DESC']]
+    });
+
+    if (pendingFlow) {
+        if (['awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'].includes(pendingFlow.status)) {
+            return this.handleNewCategoryCreationFlowFromPending(payload, pendingFlow);
+        }
+        if (['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'].includes(pendingFlow.status)) {
+            return this.handleCreditCardCreationFlowFromPending(payload, pendingFlow);
+        }
+    }
+
+    // --- Continuação de Fluxos de Despesa/Receita ---
     const pendingMedia = await PendingExpense.findOne({
-      where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId, status: 'awaiting_context', expires_at: { [Op.gt]: new Date() } },
+      where: { 
+          participant_phone: participantPhone, 
+          whatsapp_group_id: groupId, 
+          profile_id: profileId, 
+          status: 'awaiting_context', 
+          expires_at: { [Op.gt]: new Date() } 
+      },
       order: [['createdAt', 'DESC']]
     });
+
     if (pendingMedia) {
       const allowedMimeTypesForAI = ['image/jpeg', 'image/png', 'application/pdf'];
       if (!allowedMimeTypesForAI.includes(pendingMedia.attachment_mimetype)) {
@@ -449,75 +769,345 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         await pendingMedia.destroy();
         return;
       }
-      await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando...`);
+      
+      await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando documento e sua descrição...`);
       let userContext = '';
-      if (payload.audio) {
-        const audioBuffer = await whatsappService.downloadZapiMedia(payload.audio.audioUrl);
+      if (audioUrl) {
+        const audioBuffer = await whatsappService.downloadZapiMedia(audioUrl);
         userContext = audioBuffer ? await aiService.transcribeAudio(audioBuffer) : '';
-      } else {
-        userContext = payload.text.message;
+      } else if (textMessage) {
+        userContext = textMessage;
       }
+      
       const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
       if (mediaBuffer && userContext) {
         const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, pendingMedia.profile_id);
         if (analysisResult) {
-          return this.decideAndSaveExpense(pendingMedia, analysisResult, userContext);
+          await pendingMedia.update({
+            temp_ai_parsed_value: analysisResult.value,
+            temp_ai_parsed_description: analysisResult.baseDescription,
+            temp_ai_parsed_category_name: analysisResult.categoryName,
+            temp_ai_parsed_flow: analysisResult.flow,
+            temp_ai_parsed_is_installment: analysisResult.isInstallment,
+            temp_ai_parsed_installment_count: analysisResult.installmentCount,
+            temp_ai_parsed_card_name: analysisResult.cardName,
+            temp_card_closing_day: analysisResult.closingDay,
+            temp_card_due_day: analysisResult.dueDay,
+          });
+          return this.decideAndSaveExpenseOrRevenue(pendingMedia, analysisResult, userContext);
         } else {
-          await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui analisar o documento. Tente enviar novamente.`);
+          await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui analisar o documento e o texto/áudio. Tente enviar novamente.`);
           await pendingMedia.destroy();
         }
       } else {
         await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o arquivo ou o áudio. Por favor, tente novamente.`);
         await pendingMedia.destroy();
       }
-    } else {
-      if (textMessage && /^\d+$/.test(textMessage)) {
+    } else if (textMessage || audioUrl) {
+        await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando sua mensagem...`);
+        let userContext = '';
+        if (audioUrl) {
+          const audioBuffer = await whatsappService.downloadZapiMedia(audioUrl);
+          userContext = audioBuffer ? await aiService.transcribeAudio(audioBuffer) : '';
+        } else {
+          userContext = textMessage;
+        }
+
+        if (userContext) {
+            await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId, status: { [Op.in]: ['awaiting_ai_analysis', 'awaiting_context_analysis_complete', 'awaiting_credit_card_choice', 'awaiting_installment_count', 'awaiting_category_reply', 'awaiting_new_category_decision', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'] } } });
+
+            const tempPending = await PendingExpense.create({
+                whatsapp_message_id: payload.messageId,
+                whatsapp_group_id: groupId,
+                participant_phone: participantPhone,
+                profile_id: profileId,
+                status: 'awaiting_ai_analysis',
+                expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
+            });
+
+            const analysisResult = await aiService.analyzeTextForExpenseOrRevenue(userContext, profileId);
+            
+            if (analysisResult && (analysisResult.value !== null || analysisResult.closingDay !== null || analysisResult.dueDay !== null)) {
+                await tempPending.update({
+                    temp_ai_parsed_value: analysisResult.value,
+                    temp_ai_parsed_description: analysisResult.baseDescription,
+                    temp_ai_parsed_category_name: analysisResult.categoryName,
+                    temp_ai_parsed_flow: analysisResult.flow,
+                    temp_ai_parsed_is_installment: analysisResult.isInstallment,
+                    temp_ai_parsed_installment_count: analysisResult.installmentCount,
+                    temp_ai_parsed_card_name: analysisResult.cardName,
+                    temp_card_closing_day: analysisResult.closingDay,
+                    temp_card_due_day: analysisResult.dueDay,
+                    status: 'awaiting_context_analysis_complete',
+                });
+
+                if (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay && !analysisResult.value) {
+                    await whatsappService.sendWhatsappMessage(groupId, `A IA identificou um pedido para criar o cartão "*${analysisResult.cardName}*" com fechamento dia *${analysisResult.closingDay}* e vencimento dia *${analysisResult.dueDay}*. Confirma?`);
+                    const buttons = [
+                        { id: `card_confirm_create_${tempPending.id}`, label: '✅ Criar Cartão' },
+                        { id: `card_cancel_create_${tempPending.id}`, label: '❌ Cancelar' },
+                    ];
+                    await whatsappService.sendButtonList(groupId, null, buttons);
+                    tempPending.status = 'awaiting_card_creation_confirmation';
+                    await tempPending.save();
+                    return;
+                }
+                
+                if (analysisResult.value !== null) {
+                   return this.decideAndSaveExpenseOrRevenue(tempPending, analysisResult, userContext);
+                }
+            }
+            
+            await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui entender o valor, a descrição, a categoria ou um comando de cartão da sua mensagem. Por favor, tente novamente de forma mais clara (ex: "500 aluguel" ou "Salário 3000 categoria salário" ou "criar cartão Visa fechamento dia 5 vencimento dia 15").`);
+            await tempPending.destroy();
+
+        } else {
+            await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o áudio/texto. Por favor, tente novamente.`);
+            await PendingExpense.destroy({ where: { whatsapp_message_id: payload.messageId } });
+        }
+    } else if (textMessage && /^\d+$/.test(textMessage)) {
         await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone, profileId);
-      }
     }
   }
 
-  async decideAndSaveExpense(pendingExpense, analysisResult, userContext) {
-    const { categoryName } = analysisResult;
-    const profileId = pendingExpense.profile_id;
-    const category = await Category.findOne({ where: { name: categoryName, profile_id: profileId } });
+  async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
+    const { categoryName, flow, value, baseDescription, isInstallment, installmentCount, cardName, closingDay, dueDay } = analysisResult;
+    const profileId = pendingData.profile_id;
+    const groupId = pendingData.whatsapp_group_id;
+
+    let category = await Category.findOne({ 
+        where: { name: categoryName, profile_id: profileId, category_flow: flow } 
+    });
+    
+    if (flow && !category) {
+        category = await Category.findOne({ where: { name: categoryName, profile_id: profileId } });
+    }
+
     if (category) {
-      return this.createExpenseAndStartEditFlow(pendingExpense, analysisResult, userContext, category.id);
+        if (category.category_flow === 'expense' && (isInstallment || cardName)) {
+            pendingData.status = 'awaiting_credit_card_choice';
+            pendingData.temp_ai_parsed_value = value;
+            pendingData.temp_ai_parsed_description = baseDescription;
+            pendingData.temp_ai_parsed_category_name = category.name;
+            pendingData.temp_ai_parsed_flow = 'expense';
+            pendingData.temp_ai_parsed_is_installment = isInstallment;
+            pendingData.temp_ai_parsed_installment_count = installmentCount;
+            pendingData.temp_ai_parsed_card_name = cardName;
+            pendingData.suggested_category_id = category.id;
+            pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000);
+            await pendingData.save();
+
+            const creditCards = await creditCardService.getAllCreditCards(profileId);
+            if (creditCards.length > 0) {
+                const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name} (final ${card.last_four_digits || 'N/A'})`).join('\n');
+                let cardMessage = `ℹ️ A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}* pode ser de cartão.\n\nSelecione o *número* do cartão para registrar ou responda *0* para registrar como dinheiro/débito.\n\n${cardListText}`;
+                
+                if (cardName) {
+                    const suggestedCard = creditCards.find(c => c.name.toLowerCase() === cardName.toLowerCase());
+                    if (suggestedCard) {
+                        cardMessage = `ℹ️ A IA sugeriu o cartão *${suggestedCard.name}* para a despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}*.\n\nConfirma? Responda com o *número* do cartão ou *0* para dinheiro/débito.\n\n${cardListText}`;
+                    }
+                }
+                await whatsappService.sendWhatsappMessage(groupId, cardMessage);
+                logger.info(`[Webhook] Despesa de cartão/parcelada. Aguardando escolha de cartão para pendência #${pendingData.id}.`);
+                return;
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `ℹ️ Despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}*.\n\nNão há cartões de crédito cadastrados para este perfil. Será registrada como dinheiro/débito. ${isInstallment ? 'Para parcelar, você precisa de um cartão cadastrado.' : ''}`);
+                return this.createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, category.id, null);
+            }
+
+        } else if (category.category_flow === 'revenue' && (isInstallment || cardName)) {
+            await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${category.name}" é de *Receita*. A informação de cartão/parcelamento será ignorada.`);
+            return this.createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, category.id, null);
+        }
+        else {
+            return this.createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, category.id, null);
+        }
     }
-    const finalDescriptionForDB = `${analysisResult.baseDescription} (${userContext})`;
-    pendingExpense.value = analysisResult.value;
-    pendingExpense.description = finalDescriptionForDB;
-    pendingExpense.status = 'awaiting_new_category_decision';
-    pendingExpense.suggested_new_category_name = categoryName;
-    pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000);
-    await pendingExpense.save();
-    const message = `🤔 A categoria que identifiquei, "*${categoryName}*", parece ser nova para este perfil. O que você gostaria de fazer?`;
-    const buttons = [ { id: `new_cat_create_${pendingExpense.id}`, label: '✅ Criar e Usar' }, { id: `new_cat_choose_${pendingExpense.id}`, label: '📋 Escolher da Lista' }, { id: `new_cat_outros_${pendingExpense.id}`, label: '➡️ Usar "Outros"' }, ];
-    await whatsappService.sendButtonList(pendingExpense.whatsapp_group_id, message, buttons);
-    logger.info(`[Webhook] Nova categoria "${categoryName}" sugerida. Aguardando decisão do usuário para pendência #${pendingExpense.id}.`);
+
+    const finalDescriptionForPending = userContext ? `${baseDescription} (${userContext})` : baseDescription;
+    pendingData.value = value;
+    pendingData.description = finalDescriptionForPending;
+    pendingData.status = 'awaiting_new_category_decision';
+    pendingData.suggested_new_category_name = categoryName;
+    pendingData.suggested_category_flow = flow;
+    pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000);
+    await pendingData.save();
+
+    const message = `🤔 A categoria que identifiquei, "*${categoryName}*", parece ser nova para este perfil (${flow === 'expense' ? 'Despesa' : 'Receita'}). O que você gostaria de fazer?`;
+    const buttons = [ 
+        { id: `new_cat_create_${pendingData.id}`, label: '✅ Criar e Usar' }, 
+        { id: `new_cat_choose_${pendingData.id}`, label: '📋 Escolher da Lista Existente' }, 
+        { id: `new_cat_outros_${pendingData.id}`, label: `➡️ Usar "${flow === 'expense' ? 'Outros' : 'Receita Padrão'}"` }, 
+    ];
+    await whatsappService.sendButtonList(groupId, message, buttons);
+    logger.info(`[Webhook] Nova categoria "${categoryName}" sugerida. Aguardando decisão do usuário para pendência #${pendingData.id}.`);
   }
 
-  async createExpenseAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId) {
-    const { value, baseDescription } = analysisResult;
+  async createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, categoryId, creditCardId = null) {
+    const { value, baseDescription, flow, isInstallment, installmentCount, cardName } = analysisResult;
     const finalDescriptionForDB = userContext ? `${baseDescription} (${userContext})` : baseDescription;
+    
     const category = await Category.findByPk(categoryId);
-    const newExpense = await Expense.create({ value, description: finalDescriptionForDB, expense_date: pendingExpense.createdAt, whatsapp_message_id: pendingExpense.whatsapp_message_id, category_id: categoryId, profile_id: pendingExpense.profile_id, });
-    if (pendingExpense.status === 'awaiting_context') {
-      pendingExpense.value = value;
-      pendingExpense.description = finalDescriptionForDB;
-      pendingExpense.suggested_category_id = categoryId;
+    if (!category) {
+        await whatsappService.sendWhatsappMessage(pendingData.whatsapp_group_id, `❌ Erro: Categoria não encontrada no momento do registro final. Por favor, tente novamente ou crie a categoria primeiro.`);
+        await pendingData.destroy();
+        return;
     }
-    pendingExpense.expense_id = newExpense.id;
-    pendingExpense.status = 'awaiting_validation';
-    pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
-    await pendingExpense.save();
+
+    let createdEntry;
+    const entryDate = new Date();
+    let chargeDate = null;
+
+    if (creditCardId) {
+        const creditCard = await CreditCard.findByPk(creditCardId);
+        if (creditCard) {
+            const currentMonth = getMonth(entryDate);
+            const currentYear = getYear(entryDate);
+            
+            let invoiceMonth = currentMonth;
+            let invoiceYear = currentYear;
+            
+            if (entryDate.getDate() > creditCard.closing_day) {
+                invoiceMonth = (currentMonth + 1) % 12;
+                if (invoiceMonth === 0) invoiceYear += 1;
+            }
+            
+            chargeDate = new Date(invoiceYear, invoiceMonth, creditCard.due_day);
+            chargeDate.setHours(0, 0, 0, 0); 
+        }
+    }
+
+    if (category.category_flow === 'expense') {
+        const expenseToCreate = {
+            value: value,
+            description: finalDescriptionForDB,
+            expense_date: entryDate,
+            whatsapp_message_id: pendingData.whatsapp_message_id,
+            category_id: categoryId,
+            profile_id: pendingData.profile_id,
+            credit_card_id: creditCardId,
+            is_installment: isInstallment,
+            total_installments: isInstallment ? installmentCount : null,
+            current_installment_number: isInstallment ? 1 : null,
+            installment_total_value: isInstallment ? (value * installmentCount) : null,
+            charge_date: chargeDate,
+        };
+        createdEntry = await Expense.create(expenseToCreate);
+
+        if (isInstallment && installmentCount > 1) {
+            for (let i = 2; i <= installmentCount; i++) {
+                let nextChargeDate = new Date(chargeDate);
+                nextChargeDate.setMonth(nextChargeDate.getMonth() + (i - 1));
+                
+                await Expense.create({
+                    ...expenseToCreate,
+                    value: value,
+                    original_expense_id: createdEntry.id,
+                    current_installment_number: i,
+                    charge_date: nextChargeDate,
+                    whatsapp_message_id: null,
+                });
+            }
+        }
+        
+    } else {
+        createdEntry = await Revenue.create({
+            value: value,
+            description: finalDescriptionForDB,
+            revenue_date: entryDate,
+            whatsapp_message_id: pendingData.whatsapp_message_id,
+            category_id: categoryId,
+            profile_id: pendingData.profile_id,
+        });
+    }
+
+    if (category.category_flow === 'expense') {
+        pendingData.expense_id = createdEntry.id;
+    } else {
+        pendingData.revenue_id = createdEntry.id;
+    }
+    
+    pendingData.suggested_category_id = categoryId;
+    pendingData.credit_card_id = creditCardId;
+    pendingData.status = 'awaiting_validation';
+    pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
+    await pendingData.save();
+
     const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
-    const totalExpenses = await Expense.sum('value', { where: { profile_id: pendingExpense.profile_id } });
-    const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
-    const message = `💸 *Custo Registrado:* ${formattedValue}\n*Categoria:* ${category.name}\n*Desc.:* ${baseDescription}\n*Total de Despesas:* ${formattedTotalExpenses}\n\nDespesa *já* salva! Para alterar a categoria, clique em *Corrigir*.`;
-    const buttons = [{ id: `edit_expense_${pendingExpense.id}`, label: '✏️ Corrigir Categoria' }];
-    await whatsappService.sendButtonList(pendingExpense.whatsapp_group_id, message, buttons);
-    logger.info(`[Webhook] Despesa #${newExpense.id} salva e fluxo de edição iniciado para ${pendingExpense.participant_phone}.`);
+    
+    let message = '';
+    if (category.category_flow === 'expense') {
+        const totalExpenses = await Expense.sum('value', { where: { profile_id: pendingData.profile_id, original_expense_id: { [Op.eq]: null } } });
+        const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
+        
+        let installmentInfo = '';
+        if (isInstallment) {
+            installmentInfo = `\n*Parcelas:* ${analysisResult.installmentCount}x de ${formattedValue} (Total: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value * installmentCount)})` +
+                              (creditCardId ? `\n*Cartão:* ${(await CreditCard.findByPk(creditCardId))?.name || 'N/A'}` : '');
+        } else if (creditCardId) {
+            installmentInfo = `\n*Cartão:* ${(await CreditCard.findByPk(creditCardId))?.name || 'N/A'}`;
+        }
+
+        message = `💸 *Despesa Registrada:* ${formattedValue}\n*Categoria:* ${category.name}\n*Desc.:* ${baseDescription}${installmentInfo}\n*Total de Despesas:* ${formattedTotalExpenses}`;
+        
+        const now = new Date();
+        const startOfCurrentMonth = startOfMonth(now);
+        const endOfCurrentMonth = new Date();
+        
+        const currentMonthTotalExpenses = await Expense.sum('value', { 
+            where: { 
+                profile_id: pendingData.profile_id, 
+                [Op.or]: [
+                    { expense_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } },
+                    { charge_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } }
+                ],
+                original_expense_id: { [Op.eq]: null }
+            } 
+        });
+
+        const categoryGoal = await MonthlyGoal.findOne({ where: { profile_id: pendingData.profile_id, category_id: category.id } });
+        if (categoryGoal && currentMonthTotalExpenses) {
+            const currentCategoryExpenses = await Expense.sum('value', { 
+                where: { 
+                    profile_id: pendingData.profile_id, 
+                    category_id: category.id,
+                    [Op.or]: [
+                        { expense_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } },
+                        { charge_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } }
+                    ],
+                    original_expense_id: { [Op.eq]: null }
+                } 
+            });
+            if (currentCategoryExpenses > parseFloat(categoryGoal.value)) {
+                message += `\n\n🚨 *ALERTA:* Você excedeu a meta de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(categoryGoal.value)}* para a categoria *${category.name}* neste mês!`;
+            } else {
+                const remaining = parseFloat(categoryGoal.value) - currentCategoryExpenses;
+                message += `\n*Meta Categoria ${category.name}:* ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(remaining)} restantes.`;
+            }
+        }
+        
+        const totalGoal = await MonthlyGoal.findOne({ where: { profile_id: pendingData.profile_id, is_total_goal: true, category_id: null } });
+        if (totalGoal && currentMonthTotalExpenses) {
+             if (currentMonthTotalExpenses > parseFloat(totalGoal.value)) {
+                message += `\n🚨 *ALERTA GERAL:* Você excedeu a meta total de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalGoal.value)}* neste mês!`;
+             } else {
+                const remaining = parseFloat(totalGoal.value) - currentMonthTotalExpenses;
+                message += `\n*Meta Total Mensal:* ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(remaining)} restantes.`;
+             }
+        }
+
+        message += `\n\nDespesa *já* salva! Para alterar a categoria, clique em *Corrigir*.`;
+
+    } else {
+        const totalRevenues = await Revenue.sum('value', { where: { profile_id: pendingData.profile_id } });
+        const formattedTotalRevenues = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalRevenues || 0);
+        message = `💰 *Receita Registrada:* ${formattedValue}\n*Categoria:* ${category.name}\n*Desc.:* ${baseDescription}\n*Total de Receitas:* ${formattedTotalRevenues}\n\nReceita *já* salva! Para alterar a categoria, clique em *Corrigir*.`;
+    }
+
+    const buttons = [{ id: `edit_expense_${pendingData.id}`, label: '✏️ Corrigir Categoria' }];
+    await whatsappService.sendButtonList(pendingData.whatsapp_group_id, message, buttons);
+    logger.info(`[Webhook] ${category.category_flow === 'expense' ? 'Despesa' : 'Receita'} #${createdEntry.id} salva e fluxo de edição iniciado para ${pendingData.participant_phone}.`);
   }
 
   async handleNewCategoryDecisionFlow(payload) {
@@ -527,37 +1117,268 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const pendingExpenseId = parts[3];
     const groupId = payload.phone;
     const profileId = payload.profileId;
+
     const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
     if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`); return; }
+
+    const suggestedFlow = pendingExpense.suggested_category_flow || 'expense';
+    const otherCategoryName = suggestedFlow === 'expense' ? 'Outros' : 'Receita Padrão';
+
     if (action === 'create') {
         pendingExpense.status = 'awaiting_new_category_type';
         await pendingExpense.save();
-        await whatsappService.sendWhatsappMessage(groupId, `Entendido! A qual tipo de custo a categoria "*${pendingExpense.suggested_new_category_name}*" pertence?\n\nResponda com uma das opções: *Material*, *Mão de Obra*, *Serviços/Equipamentos* ou *Outros*.`);
+        await whatsappService.sendWhatsappMessage(groupId, `Entendido! A qual tipo de custo/receita a categoria "*${pendingExpense.suggested_new_category_name}*" pertence?\n\nResponda com um tipo (ex: "Material", "Mão de Obra", "Salário", "Serviço Avulso").`);
     } else if (action === 'choose') {
         payload.buttonsResponseMessage.buttonId = `edit_expense_${pendingExpenseId}`;
         await this.handleEditButtonFlow(payload);
     } else if (action === 'outros') {
-        const outrosCategory = await Category.findOne({ where: { name: 'Outros', profile_id: profileId } });
-        if (!outrosCategory) { await whatsappService.sendWhatsappMessage(groupId, `❌ Erro crítico: A categoria "Outros" não foi encontrada para este perfil.`); return; }
-        const analysisResult = { value: pendingExpense.value, baseDescription: pendingExpense.description.split(' (')[0] };
+        const finalCategory = await Category.findOne({ 
+            where: { 
+                name: otherCategoryName, 
+                profile_id: profileId, 
+                category_flow: suggestedFlow 
+            } 
+        });
+
+        if (!finalCategory) { 
+            await whatsappService.sendWhatsappMessage(groupId, `❌ Erro crítico: A categoria "${otherCategoryName}" não foi encontrada para este perfil com o fluxo ${suggestedFlow}.`); 
+            return; 
+        }
+        
+        const analysisResult = {
+            value: pendingExpense.temp_ai_parsed_value,
+            baseDescription: pendingExpense.temp_ai_parsed_description,
+            categoryName: finalCategory.name,
+            flow: finalCategory.category_flow,
+            isInstallment: pendingExpense.temp_ai_parsed_is_installment,
+            installmentCount: pendingExpense.temp_ai_parsed_installment_count,
+            cardName: pendingExpense.temp_ai_parsed_card_name,
+        };
         const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
-        await this.createExpenseAndStartEditFlow(pendingExpense, analysisResult, userContext, outrosCategory.id);
+        await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, finalCategory.id);
+    }
+  }
+  
+  async handleNewCategoryFlowDecision(payload) {
+    const buttonId = payload.buttonsResponseMessage.buttonId;
+    const parts = buttonId.split('_');
+    const flow = parts[3];
+    const pendingExpenseId = parts[4];
+    const groupId = payload.phone;
+    const profileId = payload.profileId;
+
+    const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
+    if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`); return; }
+    
+    pendingExpense.suggested_category_flow = flow;
+    if (flow === 'expense') {
+        pendingExpense.status = 'awaiting_new_category_goal';
+        await pendingExpense.save();
+        await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pendingExpense.suggested_new_category_name}*" (Despesa)?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+    } else {
+        await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense);
     }
   }
 
-  async finalizeNewCategoryCreation(pendingExpense, categoryType) {
-    const validTypes = ['Material', 'Mão de Obra', 'Serviços/Equipamentos', 'Outros'];
-    const normalizedType = validTypes.find(t => t.toLowerCase() === categoryType.trim().toLowerCase());
-    if (!normalizedType) { await whatsappService.sendWhatsappMessage(pendingExpense.whatsapp_group_id, `⚠️ Tipo inválido. Por favor, responda com uma das opções: *Material*, *Mão de Obra*, *Serviços/Equipamentos* ou *Outros*.`); return; }
-    const newCategory = await categoryService.create({ name: pendingExpense.suggested_new_category_name, type: normalizedType, }, pendingExpense.profile_id);
-    const newExpense = await Expense.create({ value: pendingExpense.value, description: pendingExpense.description, expense_date: pendingExpense.createdAt, whatsapp_message_id: pendingExpense.whatsapp_message_id, category_id: newCategory.id, profile_id: pendingExpense.profile_id, });
+  async finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense, goalValue = 0) {
+    const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
+    
+    const categoryType = pendingExpense.temp_category_type || 'Outros'; // Fallback se o tipo não foi coletado.
+
+    try {
+        const newCategory = await categoryService.create(
+            { name: suggested_new_category_name, type: categoryType, category_flow: suggested_category_flow },
+            profile_id
+        );
+        
+        let msg = `✅ Nova categoria "*${suggested_new_category_name}*" (${suggested_category_flow === 'expense' ? 'Despesa' : 'Receita'}) criada com sucesso!`;
+        if (suggested_category_flow === 'expense' && goalValue > 0) {
+            const goalService = require('../GoalManager/goal.service');
+            await goalService.createOrUpdateGoal(profile_id, {
+                value: goalValue,
+                categoryId: newCategory.id,
+                isTotalGoal: false,
+            });
+            msg += `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
+        }
+
+        await whatsappService.sendWhatsappMessage(whatsapp_group_id, msg);
+
+        const analysisResult = {
+            value: pendingExpense.temp_ai_parsed_value,
+            baseDescription: pendingExpense.temp_ai_parsed_description,
+            categoryName: newCategory.name,
+            flow: newCategory.category_flow,
+            isInstallment: pendingExpense.temp_ai_parsed_is_installment,
+            installmentCount: pendingExpense.temp_ai_parsed_installment_count,
+            cardName: pendingExpense.temp_ai_parsed_card_name,
+        };
+        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+        await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, newCategory.id, pendingExpense.credit_card_id);
+
+    } catch (error) {
+        logger.error('[Webhook] Erro ao finalizar criação de categoria a partir de PendingExpense:', error);
+        await whatsappService.sendWhatsappMessage(whatsapp_group_id, `❌ Houve um erro ao criar a categoria "${suggested_new_category_name}". ${error.message}`);
+        await pendingExpense.destroy();
+    }
+  }
+
+  async handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId) {
+    const pendingExpense = await PendingExpense.findOne({
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, status: 'awaiting_credit_card_choice' },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (!pendingExpense) { 
+        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} para cartão ignorada.`); 
+        return false; 
+    }
+
+    const analysisResult = {
+        value: pendingExpense.temp_ai_parsed_value,
+        baseDescription: pendingExpense.temp_ai_parsed_description,
+        categoryName: pendingExpense.temp_ai_parsed_category_name,
+        flow: pendingExpense.temp_ai_parsed_flow,
+        isInstallment: pendingExpense.temp_ai_parsed_is_installment,
+        installmentCount: pendingExpense.temp_ai_parsed_installment_count,
+        cardName: pendingExpense.temp_ai_parsed_card_name,
+    };
+    const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+    const categoryId = pendingExpense.suggested_category_id;
+
+    if (selectedNumber === 0) {
+        await whatsappService.sendWhatsappMessage(groupId, `✅ Registrando como dinheiro/débito.`);
+        return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, null);
+    }
+
+    const creditCards = await creditCardService.getAllCreditCards(profileId);
+    const selectedCard = creditCards[selectedNumber - 1];
+
+    if (!selectedCard) {
+        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!* \n\nO número *${selectedNumber}* não corresponde a um cartão. Responda com um número da lista ou *0* para dinheiro/débito.`);
+        return true;
+    }
+
+    pendingExpense.credit_card_id = selectedCard.id;
+    if (analysisResult.isInstallment && analysisResult.installmentCount > 1) {
+        pendingExpense.status = 'awaiting_installment_count';
+        await pendingExpense.save();
+        await whatsappService.sendWhatsappMessage(groupId, `Em quantas parcelas (total) esta despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(analysisResult.value)}* será feita no cartão *${selectedCard.name}*? (Responda apenas com o número, ex: 3)`);
+    } else {
+        return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, selectedCard.id);
+    }
+    return true;
+  }
+
+  async handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId) {
+    const pendingExpense = await PendingExpense.findOne({
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, status: 'awaiting_installment_count' },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (!pendingExpense) { 
+        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} para parcelas ignorada.`); 
+        return false; 
+    }
+
+    const installmentCount = parseInt(selectedNumber, 10);
+    if (isNaN(installmentCount) || installmentCount <= 0 || installmentCount > 36) {
+        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Número de Parcelas Inválido!* \n\nPor favor, responda com um número de parcelas válido (entre 1 e 36).`);
+        return true;
+    }
+
+    const analysisResult = {
+        value: pendingExpense.temp_ai_parsed_value,
+        baseDescription: pendingExpense.temp_ai_parsed_description,
+        categoryName: pendingExpense.temp_ai_parsed_category_name,
+        flow: pendingExpense.temp_ai_parsed_flow,
+        isInstallment: true,
+        installmentCount: installmentCount,
+        cardName: pendingExpense.temp_ai_parsed_card_name,
+    };
+    const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+    const categoryId = pendingExpense.suggested_category_id;
+    const creditCardId = pendingExpense.credit_card_id;
+
+    return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, creditCardId);
+  }
+
+  async handleNumericReply(groupId, selectedNumber, participantPhone, profileId) {
+    const pendingOnboarding = await OnboardingState.findOne({where: { group_id: groupId, initiator_phone: participantPhone, status: 'awaiting_profile_choice'}});
+    if (pendingOnboarding) {
+        return this.handleOnboardingResponse({phone: groupId, participantPhone, text: { message: selectedNumber.toString() }}, pendingOnboarding);
+    }
+
+    const isHandlingCreditCard = await this.handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId);
+    if (isHandlingCreditCard) return true;
+
+    const isHandlingInstallmentCount = await this.handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId);
+    if (isHandlingInstallmentCount) return true;
+
+    const pendingExpense = await PendingExpense.findOne({
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, status: 'awaiting_category_reply' },
+      include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
+    });
+
+    if (!pendingExpense) { logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada.`); return false; }
+    
+    const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : null);
+
+    const allCategories = await Category.findAll({ 
+        where: { 
+            profile_id: profileId,
+            ...(originalFlow && { category_flow: originalFlow })
+        }, 
+        order: [['name', 'ASC']] 
+    });
+    const selectedCategory = allCategories[selectedNumber - 1];
+
+    if (!selectedCategory) { 
+        const totalCategories = allCategories.length; 
+        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!* \n\nO número *${selectedNumber}* não está na lista. Responda com um número entre 1 e ${totalCategories}.`); 
+        return true; 
+    }
+
+    let updatedEntry;
+    if (pendingExpense.expense) {
+        if (selectedCategory.category_flow !== 'expense') {
+            await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Receitas*, mas a despesa original é um *Custo*. Por favor, selecione uma categoria de despesa.`);
+            return true;
+        }
+        await pendingExpense.expense.update({ category_id: selectedCategory.id });
+        updatedEntry = pendingExpense.expense;
+    } else if (pendingExpense.revenue) {
+        if (selectedCategory.category_flow !== 'revenue') {
+            await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Despesas*, mas a receita original é uma *Receita*. Por favor, selecione uma categoria de receita.`);
+            return true;
+        }
+        await pendingExpense.revenue.update({ category_id: selectedCategory.id });
+        updatedEntry = pendingExpense.revenue;
+    } else {
+        const analysisResult = {
+            value: pendingExpense.temp_ai_parsed_value,
+            baseDescription: pendingExpense.temp_ai_parsed_description,
+            categoryName: selectedCategory.name,
+            flow: selectedCategory.category_flow,
+            isInstallment: pendingExpense.temp_ai_parsed_is_installment,
+            installmentCount: pendingExpense.temp_ai_parsed_installment_count,
+            cardName: pendingExpense.temp_ai_parsed_card_name,
+        };
+        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+        await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, selectedCategory.id, pendingExpense.credit_card_id);
+        return true;
+    }
+    
     await pendingExpense.destroy();
-    const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(newExpense.value);
-    const totalExpenses = await Expense.sum('value', { where: { profile_id: newExpense.profile_id } });
-    const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
-    const message = `✅ *Custo Registrado com Sucesso!*\n\n💸 *Valor:* ${formattedValue}\n*Nova Categoria:* ${newCategory.name}\n*Total de Despesas:* ${formattedTotalExpenses}`;
-    await whatsappService.sendWhatsappMessage(pendingExpense.whatsapp_group_id, message);
-    logger.info(`[Webhook] Nova categoria "${newCategory.name}" criada e despesa #${newExpense.id} registrada.`);
+
+    const formattedTotal = await (updatedEntry instanceof Expense ? Expense.sum('value', { where: { profile_id: profileId, original_expense_id: { [Op.eq]: null } } }) : Revenue.sum('value', { where: { profile_id: profileId } }));
+    const formattedTotalString = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(formattedTotal || 0);
+    const flowText = updatedEntry instanceof Expense ? 'Despesa' : 'Receita';
+
+    const successMessage = `✅ *${flowText} Atualizada!* \n${flowText} #${updatedEntry.id}\nNova categoria: *${selectedCategory.name}*\n*Total de ${flowText === 'Despesa' ? 'Despesas' : 'Receitas'}:* ${formattedTotalString}`;
+    await whatsappService.sendWhatsappMessage(groupId, successMessage);
+    logger.info(`[Webhook] ${flowText} #${updatedEntry.id} atualizada para categoria ${selectedCategory.name} por ${participantPhone}.`);
+    return true;
   }
 
   async handleEditButtonFlow(payload) {
@@ -566,46 +1387,38 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       const clickerPhone = payload.participantPhone;
       const profileId = payload.profileId;
       const pendingExpenseId = buttonId.split('_')[2];
-      const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId }});
+      
+      const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { 
+          where: { profile_id: profileId },
+          include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
+      });
+
       if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ⏳\n\nO prazo para editar esta despesa já expirou ou ela não existe.`); return; }
-      if (pendingExpense.participant_phone !== clickerPhone) { await whatsappService.sendWhatsappMessage(groupId, `🤚 *Atenção, ${clickerPhone}!* \n\nApenas a pessoa que registrou a despesa (${pendingExpense.participant_phone}) pode editá-la.`); return; }
-      const allCategories = await Category.findAll({ where: { profile_id: profileId }, order: [['name', 'ASC']] });
-      const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name}`).join('\n');
-      const valueToFormat = pendingExpense.expense ? pendingExpense.expense.value : pendingExpense.value;
-      const descriptionToUse = pendingExpense.expense ? pendingExpense.expense.description : pendingExpense.description;
+      if (pendingExpense.participant_phone !== clickerPhone) { await whatsappService.sendWhatsappMessage(groupId, `🤚 *Atenção, ${clickerPhone}!* \n\nApenas a pessoa que registrou o item (${pendingExpense.participant_phone}) pode editá-lo.`); return; }
+      
+      const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : null);
+
+      const allCategories = await Category.findAll({ 
+          where: { 
+              profile_id: profileId,
+              ...(originalFlow && { category_flow: originalFlow })
+          }, 
+          order: [['name', 'ASC']] 
+      });
+      const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name} (${cat.category_flow === 'expense' ? 'Despesa' : 'Receita'})`).join('\n');
+      
+      const valueToFormat = pendingExpense.expense ? pendingExpense.expense.value : pendingExpense.revenue ? pendingExpense.revenue.value : pendingExpense.value;
+      const descriptionToUse = pendingExpense.expense ? pendingExpense.expense.description : pendingExpense.revenue ? pendingExpense.revenue.description : pendingExpense.description;
+      const flowText = pendingExpense.expense ? 'despesa' : 'receita';
+
       const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);
-      const message = `📋 *Escolha a Categoria Correta*\n\nVocê está definindo a categoria para a despesa de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
+      const message = `📋 *Escolha a Categoria Correta*\n\nVocê está definindo a categoria para a ${flowText} de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
+      
       pendingExpense.status = 'awaiting_category_reply';
       pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
       await pendingExpense.save();
       await whatsappService.sendWhatsappMessage(groupId, message);
       logger.info(`[Webhook] Solicitação de escolha de categoria para pendência #${pendingExpense.id} por ${clickerPhone}.`);
-  }
-
-  async handleNumericReply(groupId, selectedNumber, participantPhone, profileId) {
-    const pendingExpense = await PendingExpense.findOne({
-      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, status: 'awaiting_category_reply' },
-      include: [{ model: Expense, as: 'expense' }]
-    });
-    if (!pendingExpense) { logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada.`); return false; }
-    const allCategories = await Category.findAll({ where: { profile_id: profileId }, order: [['name', 'ASC']] });
-    const selectedCategory = allCategories[selectedNumber - 1];
-    if (!selectedCategory) { const totalCategories = allCategories.length; await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!* \n\nO número *${selectedNumber}* não está na lista. Responda com um número entre 1 e ${totalCategories}.`); return true; }
-    if (pendingExpense.expense) {
-      await pendingExpense.expense.update({ category_id: selectedCategory.id });
-    } else {
-      const analysisResult = { value: pendingExpense.value, baseDescription: pendingExpense.description.split(' (')[0] };
-      const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
-      await this.createExpenseAndStartEditFlow(pendingExpense, analysisResult, userContext, selectedCategory.id);
-      return true;
-    }
-    await pendingExpense.destroy();
-    const totalExpenses = await Expense.sum('value', { where: { profile_id: profileId } });
-    const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
-    const successMessage = `✅ *Custo Atualizado!* \nDespesa #${pendingExpense.expense.id}\nNova categoria: *${selectedCategory.name}*\n*Total de Despesas:* ${formattedTotalExpenses}`;
-    await whatsappService.sendWhatsappMessage(groupId, successMessage);
-    logger.info(`[Webhook] Despesa #${pendingExpense.expense_id} atualizada para categoria ${selectedCategory.name} por ${participantPhone}.`);
-    return true;
   }
 
   async sendSpendingReport(groupId, recipientPhone, profileId) {
@@ -614,16 +1427,27 @@ Acesse em: https://obras-fabio.vercel.app/login`;
           const filters = { period: 'monthly' };
           const kpis = await dashboardService.getKPIs(filters, profileId);
           const chartData = await dashboardService.getChartData(filters, profileId);
+          
           if (!kpis || !chartData) { await whatsappService.sendWhatsappMessage(groupId, `❌ Não foi possível gerar o relatório.`); return; }
+          
           const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(kpis.totalExpenses);
-          let categorySummary = 'Sem gastos por categoria este mês.';
+          const formattedTotalRevenues = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(kpis.totalRevenues);
+          const formattedBalance = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(kpis.balance);
+
+          let expenseCategorySummary = 'Sem gastos por categoria este mês.';
           if (chartData.pieChart && chartData.pieChart.length > 0) {
-              categorySummary = chartData.pieChart.sort((a, b) => b.value - a.value).map(cat => `- ${cat.name}: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cat.value)}`).join('\n');
+              expenseCategorySummary = chartData.pieChart.sort((a, b) => b.value - a.value).map(cat => `- ${cat.name}: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cat.value)}`).join('\n');
           }
+
+          let revenueCategorySummary = 'Sem receitas por categoria este mês.';
+          // TODO: Adicionar summary para receitas por categoria (necessita de endpoint no dashboardService)
+          
           const currentMonth = new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(now);
           const currentYear = new Date().getFullYear();
           const formattedReportHeaderMonth = `${currentMonth.charAt(0).toUpperCase() + currentMonth.slice(1)}/${currentYear}`;
-          const reportMessage = `📊 *Relatório Mensal de Despesas* 📊\n(${formattedReportHeaderMonth}) \n\n*Despesas Totais:* ${formattedTotalExpenses}\n\n*Gastos por Categoria:*\n${categorySummary}\n\n_Este relatório é referente aos dados registrados até o momento._`;
+          
+          const reportMessage = `📊 *Relatório Mensal Financeiro* 📊\n(${formattedReportHeaderMonth}) \n\n*Resumo:*\n💸 Total Despesas: ${formattedTotalExpenses}\n💰 Total Receitas: ${formattedTotalRevenues}\n⚖️ Saldo: ${formattedBalance}\n\n*Gastos por Categoria (Despesas):*\n${expenseCategorySummary}\n\n_Este relatório é referente aos dados registrados até o momento._`;
+          
           await whatsappService.sendWhatsappMessage(groupId, reportMessage);
       } catch (error) {
           logger.error('[Webhook] Erro ao gerar e enviar relatório de gastos:', error);

@@ -1,3 +1,4 @@
+// src/features/Dashboard/dashboard.routes.js
 const { Router } = require('express');
 const dashboardController = require('./dashboard.controller');
 
@@ -14,6 +15,13 @@ router.delete('/expenses/:id', dashboardController.deleteExpense);
 
 // Rotas para CRUD de Receitas
 router.post('/revenues', dashboardController.createRevenue);
-// (adicionar rotas GET, PUT, DELETE para receitas aqui)
+router.get('/revenues', dashboardController.getDetailedRevenues); // <<< NOVO
+router.put('/revenues/:id', dashboardController.updateRevenue);     // <<< NOVO
+router.delete('/revenues/:id', dashboardController.deleteRevenue);   // <<< NOVO
+
+// <<< NOVO: Rotas para Fatura de Cartão de Crédito >>>
+// Ex: /dashboard/credit-card-invoice?creditCardId=1&month=10&year=2025
+router.get('/credit-card-invoice', dashboardController.getCreditCardInvoice);
+// <<< FIM NOVO >>>
 
 module.exports = router;

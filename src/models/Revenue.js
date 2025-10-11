@@ -17,6 +17,10 @@ class Revenue extends Model {
         type: DataTypes.DATE,
         allowNull: false,
         defaultValue: DataTypes.NOW,
+      },
+      whatsapp_message_id: { // Para receitas via WhatsApp, se for o caso
+        type: DataTypes.STRING,
+        allowNull: true,
       }
     }, {
       sequelize,
@@ -25,8 +29,10 @@ class Revenue extends Model {
     });
   }
   
-  static associate(models) { // <<< ADICIONADO static associate
-      this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' }); // <<< NOVO: Associação ao Perfil
+  static associate(models) {
+      this.belongsTo(models.Profile, { foreignKey: 'profile_id', as: 'profile' });
+      // NOVA ASSOCIAÇÃO: Receita também tem uma Categoria
+      this.belongsTo(models.Category, { foreignKey: 'category_id', as: 'category' }); 
   }
 }
 

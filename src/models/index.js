@@ -15,7 +15,8 @@ const MonthlyGoal = require('./MonthlyGoal');
 const Subscription = require('./Subscription');
 const GuestUser = require('./GuestUser');
 const GuestPermission = require('./GuestPermission');
-const OnboardingState = require('./OnboardingState'); // <<< NOVO
+const OnboardingState = require('./OnboardingState');
+const CreditCard = require('./CreditCard'); // <<< NOVO: Importar CreditCard
 
 const models = [
   Category,
@@ -30,7 +31,8 @@ const models = [
   Subscription,
   GuestUser,
   GuestPermission,
-  OnboardingState, // <<< ADICIONAR NOVO
+  OnboardingState,
+  CreditCard, // <<< NOVO: Adicionar CreditCard à lista
 ];
 
 class Database {

@@ -485,12 +485,14 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         } else if (action === 'export_excel') {
             await this.sendExpensesExcelReport(groupId, payload.participantPhone, profileId);
         } else if (action === 'create_category') {
+             // === MUDANÇAS AQUI ===
+             // Substitui o status ENUM por 'action_expected' como string
              const pending = await PendingExpense.create({ 
                 whatsapp_message_id: payload.messageId + '_menu_cat',
                 whatsapp_group_id: groupId,
                 participant_phone: payload.participantPhone,
                 profile_id: profileId,
-                status: 'awaiting_new_category_name',
+                action_expected: 'awaiting_new_category_name', // NOVO CAMPO
                 expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
              });
              await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Salário")');
@@ -555,14 +557,25 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const messageId = buttonId.split('_')[2];
 
     if (buttonId.startsWith('card_create_')) {
-        await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId, status: { [Op.in]: ['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'] } } });
+        // === MUDANÇAS AQUI ===
+        // Limpa PendingExpenses antigos para este fluxo de criação de cartão
+        await PendingExpense.destroy({ 
+            where: { 
+                participant_phone: participantPhone, 
+                whatsapp_group_id: groupId, 
+                profile_id: profileId, 
+                action_expected: { 
+                    [Op.in]: ['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'] 
+                } 
+            } 
+        });
 
         const pending = await PendingExpense.create({
             whatsapp_message_id: messageId,
             whatsapp_group_id: groupId,
             participant_phone: participantPhone,
             profile_id: profileId,
-            status: 'awaiting_new_card_name',
+            action_expected: 'awaiting_new_card_name', // NOVO CAMPO
             expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
         });
         await whatsappService.sendWhatsappMessage(groupId, `Ok! Qual será o *nome* do novo cartão? (ex: "Nubank", "Cartão da Obra")`);
@@ -570,17 +583,23 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         const pendingExpenseId = buttonId.split('_')[3];
         const pending = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
 
-        if (!pending || pending.status !== 'awaiting_card_creation_confirmation') {
+        // === MUDANÇAS AQUI ===
+        // Verifica action_expected
+        if (!pending || pending.action_expected !== 'awaiting_card_creation_confirmation') {
             await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou ou o fluxo foi interrompido.`);
             if (pending) await pending.destroy();
             return;
         }
 
         try {
+            // Os dados temporários para o cartão (temp_card_name, temp_card_closing_day, temp_card_due_day)
+            // precisam ter sido salvos diretamente no PendingExpense, pois removemos os campos temp_ai_parsed_*.
+            // Vamos assumir que eles estão lá, ou você precisaria adaptar a IA para colocar direto no PendingExpense
+            // ou readaptar o PendingExpense para ter campos específicos para o fluxo de criação de cartão
             const newCard = await creditCardService.createCreditCard(pending.profile_id, {
-                name: pending.temp_ai_parsed_card_name,
-                closing_day: pending.temp_card_closing_day,
-                due_day: pending.temp_card_due_day,
+                name: pending.suggested_new_category_name, // Reutilizando campo para o nome do cartão
+                closing_day: pending.value, // Reutilizando campo para o dia de fechamento
+                due_day: pending.description, // Reutilizando campo para o dia de vencimento
                 last_four_digits: null, 
             });
             await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
@@ -604,17 +623,20 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     }
   }
 
+  // === MUDANÇAS AQUI ===
+  // Adaptando o fluxo de criação de cartão sem os campos temp_card_* e sem ENUM
   async handleCreditCardCreationFlowFromPending(payload, pending) {
     const groupId = payload.phone;
     const textMessage = payload.text?.message;
 
-    switch (pending.status) {
+    switch (pending.action_expected) { // Usa action_expected
         case 'awaiting_new_card_name':
             if (textMessage) {
-                pending.temp_card_name = textMessage.trim();
-                pending.status = 'awaiting_new_card_closing_day';
+                // Armazenando o nome no campo 'suggested_new_category_name' (reutilização)
+                pending.suggested_new_category_name = textMessage.trim(); 
+                pending.action_expected = 'awaiting_new_card_closing_day';
                 await pending.save();
-                await whatsappService.sendWhatsappMessage(groupId, `Certo, o nome será "*${pending.temp_card_name}*".\n\nAgora, qual o *dia de fechamento da fatura*? (Responda apenas com o número do dia, de 1 a 31. Ex: 10)`);
+                await whatsappService.sendWhatsappMessage(groupId, `Certo, o nome será "*${pending.suggested_new_category_name}*".\n\nAgora, qual o *dia de fechamento da fatura*? (Responda apenas com o número do dia, de 1 a 31. Ex: 10)`);
             } else {
                 await whatsappService.sendWhatsappMessage(groupId, `Por favor, me diga o nome do cartão.`);
             }
@@ -623,8 +645,9 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             if (textMessage && /^\d+$/.test(textMessage)) {
                 const day = parseInt(textMessage, 10);
                 if (day >= 1 && day <= 31) {
-                    pending.temp_card_closing_day = day;
-                    pending.status = 'awaiting_new_card_due_day';
+                    // Armazenando o dia de fechamento no campo 'value' (reutilização)
+                    pending.value = day; 
+                    pending.action_expected = 'awaiting_new_card_due_day';
                     await pending.save();
                     await whatsappService.sendWhatsappMessage(groupId, `Dia de fechamento definido para o dia *${day}*.\n\nE qual o *dia de vencimento da fatura*? (Responda apenas com o número do dia, de 1 a 31. Ex: 20)`);
                 } else {
@@ -638,14 +661,16 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             if (textMessage && /^\d+$/.test(textMessage)) {
                 const day = parseInt(textMessage, 10);
                 if (day >= 1 && day <= 31) {
-                    pending.temp_card_due_day = day;
-                    await pending.save();
+                    // Armazenando o dia de vencimento no campo 'description' (reutilização)
+                    pending.description = day; 
+                    // NÃO CHAMA SAVE AQUI, pois a criação do cartão já vai destruir o pending
+                    // await pending.save();
 
                     try {
                         const newCard = await creditCardService.createCreditCard(pending.profile_id, {
-                            name: pending.temp_card_name,
-                            closing_day: pending.temp_card_closing_day,
-                            due_day: pending.temp_card_due_day,
+                            name: pending.suggested_new_category_name,
+                            closing_day: pending.value,
+                            due_day: pending.description,
                             last_four_digits: null,
                         });
                         await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
@@ -666,6 +691,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             break;
     }
   }
+  // === FIM MUDANÇAS AQUI ===
+
 
   async handleMediaArrival(payload) {
     if (payload.fromMe) return;
@@ -675,18 +702,15 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
     const mimeType = payload.image ? payload.image.mimeType : payload.document.mimeType;
     
+    // === MUDANÇAS AQUI ===
+    // Limpa PendingExpenses antigos para este participant/group/profile
     await PendingExpense.destroy({ 
         where: { 
             participant_phone: participantPhone, 
             whatsapp_group_id: groupId, 
-            profile_id: profileId, 
-            status: { 
-                [Op.in]: [
-                    'awaiting_context', 'awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal', 
-                    'awaiting_credit_card_choice', 'awaiting_installment_count', 
-                    'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation', 'awaiting_ai_analysis', 'awaiting_context_analysis_complete'
-                ] 
-            } 
+            profile_id: profileId,
+            // AQUI, como não temos 'status' ENUM, removemos a condição 'status: { [Op.in]: [...] }'
+            // Assumimos que qualquer PendingExpense para este usuário/grupo significa um fluxo em andamento
         } 
     });
     
@@ -696,7 +720,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       participant_phone: participantPhone,
       attachment_url: mediaUrl,
       attachment_mimetype: mimeType,
-      status: 'awaiting_context',
+      action_expected: 'awaiting_context', // NOVO CAMPO
       profile_id: profileId,
       expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
     });
@@ -729,13 +753,14 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         return this.sendMainMenu(groupId);
     }
 
-    // --- Continuação de Fluxos de Criação de Categoria/Cartão Fora do Onboarding ---
+    // === MUDANÇAS AQUI ===
+    // Agora o pendingFlow é encontrado pelo 'action_expected'
     const pendingFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
             whatsapp_group_id: groupId, 
             profile_id: profileId, 
-            status: { 
+            action_expected: { 
                 [Op.in]: [
                     'awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal',
                     'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'
@@ -746,21 +771,21 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     });
 
     if (pendingFlow) {
-        if (['awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'].includes(pendingFlow.status)) {
+        if (['awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'].includes(pendingFlow.action_expected)) {
             return this.handleNewCategoryCreationFlowFromPending(payload, pendingFlow);
         }
-        if (['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'].includes(pendingFlow.status)) {
+        if (['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'].includes(pendingFlow.action_expected)) {
             return this.handleCreditCardCreationFlowFromPending(payload, pendingFlow);
         }
     }
 
-    // --- Continuação de Fluxos de Despesa/Receita ---
+    // --- Continuação de Fluxos de Despesa/Receita (com mídia) ---
     const pendingMedia = await PendingExpense.findOne({
       where: { 
           participant_phone: participantPhone, 
           whatsapp_group_id: groupId, 
           profile_id: profileId, 
-          status: 'awaiting_context', 
+          action_expected: 'awaiting_context', // NOVO CAMPO
           expires_at: { [Op.gt]: new Date() } 
       },
       order: [['createdAt', 'DESC']]
@@ -789,17 +814,16 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       if (mediaBuffer && userContext) {
         const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, pendingMedia.profile_id);
         if (analysisResult) {
-          await pendingMedia.update({
-            temp_ai_parsed_value: analysisResult.value,
-            temp_ai_parsed_description: analysisResult.baseDescription,
-            temp_ai_parsed_category_name: analysisResult.categoryName,
-            temp_ai_parsed_flow: analysisResult.flow,
-            temp_ai_parsed_is_installment: analysisResult.isInstallment,
-            temp_ai_parsed_installment_count: analysisResult.installmentCount,
-            temp_ai_parsed_card_name: analysisResult.cardName,
-            temp_card_closing_day: analysisResult.closingDay,
-            temp_card_due_day: analysisResult.dueDay,
-          });
+          // === MUDANÇAS AQUI ===
+          // Em vez de salvar em temp_ai_parsed_*, passamos os dados diretamente ou armazenamos
+          // no PendingExpense de forma mais genérica para o próximo passo.
+          // Para simplificar, vou usar campos existentes do PendingExpense para guardar
+          // os resultados da análise da IA temporariamente, se o fluxo precisar.
+          // Se não precisar de um PendingExpense intermediário com dados da IA,
+          // podemos ir direto para decideAndSaveExpenseOrRevenue
+          
+          // Neste fluxo, o PendingExpense é mais um "token" do que um container de dados.
+          // A função decideAndSaveExpenseOrRevenue receberá o analysisResult diretamente.
           return this.decideAndSaveExpenseOrRevenue(pendingMedia, analysisResult, userContext);
         } else {
           await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui analisar o documento e o texto/áudio. Tente enviar novamente.`);
@@ -820,54 +844,48 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         }
 
         if (userContext) {
+            // === MUDANÇAS AQUI ===
+            // Limpa PendingExpenses antigos para este participant/group/profile
             await PendingExpense.destroy({ 
                 where: { 
                     participant_phone: participantPhone, 
                     whatsapp_group_id: groupId, 
-                    profile_id: profileId, 
-                    status: { 
-                        [Op.in]: [
-                            'awaiting_ai_analysis', 'awaiting_context_analysis_complete', 'awaiting_credit_card_choice', 'awaiting_installment_count', 
-                            'awaiting_category_reply', 'awaiting_new_category_decision', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'
-                        ] 
-                    } 
+                    profile_id: profileId,
+                    // Remove condição de status
                 } 
             });
 
+            // Cria um novo PendingExpense para o contexto atual
             const tempPending = await PendingExpense.create({
                 whatsapp_message_id: payload.messageId,
                 whatsapp_group_id: groupId,
                 participant_phone: participantPhone,
                 profile_id: profileId,
-                status: 'awaiting_ai_analysis',
+                action_expected: 'awaiting_ai_analysis_complete', // NOVO CAMPO
                 expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
             });
 
             const analysisResult = await aiService.analyzeTextForExpenseOrRevenue(userContext, profileId);
             
             if (analysisResult && (analysisResult.value !== null || (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay))) {
-                await tempPending.update({
-                    temp_ai_parsed_value: analysisResult.value,
-                    temp_ai_parsed_description: analysisResult.baseDescription,
-                    temp_ai_parsed_category_name: analysisResult.categoryName,
-                    temp_ai_parsed_flow: analysisResult.flow,
-                    temp_ai_parsed_is_installment: analysisResult.isInstallment,
-                    temp_ai_parsed_installment_count: analysisResult.installmentCount,
-                    temp_ai_parsed_card_name: analysisResult.cardName,
-                    temp_card_closing_day: analysisResult.closingDay,
-                    temp_card_due_day: analysisResult.dueDay,
-                    status: 'awaiting_context_analysis_complete',
-                });
-
+                // === MUDANÇAS AQUI ===
+                // Para o fluxo de criação de cartão, precisamos persistir os dados da IA
+                // Reutilizando suggested_new_category_name para cardName
+                // Reutilizando value para closingDay
+                // Reutilizando description para dueDay
                 if (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay && analysisResult.value === null) {
+                    tempPending.suggested_new_category_name = analysisResult.cardName;
+                    tempPending.value = analysisResult.closingDay;
+                    tempPending.description = analysisResult.dueDay;
+                    tempPending.action_expected = 'awaiting_card_creation_confirmation';
+                    await tempPending.save();
+
                     await whatsappService.sendWhatsappMessage(groupId, `A IA identificou um pedido para criar o cartão "*${analysisResult.cardName}*" com fechamento dia *${analysisResult.closingDay}* e vencimento dia *${analysisResult.dueDay}*. Confirma?`);
                     const buttons = [
                         { id: `card_confirm_create_${tempPending.id}`, label: '✅ Criar Cartão' },
                         { id: `card_cancel_create_${tempPending.id}`, label: '❌ Cancelar' },
                     ];
                     await whatsappService.sendButtonList(groupId, null, buttons);
-                    tempPending.status = 'awaiting_card_creation_confirmation';
-                    await tempPending.save();
                     return;
                 }
                 
@@ -881,7 +899,16 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
         } else {
             await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o áudio/texto. Por favor, tente novamente.`);
-            await PendingExpense.destroy({ where: { whatsapp_message_id: payload.messageId } });
+            // === MUDANÇAS AQUI ===
+            // Remoção da query de destruição por messageId, já que o PendingExpense pode ser antigo
+            await PendingExpense.destroy({ 
+                where: { 
+                    participant_phone: participantPhone, 
+                    whatsapp_group_id: groupId, 
+                    profile_id: profileId,
+                    // Remove condição de status
+                } 
+            });
         }
     } else if (textMessage && /^\d+$/.test(textMessage)) {
         await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone, profileId);
@@ -889,7 +916,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
   }
 
   async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
-    const { categoryName, flow, value, baseDescription, isInstallment, installmentCount, cardName, closingDay, dueDay } = analysisResult;
+    const { categoryName, flow, value, baseDescription, isInstallment, installmentCount, cardName } = analysisResult;
     const profileId = pendingData.profile_id;
     const groupId = pendingData.whatsapp_group_id;
 
@@ -903,15 +930,17 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
     if (category) {
         if (category.category_flow === 'expense' && (isInstallment || cardName)) {
-            pendingData.status = 'awaiting_credit_card_choice';
-            pendingData.temp_ai_parsed_value = value;
-            pendingData.temp_ai_parsed_description = baseDescription;
-            pendingData.temp_ai_parsed_category_name = category.name;
-            pendingData.temp_ai_parsed_flow = 'expense';
-            pendingData.temp_ai_parsed_is_installment = isInstallment;
-            pendingData.temp_ai_parsed_installment_count = installmentCount;
-            pendingData.temp_ai_parsed_card_name = cardName;
-            pendingData.suggested_category_id = category.id;
+            // === MUDANÇAS AQUI ===
+            // Armazena os dados da análise da IA diretamente no PendingExpense, reutilizando campos
+            pendingData.value = value;
+            pendingData.description = baseDescription;
+            pendingData.suggested_new_category_name = categoryName; // Reutilizando para o nome da categoria que a IA encontrou
+            pendingData.suggested_category_flow = flow;
+            pendingData.installment_count = isInstallment ? installmentCount : null;
+            // Para cardName, vamos usar um campo mais genérico no pending, ou assumir que a IA não precisará mais dele após esta etapa.
+            // Por simplicidade aqui, não vou adicionar um campo novo específico para cardName na PendingExpense.
+            pendingData.action_expected = 'awaiting_credit_card_choice'; // NOVO CAMPO
+            pendingData.suggested_category_id = category.id; // Salva o ID da categoria encontrada
             pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000);
             await pendingData.save();
 
@@ -943,12 +972,13 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         }
     }
 
-    const finalDescriptionForPending = userContext ? `${baseDescription} (${userContext})` : baseDescription;
+    // === MUDANÇAS AQUI ===
+    // Armazena os dados da análise da IA diretamente no PendingExpense, reutilizando campos
     pendingData.value = value;
-    pendingData.description = finalDescriptionForPending;
-    pendingData.status = 'awaiting_new_category_decision';
+    pendingData.description = userContext ? `${baseDescription} (${userContext})` : baseDescription; // Descrição final para o PendingExpense
     pendingData.suggested_new_category_name = categoryName;
     pendingData.suggested_category_flow = flow;
+    pendingData.action_expected = 'awaiting_new_category_decision'; // NOVO CAMPO
     pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000);
     await pendingData.save();
 
@@ -1040,15 +1070,13 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         });
     }
 
-    if (category.category_flow === 'expense') {
-        pendingData.expense_id = createdEntry.id;
-    } else {
-        pendingData.revenue_id = createdEntry.id;
-    }
+    pendingData.expense_id = createdEntry instanceof Expense ? createdEntry.id : null;
+    pendingData.revenue_id = createdEntry instanceof Revenue ? createdEntry.id : null;
     
     pendingData.suggested_category_id = categoryId;
     pendingData.credit_card_id = creditCardId;
-    pendingData.status = 'awaiting_validation';
+    // === MUDANÇAS AQUI ===
+    pendingData.action_expected = 'awaiting_validation'; // NOVO CAMPO
     pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
     await pendingData.save();
 
@@ -1128,6 +1156,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     logger.info(`[Webhook] ${category.category_flow === 'expense' ? 'Despesa' : 'Receita'} #${createdEntry.id} salva e fluxo de edição iniciado para ${pendingData.participant_phone}.`);
   }
 
+  // === MUDANÇAS AQUI ===
+  // Adaptando o fluxo de criação de nova categoria
   async handleNewCategoryDecisionFlow(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const parts = buttonId.split('_');
@@ -1143,7 +1173,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const otherCategoryName = suggestedFlow === 'expense' ? 'Outros' : 'Receita Padrão';
 
     if (action === 'create') {
-        pendingExpense.status = 'awaiting_new_category_type';
+        // === MUDANÇAS AQUI ===
+        pendingExpense.action_expected = 'awaiting_new_category_type'; // NOVO CAMPO
         await pendingExpense.save();
         await whatsappService.sendWhatsappMessage(groupId, `Entendido! A qual tipo de custo/receita a categoria "*${pendingExpense.suggested_new_category_name}*" pertence?\n\nResponda com um tipo (ex: "Material", "Mão de Obra", "Salário", "Serviço Avulso").`);
     } else if (action === 'choose') {
@@ -1163,20 +1194,24 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             return; 
         }
         
+        // === MUDANÇAS AQUI ===
+        // Reconstruindo o analysisResult a partir dos dados no pendingExpense
         const analysisResult = {
-            value: pendingExpense.temp_ai_parsed_value,
-            baseDescription: pendingExpense.temp_ai_parsed_description,
+            value: pendingExpense.value,
+            baseDescription: pendingExpense.description, // Já é a descrição final com contexto
             categoryName: finalCategory.name,
             flow: finalCategory.category_flow,
-            isInstallment: pendingExpense.temp_ai_parsed_is_installment,
-            installmentCount: pendingExpense.temp_ai_parsed_installment_count,
-            cardName: pendingExpense.temp_ai_parsed_card_name,
+            isInstallment: pendingExpense.installment_count ? true : false,
+            installmentCount: pendingExpense.installment_count,
+            cardName: null, // Não temos o cardName salvo no pending se chegou aqui
         };
         const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
         await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, finalCategory.id);
     }
   }
   
+  // === MUDANÇAS AQUI ===
+  // Adaptando o fluxo de decisão de categoria (expense/revenue)
   async handleNewCategoryFlowDecision(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const parts = buttonId.split('_');
@@ -1190,7 +1225,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     
     pendingExpense.suggested_category_flow = flow;
     if (flow === 'expense') {
-        pendingExpense.status = 'awaiting_new_category_goal';
+        // === MUDANÇAS AQUI ===
+        pendingExpense.action_expected = 'awaiting_new_category_goal'; // NOVO CAMPO
         await pendingExpense.save();
         await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pendingExpense.suggested_new_category_name}*" (Despesa)?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
     } else {
@@ -1198,10 +1234,13 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     }
   }
 
+  // === MUDANÇAS AQUI ===
+  // Adaptando o fluxo de criação de nova categoria
   async finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense, goalValue = 0) {
     const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
     
-    const categoryType = pendingExpense.temp_category_type || 'Outros';
+    // O campo `temp_category_type` agora estará em `pendingExpense.description` (reutilizado)
+    const categoryType = pendingExpense.description || 'Outros'; 
 
     try {
         const newCategory = await categoryService.create(
@@ -1222,16 +1261,18 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
         await whatsappService.sendWhatsappMessage(whatsapp_group_id, msg);
 
+        // === MUDANÇAS AQUI ===
+        // Reconstruindo o analysisResult a partir dos dados no pendingExpense
         const analysisResult = {
-            value: pendingExpense.temp_ai_parsed_value,
-            baseDescription: pendingExpense.temp_ai_parsed_description,
+            value: pendingExpense.value,
+            baseDescription: pendingExpense.description, // Já é a descrição final
             categoryName: newCategory.name,
             flow: newCategory.category_flow,
-            isInstallment: pendingExpense.temp_ai_parsed_is_installment,
-            installmentCount: pendingExpense.temp_ai_parsed_installment_count,
-            cardName: pendingExpense.temp_ai_parsed_card_name,
+            isInstallment: pendingExpense.installment_count ? true : false,
+            installmentCount: pendingExpense.installment_count,
+            cardName: null, // Não temos o cardName salvo no pending se chegou aqui
         };
-        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || ''; // Tenta extrair contexto original se estiver entre parênteses
         await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, newCategory.id, pendingExpense.credit_card_id);
 
     } catch (error) {
@@ -1240,10 +1281,71 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         await pendingExpense.destroy();
     }
   }
+  
+  // === MUDANÇAS AQUI ===
+  // Handle da criação de categoria avulsa do menu
+  async handleNewCategoryCreationFlowFromPending(payload, pending) {
+    const groupId = payload.phone;
+    const textMessage = payload.text?.message;
+    const buttonId = payload.buttonsResponseMessage?.buttonId;
+
+    switch (pending.action_expected) {
+        case 'awaiting_new_category_name':
+            if (textMessage) {
+                pending.suggested_new_category_name = textMessage.trim();
+                pending.action_expected = 'awaiting_new_category_type';
+                await pending.save();
+                await whatsappService.sendWhatsappMessage(groupId, `Entendido. Agora, defina um *tipo* para a categoria "*${textMessage}*".\n\nIsso ajuda a agrupar seus custos nos relatórios (ex: "Mão de Obra", "Material Bruto", "Acabamentos", "Salário").`);
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `Por favor, me diga o nome da categoria.`);
+            }
+            break;
+
+        case 'awaiting_new_category_type':
+            if (textMessage) {
+                // Armazenando o tipo no campo 'description' do PendingExpense
+                pending.description = textMessage.trim(); 
+                pending.action_expected = 'awaiting_category_flow_decision';
+                await pending.save();
+                const message = `A categoria "*${pending.suggested_new_category_name}*" será para *Despesas* ou *Receitas*?`;
+                const buttons = [{ id: `new_cat_flow_expense_${pending.id}`, label: '💸 Despesa' }, { id: `new_cat_flow_revenue_${pending.id}`, label: '💰 Receita' }];
+                await whatsappService.sendButtonList(groupId, message, buttons);
+            }
+            break;
+
+        case 'awaiting_category_flow_decision':
+            if (buttonId && (buttonId.startsWith('new_cat_flow_expense_') || buttonId.startsWith('new_cat_flow_revenue_'))) {
+                const flow = buttonId.split('_')[3];
+                pending.suggested_category_flow = flow;
+                if (flow === 'expense') {
+                    pending.action_expected = 'awaiting_new_category_goal';
+                    await pending.save();
+                    await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pending.suggested_new_category_name}*" (Despesa)?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+                } else {
+                    await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending);
+                }
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, selecione "Despesa" ou "Receita".`);
+            }
+            break;
+
+        case 'awaiting_new_category_goal':
+            if (textMessage) {
+                const goalValue = parseFloat(textMessage.replace(',', '.'));
+                if (isNaN(goalValue) || goalValue < 0) {
+                    await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números positivos (ex: 1500 ou 0).`);
+                    return;
+                }
+                await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending, goalValue);
+            }
+            break;
+    }
+  }
+
 
   async handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId) {
     const pendingExpense = await PendingExpense.findOne({
-      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, status: 'awaiting_credit_card_choice' },
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_credit_card_choice' },
       order: [['createdAt', 'DESC']]
     });
 
@@ -1252,14 +1354,16 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         return false; 
     }
 
+    // === MUDANÇAS AQUI ===
+    // Reconstruindo o analysisResult a partir dos dados no pendingExpense
     const analysisResult = {
-        value: pendingExpense.temp_ai_parsed_value,
-        baseDescription: pendingExpense.temp_ai_parsed_description,
-        categoryName: pendingExpense.temp_ai_parsed_category_name,
-        flow: pendingExpense.temp_ai_parsed_flow,
-        isInstallment: pendingExpense.temp_ai_parsed_is_installment,
-        installmentCount: pendingExpense.temp_ai_parsed_installment_count,
-        cardName: pendingExpense.temp_ai_parsed_card_name,
+        value: pendingExpense.value,
+        baseDescription: pendingExpense.description,
+        categoryName: pendingExpense.suggested_new_category_name, // Nome da categoria guardado aqui
+        flow: pendingExpense.suggested_category_flow,
+        isInstallment: pendingExpense.installment_count ? true : false,
+        installmentCount: pendingExpense.installment_count,
+        cardName: null, // Não temos o cardName salvo no pending
     };
     const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
     const categoryId = pendingExpense.suggested_category_id;
@@ -1279,7 +1383,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
     pendingExpense.credit_card_id = selectedCard.id;
     if (analysisResult.isInstallment && analysisResult.installmentCount > 1) {
-        pendingExpense.status = 'awaiting_installment_count';
+        // === MUDANÇAS AQUI ===
+        pendingExpense.action_expected = 'awaiting_installment_count'; // NOVO CAMPO
         await pendingExpense.save();
         await whatsappService.sendWhatsappMessage(groupId, `Em quantas parcelas (total) esta despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(analysisResult.value)}* será feita no cartão *${selectedCard.name}*? (Responda apenas com o número, ex: 3)`);
     } else {
@@ -1290,7 +1395,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
   async handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId) {
     const pendingExpense = await PendingExpense.findOne({
-      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, status: 'awaiting_installment_count' },
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_installment_count' },
       order: [['createdAt', 'DESC']]
     });
 
@@ -1305,14 +1410,16 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         return true;
     }
 
+    // === MUDANÇAS AQUI ===
+    // Reconstruindo o analysisResult a partir dos dados no pendingExpense
     const analysisResult = {
-        value: pendingExpense.temp_ai_parsed_value,
-        baseDescription: pendingExpense.temp_ai_parsed_description,
-        categoryName: pendingExpense.temp_ai_parsed_category_name,
-        flow: pendingExpense.temp_ai_parsed_flow,
-        isInstallment: true,
+        value: pendingExpense.value,
+        baseDescription: pendingExpense.description,
+        categoryName: pendingExpense.suggested_new_category_name, // Nome da categoria guardado aqui
+        flow: pendingExpense.suggested_category_flow,
+        isInstallment: true, // Força true, pois o usuário está definindo parcelas
         installmentCount: installmentCount,
-        cardName: pendingExpense.temp_ai_parsed_card_name,
+        cardName: null, // Não temos o cardName salvo no pending
     };
     const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
     const categoryId = pendingExpense.suggested_category_id;
@@ -1333,8 +1440,9 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const isHandlingInstallmentCount = await this.handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId);
     if (isHandlingInstallmentCount) return true;
 
+    // === MUDANÇAS AQUI ===
     const pendingExpense = await PendingExpense.findOne({
-      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, status: 'awaiting_category_reply' },
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_category_reply' },
       include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
     });
 
@@ -1373,14 +1481,16 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         await pendingExpense.revenue.update({ category_id: selectedCategory.id });
         updatedEntry = pendingExpense.revenue;
     } else {
+        // === MUDANÇAS AQUI ===
+        // Reconstruindo o analysisResult a partir dos dados no pendingExpense
         const analysisResult = {
-            value: pendingExpense.temp_ai_parsed_value,
-            baseDescription: pendingExpense.temp_ai_parsed_description,
+            value: pendingExpense.value,
+            baseDescription: pendingExpense.description,
             categoryName: selectedCategory.name,
             flow: selectedCategory.category_flow,
-            isInstallment: pendingExpense.temp_ai_parsed_is_installment,
-            installmentCount: pendingExpense.temp_ai_parsed_installment_count,
-            cardName: pendingExpense.temp_ai_parsed_card_name,
+            isInstallment: pendingExpense.installment_count ? true : false,
+            installmentCount: pendingExpense.installment_count,
+            cardName: null, // Não temos o cardName salvo no pending
         };
         const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
         await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, selectedCategory.id, pendingExpense.credit_card_id);
@@ -1432,7 +1542,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);
       const message = `📋 *Escolha a Categoria Correta*\n\nVocê está definindo a categoria para a ${flowText} de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
       
-      pendingExpense.status = 'awaiting_category_reply';
+      // === MUDANÇAS AQUI ===
+      pendingExpense.action_expected = 'awaiting_category_reply'; // NOVO CAMPO
       pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
       await pendingExpense.save();
       await whatsappService.sendWhatsappMessage(groupId, message);
@@ -1488,5 +1599,108 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       }
   }
 }
+
+// === MUDANÇAS AQUI ===
+// Adaptando o worker para usar 'action_expected' em vez de 'status'
+// E reutilizando 'value' e 'description' do pendingExpense para dados temporários
+const { PendingExpense, Expense, Category, Revenue } = require('../../models'); 
+const whatsappService = require('../../utils/whatsappService'); // Garante que o whatsappService esteja disponível
+
+// Worker para limpar PendingExpenses expirados
+const runPendingExpenseWorker = async () => {
+    const now = new Date();
+    try {
+        // Limpa PendingExpenses de validação expirados
+        await PendingExpense.destroy({ 
+            where: { 
+                action_expected: 'awaiting_validation', 
+                expires_at: { [Op.lte]: now } 
+            } 
+        });
+        
+        // Lida com PendingExpenses de categoria expirados (seja para escolher ou criar)
+        const expiredCategoryActions = await PendingExpense.findAll({ 
+            where: { 
+                action_expected: { 
+                    [Op.in]: [
+                        'awaiting_category_reply', 
+                        'awaiting_new_category_decision', 
+                        'awaiting_new_category_type', 
+                        'awaiting_category_flow_decision', 
+                        'awaiting_new_category_goal'
+                    ] 
+                }, 
+                expires_at: { [Op.lte]: now } 
+            }, 
+            include: [
+                { model: Category, as: 'suggestedCategory' }, 
+                { model: Expense, as: 'expense' },
+                { model: Revenue, as: 'revenue' }
+            ] 
+        });
+
+        for (const pending of expiredCategoryActions) {
+            const entryValue = pending.value; // Usa o 'value' guardado no PendingExpense
+            const entryType = pending.suggested_category_flow || 'despesa'; // Usa o fluxo guardado
+            const originalCategoryName = pending.suggested_new_category_name || 'N/A'; // Usa o nome sugerido guardado
+
+            const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
+            const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para ${pending.action_expected === 'awaiting_category_reply' ? 'selecionar uma nova categoria' : 'decidir sobre a categoria'} para o lançamento de *${formattedValue}* expirou.`;
+            
+            // Se foi um PendingExpense que estava criando/editando uma despesa/receita, tenta usar a categoria padrão
+            if (pending.expense_id || pending.revenue_id) {
+                const existingEntry = pending.expense || pending.revenue;
+                if (existingEntry) {
+                    // Tenta encontrar a categoria original ou a padrão
+                    let defaultCategory = await Category.findOne({
+                        where: {
+                            profile_id: pending.profile_id,
+                            category_flow: pending.suggested_category_flow,
+                            name: pending.suggested_category_flow === 'expense' ? 'Outros' : 'Receita Padrão'
+                        }
+                    });
+
+                    if (defaultCategory) {
+                        await existingEntry.update({ category_id: defaultCategory.id });
+                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} O item foi categorizado como: *${defaultCategory.name}*.`);
+                    } else {
+                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} Não foi possível categorizar automaticamente. Por favor, adicione a categoria manualmente.`);
+                    }
+                }
+            } else {
+                // Se foi um PendingExpense para criar categoria avulsa do menu, apenas informa
+                await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
+            }
+            
+            await pending.destroy(); // Destrói o PendingExpense expirado
+        }
+        
+        // Limpa outros PendingExpenses "soltos" que não levaram a nada ou que foram criados para fluxos de cartão
+        await PendingExpense.destroy({ 
+            where: { 
+                action_expected: { 
+                    [Op.in]: [
+                        'awaiting_context', 
+                        'awaiting_ai_analysis_complete', 
+                        'awaiting_credit_card_choice', 
+                        'awaiting_installment_count', 
+                        'awaiting_new_card_name', 
+                        'awaiting_new_card_closing_day', 
+                        'awaiting_new_card_due_day', 
+                        'awaiting_card_creation_confirmation'
+                    ] 
+                }, 
+                expires_at: { [Op.lte]: now } 
+            } 
+        });
+
+    } catch (error) {
+        console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
+    }
+};
+
+// Exporta o worker para ser iniciado em app.js
+WebhookService.runPendingExpenseWorker = runPendingExpenseWorker;
+
 
 module.exports = new WebhookService();

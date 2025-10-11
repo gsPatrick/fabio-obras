@@ -50,12 +50,12 @@ class PendingExpense extends Model {
         allowNull: true,
         comment: 'ID da receita já criada no sistema.',
       },
-      suggested_new_category_name: {
+      suggested_new_category_name: { // Mantido para o fluxo de "criar nova categoria"
         type: DataTypes.STRING,
         allowNull: true,
         comment: 'Nome da nova categoria sugerida pela IA que ainda não existe.'
       },
-      suggested_category_flow: {
+      suggested_category_flow: { // Mantido
         type: DataTypes.ENUM('expense', 'revenue'),
         allowNull: true,
         comment: 'Indica se a nova categoria sugerida é para despesa ou receita.'
@@ -70,67 +70,27 @@ class PendingExpense extends Model {
         allowNull: true,
         comment: 'Número de parcelas para a despesa, se for parcelada.',
       },
-      status: {
-        type: DataTypes.ENUM(
-          'awaiting_context',
-          'awaiting_validation',
-          'awaiting_category_reply',
-          'awaiting_new_category_decision',
-          'awaiting_new_category_type',
-          'awaiting_category_flow_decision',
-          'awaiting_new_category_goal',
-          'awaiting_credit_card_choice',
-          'awaiting_installment_count',
-          'awaiting_ai_analysis',
-          'awaiting_context_analysis_complete',
-          'awaiting_new_card_name',
-          'awaiting_new_card_closing_day',
-          'awaiting_new_card_due_day',
-          'awaiting_card_creation_confirmation'
-        ),
-        defaultValue: 'awaiting_context',
-        allowNull: false,
-      },
-      temp_ai_parsed_value: {
-        type: DataTypes.DECIMAL(10, 2),
-        allowNull: true,
-      },
-      temp_ai_parsed_description: {
-        type: DataTypes.TEXT,
-        allowNull: true,
-      },
-      temp_ai_parsed_category_name: {
+      // --- NOVO CAMPO PARA SUBSTIUIR O ENUM 'status' ---
+      // Este campo será usado para indicar qual a próxima ação esperada do usuário
+      // ou qual etapa do fluxo estamos, sem ser um ENUM no DB.
+      action_expected: {
         type: DataTypes.STRING,
-        allowNull: true,
+        allowNull: true, // Pode ser nulo se não houver ação pendente
+        comment: 'Indica a próxima ação esperada do usuário ou etapa do fluxo (ex: "awaiting_new_category_name", "awaiting_card_choice").'
       },
-      temp_ai_parsed_flow: {
-        type: DataTypes.ENUM('expense', 'revenue'),
-        allowNull: true,
-      },
-      temp_ai_parsed_is_installment: {
-        type: DataTypes.BOOLEAN,
-        allowNull: true,
-      },
-      temp_ai_parsed_installment_count: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-      },
-      temp_ai_parsed_card_name: {
-        type: DataTypes.STRING,
-        allowNull: true,
-      },
-      temp_card_name: {
-        type: DataTypes.STRING,
-        allowNull: true,
-      },
-      temp_card_closing_day: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-      },
-      temp_card_due_day: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-      }
+      // --- REMOÇÃO DE CAMPOS TEMPORÁRIOS DE ANÁLISE DA IA ---
+      // Esses campos serão passados diretamente ou inferidos quando necessário,
+      // em vez de persistir estados intermediários no DB.
+      // temp_ai_parsed_value: { type: DataTypes.DECIMAL(10, 2), allowNull: true, },
+      // temp_ai_parsed_description: { type: DataTypes.TEXT, allowNull: true, },
+      // temp_ai_parsed_category_name: { type: DataTypes.STRING, allowNull: true, },
+      // temp_ai_parsed_flow: { type: DataTypes.ENUM('expense', 'revenue'), allowNull: true, },
+      // temp_ai_parsed_is_installment: { type: DataTypes.BOOLEAN, allowNull: true, },
+      // temp_ai_parsed_installment_count: { type: DataTypes.INTEGER, allowNull: true, },
+      // temp_ai_parsed_card_name: { type: DataTypes.STRING, allowNull: true, },
+      // temp_card_name: { type: DataTypes.STRING, allowNull: true, },
+      // temp_card_closing_day: { type: DataTypes.INTEGER, allowNull: true, },
+      // temp_card_due_day: { type: DataTypes.INTEGER, allowNull: true, }
     }, {
       sequelize,
       modelName: 'PendingExpense',

@@ -7,7 +7,7 @@ const subscriptionService = require('../../services/subscriptionService');
 const profileService = require('../ProfileManager/profile.service');
 const groupService = require('../GroupManager/group.service');
 const categoryService = require('../CategoryManager/category.service');
-const creditCardService = require('../CreditCardManager/creditCard.service'); // Importar CreditCardService
+const creditCardService = require('../CreditCardManager/creditCard.service');
 const { Op } = require('sequelize');
 const aiService = require('../../utils/aiService');
 const whatsappService = require('../../utils/whatsappService');
@@ -53,6 +53,14 @@ class WebhookService {
   }
 
   async processIncomingMessage(payload) {
+    // --- INÍCIO DA CORREÇÃO ---
+    // Ignora payloads que não são mensagens recebidas ou criação de grupo
+    if (payload.type !== 'ReceivedCallback' && payload.notification !== 'GROUP_CREATE') {
+        logger.debug(`[Webhook] Ignorando payload de tipo '${payload.type}'.`);
+        return;
+    }
+    // --- FIM DA CORREÇÃO ---
+
     if (payload.fromMe) { return; }
     if (payload.notification === 'GROUP_CREATE') { return this.handleGroupJoin(payload); }
     
@@ -471,7 +479,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     if (buttonId.startsWith('menu_')) {
         const action = buttonId.split('_')[1];
         if (action === 'create_expense_revenue') {
-             await whatsappService.sendWhatsappMessage(groupId, `Ok! Por favor, me envie a despesa ou receita.\n\nVocê pode mandar o texto (ex: "R$ 500 Almoço", ou "Salário 3000"), um áudio ou um comprovante.`);
+             await whatsappService.sendWhatsappMessage(groupId, `Ok! Por favor, me envie a despesa ou receita.\n\nVocê pode mandar o texto (ex: "R$ 500 Aluguel", ou "Salário 3000"), um áudio ou um comprovante.`);
         } else if (action === 'view_report') {
             await this.sendSpendingReport(groupId, payload.participantPhone, profileId);
         } else if (action === 'export_excel') {
@@ -523,12 +531,11 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const buttons = [];
 
     if (cards.length > 0) {
-        message += 'Seus cartões cadastrados:\n';
+        message += '*Seus cartões cadastrados:*\n';
         cards.forEach((card, index) => {
             message += `${index + 1} - ${card.name} (final ${card.last_four_digits || 'N/A'})\n`;
         });
-        message += '\n';
-        // Futuras opções de editar/deletar um cartão existente podem ser adicionadas aqui
+        message += '\n'; 
     } else {
         message += 'Você ainda não tem cartões de crédito cadastrados.\n\n';
     }
@@ -668,7 +675,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
     const mimeType = payload.image ? payload.image.mimeType : payload.document.mimeType;
     
-    // Limpa pendências anteriores para este participante no mesmo grupo
     await PendingExpense.destroy({ 
         where: { 
             participant_phone: participantPhone, 
@@ -678,7 +684,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
                 [Op.in]: [
                     'awaiting_context', 'awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal', 
                     'awaiting_credit_card_choice', 'awaiting_installment_count', 
-                    'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'
+                    'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation', 'awaiting_ai_analysis', 'awaiting_context_analysis_complete'
                 ] 
             } 
         } 
@@ -814,7 +820,19 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         }
 
         if (userContext) {
-            await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId, status: { [Op.in]: ['awaiting_ai_analysis', 'awaiting_context_analysis_complete', 'awaiting_credit_card_choice', 'awaiting_installment_count', 'awaiting_category_reply', 'awaiting_new_category_decision', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'] } } });
+            await PendingExpense.destroy({ 
+                where: { 
+                    participant_phone: participantPhone, 
+                    whatsapp_group_id: groupId, 
+                    profile_id: profileId, 
+                    status: { 
+                        [Op.in]: [
+                            'awaiting_ai_analysis', 'awaiting_context_analysis_complete', 'awaiting_credit_card_choice', 'awaiting_installment_count', 
+                            'awaiting_category_reply', 'awaiting_new_category_decision', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'
+                        ] 
+                    } 
+                } 
+            });
 
             const tempPending = await PendingExpense.create({
                 whatsapp_message_id: payload.messageId,
@@ -827,7 +845,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
             const analysisResult = await aiService.analyzeTextForExpenseOrRevenue(userContext, profileId);
             
-            if (analysisResult && (analysisResult.value !== null || analysisResult.closingDay !== null || analysisResult.dueDay !== null)) {
+            if (analysisResult && (analysisResult.value !== null || (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay))) {
                 await tempPending.update({
                     temp_ai_parsed_value: analysisResult.value,
                     temp_ai_parsed_description: analysisResult.baseDescription,
@@ -841,7 +859,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
                     status: 'awaiting_context_analysis_complete',
                 });
 
-                if (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay && !analysisResult.value) {
+                if (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay && analysisResult.value === null) {
                     await whatsappService.sendWhatsappMessage(groupId, `A IA identificou um pedido para criar o cartão "*${analysisResult.cardName}*" com fechamento dia *${analysisResult.closingDay}* e vencimento dia *${analysisResult.dueDay}*. Confirma?`);
                     const buttons = [
                         { id: `card_confirm_create_${tempPending.id}`, label: '✅ Criar Cartão' },
@@ -1183,7 +1201,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
   async finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense, goalValue = 0) {
     const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
     
-    const categoryType = pendingExpense.temp_category_type || 'Outros'; // Fallback se o tipo não foi coletado.
+    const categoryType = pendingExpense.temp_category_type || 'Outros';
 
     try {
         const newCategory = await categoryService.create(

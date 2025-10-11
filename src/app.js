@@ -48,7 +48,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: false}); // <<< MANTIDO force: false aqui, o que significa que o sync do seeder não apaga tabelas.
+      await db.sequelize.sync({ force: true}); // <<< MANTIDO force: false aqui, o que significa que o sync do seeder não apaga tabelas.
                                                 // O force: true está na sua configuração de ambiente ou outro lugar.
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser();

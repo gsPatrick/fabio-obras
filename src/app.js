@@ -22,7 +22,7 @@ class App {
     this.middlewares();
     this.routes();
     this.exposeModels();
-    this.startPendingExpenseWorker(); // Esta função agora vai usar o novo worker
+    this.startPendingExpenseWorker();
     this.startOnboardingWorker();
   }
 
@@ -164,11 +164,13 @@ class App {
     console.log('[SEEDER] Categorias específicas do administrador verificadas.');
   }
 
-  // <<< MUDANÇA: Usar o worker do webhookService >>>
+  // <<< INÍCIO DA CORREÇÃO >>>
   startPendingExpenseWorker() {
-    setInterval(webhookService.runPendingExpenseWorker, 30000); 
+    // Usar uma arrow function para garantir que o 'this' (contexto) seja preservado
+    // e a função `runPendingExpenseWorker` seja chamada corretamente a partir do objeto `webhookService`.
+    setInterval(() => webhookService.runPendingExpenseWorker(), 30000); 
   }
-  // <<< FIM DA MUDANÇA >>>
+  // <<< FIM DA CORREÇÃO >>>
 
   startOnboardingWorker() {
     const { OnboardingState } = db;

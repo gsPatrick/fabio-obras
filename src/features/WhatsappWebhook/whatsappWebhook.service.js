@@ -1139,13 +1139,12 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     logger.info(`[Webhook] ${category.category_flow === 'expense' ? 'Despesa' : 'Receita'} #${createdEntry.id} salva e fluxo de edição iniciado para ${pendingData.participant_phone}.`);
   }
 
-  // === MUDANÇAS AQUI ===
-  // Adaptando o fluxo de criação de nova categoria
+  // <<< INÍCIO DA CORREÇÃO >>>
   async handleNewCategoryDecisionFlow(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const parts = buttonId.split('_');
     const action = parts[2];
-    const pendingExpenseId = parts[3];
+    const pendingExpenseId = parts[parts.length - 1]; // Sempre pega o último elemento como ID
     const groupId = payload.phone;
     const profileId = payload.profileId;
 
@@ -1156,8 +1155,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const otherCategoryName = suggestedFlow === 'expense' ? 'Outros' : 'Receita Padrão';
 
     if (action === 'create') {
-        // === MUDANÇAS AQUI ===
-        pendingExpense.action_expected = 'awaiting_new_category_type'; // NOVO CAMPO
+        pendingExpense.action_expected = 'awaiting_new_category_type';
         await pendingExpense.save();
         await whatsappService.sendWhatsappMessage(groupId, `Entendido! A qual tipo de custo/receita a categoria "*${pendingExpense.suggested_new_category_name}*" pertence?\n\nResponda com um tipo (ex: "Material", "Mão de Obra", "Salário", "Serviço Avulso").`);
     } else if (action === 'choose') {
@@ -1177,29 +1175,25 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             return; 
         }
         
-        // === MUDANÇAS AQUI ===
-        // Reconstruindo o analysisResult a partir dos dados no pendingExpense
         const analysisResult = {
             value: pendingExpense.value,
-            baseDescription: pendingExpense.description, // Já é a descrição final com contexto
+            baseDescription: pendingExpense.description,
             categoryName: finalCategory.name,
             flow: finalCategory.category_flow,
-            isInstallment: pendingExpense.installment_count ? true : false,
+            isInstallment: !!pendingExpense.installment_count,
             installmentCount: pendingExpense.installment_count,
-            cardName: null, // Não temos o cardName salvo no pending se chegou aqui
+            cardName: null,
         };
         const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
         await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, finalCategory.id);
     }
   }
   
-  // === MUDANÇAS AQUI ===
-  // Adaptando o fluxo de decisão de categoria (expense/revenue)
   async handleNewCategoryFlowDecision(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const parts = buttonId.split('_');
     const flow = parts[3];
-    const pendingExpenseId = parts[4];
+    const pendingExpenseId = parts[parts.length - 1]; // Sempre pega o último elemento como ID
     const groupId = payload.phone;
     const profileId = payload.profileId;
 
@@ -1208,16 +1202,15 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     
     pendingExpense.suggested_category_flow = flow;
     if (flow === 'expense') {
-        // === MUDANÇAS AQUI ===
-        pendingExpense.action_expected = 'awaiting_new_category_goal'; // NOVO CAMPO
+        pendingExpense.action_expected = 'awaiting_new_category_goal';
         await pendingExpense.save();
         await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pendingExpense.suggested_new_category_name}*" (Despesa)?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
     } else {
         await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense);
     }
   }
+  // <<< FIM DA CORREÇÃO >>>
 
-  // === MUDANÇAS AQUI ===
   // Adaptando o fluxo de criação de nova categoria
   async finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense, goalValue = 0) {
     const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
@@ -1244,18 +1237,17 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
         await whatsappService.sendWhatsappMessage(whatsapp_group_id, msg);
 
-        // === MUDANÇAS AQUI ===
         // Reconstruindo o analysisResult a partir dos dados no pendingExpense
         const analysisResult = {
             value: pendingExpense.value,
             baseDescription: pendingExpense.description, // Já é a descrição final
             categoryName: newCategory.name,
             flow: newCategory.category_flow,
-            isInstallment: pendingExpense.installment_count ? true : false,
+            isInstallment: !!pendingExpense.installment_count,
             installmentCount: pendingExpense.installment_count,
-            cardName: null, // Não temos o cardName salvo no pending se chegou aqui
+            cardName: null,
         };
-        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || ''; // Tenta extrair contexto original se estiver entre parênteses
+        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
         await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, newCategory.id, pendingExpense.credit_card_id);
 
     } catch (error) {
@@ -1265,7 +1257,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     }
   }
   
-  // === MUDANÇAS AQUI ===
   // Handle da criação de categoria avulsa do menu
   async handleNewCategoryCreationFlowFromPending(payload, pending) {
     const groupId = payload.phone;
@@ -1337,16 +1328,14 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         return false; 
     }
 
-    // === MUDANÇAS AQUI ===
-    // Reconstruindo o analysisResult a partir dos dados no pendingExpense
     const analysisResult = {
         value: pendingExpense.value,
         baseDescription: pendingExpense.description,
-        categoryName: pendingExpense.suggested_new_category_name, // Nome da categoria guardado aqui
+        categoryName: pendingExpense.suggested_new_category_name,
         flow: pendingExpense.suggested_category_flow,
-        isInstallment: pendingExpense.installment_count ? true : false,
+        isInstallment: !!pendingExpense.installment_count,
         installmentCount: pendingExpense.installment_count,
-        cardName: null, // Não temos o cardName salvo no pending
+        cardName: null,
     };
     const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
     const categoryId = pendingExpense.suggested_category_id;
@@ -1366,8 +1355,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
     pendingExpense.credit_card_id = selectedCard.id;
     if (analysisResult.isInstallment && analysisResult.installmentCount > 1) {
-        // === MUDANÇAS AQUI ===
-        pendingExpense.action_expected = 'awaiting_installment_count'; // NOVO CAMPO
+        pendingExpense.action_expected = 'awaiting_installment_count';
         await pendingExpense.save();
         await whatsappService.sendWhatsappMessage(groupId, `Em quantas parcelas (total) esta despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(analysisResult.value)}* será feita no cartão *${selectedCard.name}*? (Responda apenas com o número, ex: 3)`);
     } else {
@@ -1393,16 +1381,14 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         return true;
     }
 
-    // === MUDANÇAS AQUI ===
-    // Reconstruindo o analysisResult a partir dos dados no pendingExpense
     const analysisResult = {
         value: pendingExpense.value,
         baseDescription: pendingExpense.description,
-        categoryName: pendingExpense.suggested_new_category_name, // Nome da categoria guardado aqui
+        categoryName: pendingExpense.suggested_new_category_name,
         flow: pendingExpense.suggested_category_flow,
-        isInstallment: true, // Força true, pois o usuário está definindo parcelas
+        isInstallment: true,
         installmentCount: installmentCount,
-        cardName: null, // Não temos o cardName salvo no pending
+        cardName: null,
     };
     const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
     const categoryId = pendingExpense.suggested_category_id;
@@ -1423,7 +1409,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const isHandlingInstallmentCount = await this.handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId);
     if (isHandlingInstallmentCount) return true;
 
-    // === MUDANÇAS AQUI ===
     const pendingExpense = await PendingExpense.findOne({
       where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_category_reply' },
       include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
@@ -1431,7 +1416,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
     if (!pendingExpense) { 
         logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada porque não há fluxo de resposta de categoria pendente.`);
-        return false; // <<< CORREÇÃO: Retorna false para indicar que não foi tratado.
+        return false;
     }
     
     const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : null);
@@ -1467,16 +1452,14 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         await pendingExpense.revenue.update({ category_id: selectedCategory.id });
         updatedEntry = pendingExpense.revenue;
     } else {
-        // === MUDANÇAS AQUI ===
-        // Reconstruindo o analysisResult a partir dos dados no pendingExpense
         const analysisResult = {
             value: pendingExpense.value,
             baseDescription: pendingExpense.description,
             categoryName: selectedCategory.name,
             flow: selectedCategory.category_flow,
-            isInstallment: pendingExpense.installment_count ? true : false,
+            isInstallment: !!pendingExpense.installment_count,
             installmentCount: pendingExpense.installment_count,
-            cardName: null, // Não temos o cardName salvo no pending
+            cardName: null,
         };
         const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
         await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, selectedCategory.id, pendingExpense.credit_card_id);
@@ -1528,8 +1511,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);
       const message = `📋 *Escolha a Categoria Correta*\n\nVocê está definindo a categoria para a ${flowText} de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
       
-      // === MUDANÇAS AQUI ===
-      pendingExpense.action_expected = 'awaiting_category_reply'; // NOVO CAMPO
+      pendingExpense.action_expected = 'awaiting_category_reply';
       pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
       await pendingExpense.save();
       await whatsappService.sendWhatsappMessage(groupId, message);

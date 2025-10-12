@@ -134,7 +134,6 @@ class WebhookService {
     }
   }
   
-  // <<< INÍCIO DA MUDANÇA: Menu principal ajustado >>>
   async sendMainMenu(groupId) {
     const message = `Olá! Escolha uma das opções abaixo:`;
     const buttons = [
@@ -146,7 +145,6 @@ class WebhookService {
     await whatsappService.sendButtonList(groupId, message, buttons);
     logger.info(`[Webhook] Menu principal enviado para ${groupId}.`);
   }
-  // <<< FIM DA MUDANÇA >>>
 
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
@@ -476,12 +474,11 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
     if (buttonId.startsWith('menu_')) {
         const action = buttonId.split('_')[1];
-        // <<< MUDANÇA: Ação 'create' removida, pois o fluxo principal é enviar mensagem direta >>>
-        if (action === 'view') { // O ID agora é 'menu_view_report'
+        if (action === 'view') { 
             await this.sendSpendingReport(groupId, payload.participantPhone, profileId);
-        } else if (action === 'export') { // O ID agora é 'menu_export_excel'
+        } else if (action === 'export') { 
             await this.sendExpensesExcelReport(groupId, payload.participantPhone, profileId);
-        } else if (action === 'create') { // O ID agora é 'menu_create_category'
+        } else if (action === 'create') { 
              const pending = await PendingExpense.create({ 
                 whatsapp_message_id: payload.messageId + '_menu_cat',
                 whatsapp_group_id: groupId,
@@ -491,7 +488,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
                 expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
              });
              await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Salário")');
-        } else if (action === 'manage') { // O ID agora é 'menu_manage_cards'
+        } else if (action === 'manage') { 
             return this.handleManageCardsAction(groupId, payload.participantPhone, profileId, payload.messageId);
         }
         return;
@@ -501,8 +498,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       return this.handleEditButtonFlow(payload);
     }
     
-    // <<< INÍCIO DA CORREÇÃO: Inverter a ordem dos IFs >>>
-    // A verificação mais específica (new_cat_flow_) deve vir antes da mais genérica (new_cat_)
     if (buttonId.startsWith('new_cat_flow_')) {
         return this.handleNewCategoryFlowDecision(payload);
     }
@@ -510,7 +505,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     if (buttonId.startsWith('new_cat_')) {
       return this.handleNewCategoryDecisionFlow(payload);
     }
-    // <<< FIM DA CORREÇÃO >>>
     
     if (buttonId.startsWith('card_')) {
         return this.handleCreditCardButtonResponse(payload);
@@ -525,7 +519,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     }
   }
 
-  // <<< INÍCIO DA CORREÇÃO: Lógica de gerenciamento de cartões >>>
   async handleManageCardsAction(groupId, participantPhone, profileId, messageId) {
     const cards = await creditCardService.getAllCreditCards(profileId);
     let message = '💳 *Gerenciar Cartões de Crédito*\n\n';
@@ -547,7 +540,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     await whatsappService.sendButtonList(groupId, message, buttons);
     logger.info(`[Webhook] Menu de gerenciamento de cartões enviado para ${groupId}.`);
   }
-  // <<< FIM DA CORREÇÃO >>>
 
   async handleCreditCardButtonResponse(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
@@ -610,11 +602,9 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         if (pending) await pending.destroy();
         await whatsappService.sendWhatsappMessage(groupId, `Criação de cartão cancelada.`);
         await this.sendMainMenu(groupId);
-    // <<< INÍCIO DA ADIÇÃO: Lidar com o botão de voltar ao menu >>>
     } else if (buttonId.startsWith('menu_back_to_main_')) {
         return this.sendMainMenu(groupId);
     }
-    // <<< FIM DA ADIÇÃO >>>
   }
 
   async handleCreditCardCreationFlowFromPending(payload, pending) {
@@ -651,17 +641,25 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             if (textMessage && /^\d+$/.test(textMessage)) {
                 const day = parseInt(textMessage, 10);
                 if (day >= 1 && day <= 31) {
-                    pending.description = day; 
+                    // <<< INÍCIO DA CORREÇÃO >>>
+                    // Armazenar o dia de vencimento como um inteiro no campo description.
+                    pending.description = day.toString(); // Garante que seja string para o campo de texto
+                    
                     try {
+                        // Converter os valores para inteiros antes de chamar o serviço.
+                        const closingDayInt = parseInt(pending.value, 10);
+                        const dueDayInt = parseInt(pending.description, 10);
+
                         const newCard = await creditCardService.createCreditCard(pending.profile_id, {
                             name: pending.suggested_new_category_name,
-                            closing_day: pending.value,
-                            due_day: pending.description,
+                            closing_day: closingDayInt,
+                            due_day: dueDayInt,
                             last_four_digits: null,
                         });
                         await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
                         await pending.destroy();
                         await this.sendMainMenu(groupId);
+                    // <<< FIM DA CORREÇÃO >>>
                     } catch (error) {
                         logger.error('[Webhook] Erro ao criar cartão de crédito:', error);
                         await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao criar o cartão. ${error.message}`);

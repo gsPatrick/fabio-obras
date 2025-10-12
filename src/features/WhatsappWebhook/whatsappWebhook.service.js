@@ -1108,7 +1108,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const parts = buttonId.split('_');
     const action = parts[2];
-    const pendingExpenseId = parts[parts.length - 1]; // Sempre pega o último elemento como ID
+    const pendingExpenseId = parts[parts.length - 1];
     const groupId = payload.phone;
     const profileId = payload.profileId;
 
@@ -1157,7 +1157,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const parts = buttonId.split('_');
     const flow = parts[3];
-    const pendingExpenseId = parts[parts.length - 1]; // Sempre pega o último elemento como ID
+    const pendingExpenseId = parts[parts.length - 1];
     const groupId = payload.phone;
     const profileId = payload.profileId;
 

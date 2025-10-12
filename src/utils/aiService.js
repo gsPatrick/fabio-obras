@@ -4,7 +4,7 @@
 require('dotenv').config();
 const OpenAI = require('openai');
 const logger = require('./logger');
-const { Category, CreditCard } = require('../models'); // Adicionado CreditCard
+const { Category, CreditCard } = require('../models');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -81,7 +81,6 @@ class AIService {
   async analyzeExcelStructureAndExtractData(csvString, categoryList) {
     logger.info('[AIService] Iniciando análise de estrutura de planilha universal...');
     
-    // categoryList agora pode ter category_flow
     const expenseCategoryNames = categoryList.filter(c => c.category_flow === 'expense').map(c => c.name.trim()).filter(c => c.length > 0);
     const expenseCategoryOptions = `"${expenseCategoryNames.join('", "')}"`;
 
@@ -145,7 +144,7 @@ class AIService {
    * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
    * Retorna informações detalhadas incluindo fluxo (despesa/receita), parcelamento e cartão.
    */
-  async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg', profileId) { 
+  async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg', profileId, cardNames = []) { 
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);
     
     let finalImageBuffer = mediaBuffer;
@@ -159,15 +158,11 @@ class AIService {
       finalImageBuffer = convertedImage;
     }
     
-    // Usando o profileId para buscar as categorias do perfil correto.
     const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] }); 
     const expenseCategoryList = `"${categories.filter(c => c.category_flow === 'expense').map(c => c.name).join('", "')}"`;
     const revenueCategoryList = `"${categories.filter(c => c.category_flow === 'revenue').map(c => c.name).join('", "')}"`;
 
-    // Busca cartões de crédito para o perfil
-    const creditCards = await CreditCard.findAll({ where: { profile_id: profileId, is_active: true }, attributes: ['name'] });
-    const creditCardNames = `"${creditCards.map(c => c.name).join('", "')}"`;
-
+    const creditCardNames = `"${cardNames.join('", "')}"`;
     const base64Image = finalImageBuffer.toString('base64');
     
     const prompt = `
@@ -184,8 +179,8 @@ class AIService {
       3.  **CategoryName:** Sua prioridade é mapear para uma categoria existente. DESPESAS: [${expenseCategoryList}]. RECEITAS: [${revenueCategoryList}]. SE a descrição indicar um nome de categoria que não está na lista (ex: "gasolina", "mercado"), use esse nome como 'categoryName'. Caso contrário, se não houver mapeamento claro, use "Outros" para despesas ou "Receita Padrão" para receitas.
       4.  **isInstallment:** Se a despesa for parcelada (ex: "3x", "parcelado", "prestação"), defina como true.
       5.  **installmentCount:** Se for parcelado, extraia o número total de parcelas (ex: "3" de "3x").
-      6.  **cardName:** Se a despesa for de cartão de crédito, identifique o nome do cartão entre as opções: [${creditCardNames}].
-      7.  **closingDay e dueDay (para criação/atualização de cartão):** Se o texto mencionar explicitamente termos como "dia de fechamento do cartão é dia X" ou "vencimento do cartão é dia Y", extraia esses números. Caso contrário, use null. Estes são importantes para o fluxo de criação de cartão via WhatsApp.
+      6.  **cardName:** Se o texto ou a imagem indicar um cartão de crédito, identifique-o. Você tem uma lista de cartões existentes: [${creditCardNames}]. Se o texto mencionar um nome similar (ex: "nubak", "nu bank"), normalize para o nome correto da lista (ex: "Nubank"). Se não houver correspondência clara, mas a compra for de crédito, use o nome mencionado.
+      7.  **closingDay e dueDay:** Apenas se o texto pedir explicitamente para CRIAR ou CONFIGURAR um cartão (ex: "criar cartão X fechamento dia Y vencimento Z"), extraia esses números. Caso contrário, devem ser null.
       
       Contexto do usuário: "${userText || 'Nenhum'}"
     `;
@@ -205,55 +200,51 @@ class AIService {
 
       const result = JSON.parse(response.choices[0].message.content);
       logger.info('[AIService] Análise detalhada concluída.', result);
-      // Valida resultado com categorias de despesa E receita
-      return this._validateAnalysisResult(result, categories);
+      return this._validateAnalysisResult(result, categories, cardNames);
     } catch (error) {
       logger.error('[AIService] Erro na análise detalhada:', error);
       return null;
     }
   }
 
-  // NOVO MÉTODO: analyzeTextForExpenseOrRevenue
   /**
    * Analisa um texto puro (mensagem de WhatsApp) para extrair despesas ou receitas, parcelamento e cartão.
    * Retorna informações detalhadas, incluindo dias de fechamento/vencimento se aplicável à criação de cartão.
    */
-  async analyzeTextForExpenseOrRevenue(userText, profileId) {
+  async analyzeTextForExpenseOrRevenue(userText, profileId, cardNames = []) {
     logger.info(`[AIService] Iniciando análise de texto puro: "${userText}"`);
 
     const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] }); 
     const expenseCategoryList = `"${categories.filter(c => c.category_flow === 'expense').map(c => c.name).join('", "')}"`;
     const revenueCategoryList = `"${categories.filter(c => c.category_flow === 'revenue').map(c => c.name).join('", "')}"`;
 
-    const creditCards = await CreditCard.findAll({ where: { profile_id: profileId, is_active: true }, attributes: ['name'] });
-    const creditCardNames = `"${creditCards.map(c => c.name).join('", "')}"`;
+    const creditCardNames = `"${cardNames.join('", "')}"`;
 
     const prompt = `
-      Você é um especialista em análise de texto financeiro. Sua tarefa é analisar a mensagem de texto do usuário e extrair as informações de despesa ou receita.
+      Você é um especialista em análise de texto financeiro para um bot de WhatsApp. Sua tarefa é analisar a mensagem do usuário e extrair informações de despesa, receita ou criação de cartão.
       Retorne APENAS um objeto JSON válido com as chaves:
-      "value" (Número, ou null se não for um lançamento de despesa/receita),
-      "flow" (String: 'expense' ou 'revenue', ou null se não for um lançamento),
-      "baseDescription" (String),
-      "categoryName" (String, ou null se não for um lançamento),
-      "isInstallment" (Booleano),
-      "installmentCount" (Número, se for parcelado),
-      "cardName" (String, se for cartão de crédito),
-      "closingDay" (Número do dia do mês, se o texto mencionar "fechamento do cartão" ou "melhor dia de compra" e um número),
-      "dueDay" (Número do dia do mês, se o texto mencionar "vencimento do cartão" e um número).
+      "value" (Número, ou null), "flow" (String: 'expense' ou 'revenue', ou null), "baseDescription" (String),
+      "categoryName" (String, ou null), "isInstallment" (Booleano), "installmentCount" (Número, se parcelado),
+      "cardName" (String, se for cartão de crédito), "closingDay" (Número), "dueDay" (Número).
       
       Regras CRÍTICAS:
-      1.  **Prioridade:** Tente identificar primeiro se é um lançamento de despesa/receita. Se sim, "value", "flow" e "categoryName" são essenciais.
-      2.  **Lançamento de Despesa/Receita:**
-          *   **Valor:** O valor é obrigatório para lançamentos. Extraia o valor monetário. Se o texto indicar "salário", "recebi", "entrada", o "flow" é 'revenue'. Se for "paguei", "gastei", "comprei", "despesa", o "flow" é 'expense'.
-          *   **Flow:** Determine 'expense' ou 'revenue' com base nas palavras-chave e no contexto. Priorize 'expense' se não for claro.
-          *   **CategoryName:** Sua prioridade é mapear para uma categoria existente. DESPESAS: [${expenseCategoryList}]. RECEITAS: [${revenueCategoryList}]. SE a descrição indicar um nome de categoria que não está na lista (ex: "gasolina", "mercado"), use esse nome como 'categoryName'. Caso contrário, se não houver mapeamento claro, use "Outros" para despesas ou "Receita Padrão" para receitas.
-          *   **isInstallment:** Se a despesa for parcelada (ex: "3x", "parcelado"), defina como true.
-          *   **installmentCount:** Se for parcelado, extraia o número total de parcelas (ex: "3" de "3x"). Se não indicado mas "parcelado", use 2.
-          *   **cardName:** Se o texto mencionar um cartão de crédito, identifique o nome do cartão entre as opções: [${creditCardNames}].
-      3.  **Criação/Atualização de Cartão (Sem Lançamento Direto):**
-          *   Se o texto não for um lançamento (sem valor monetário claro ou descrição de compra/recebimento), mas mencionar "criar cartão", "configurar cartão", "novo cartão", procure por "nome do cartão", "fechamento dia X", "vencimento dia Y". Nestes casos, "value", "flow", "categoryName" podem ser null.
-          *   **closingDay e dueDay:** Se o texto mencionar explicitamente "dia de fechamento do cartão é dia X" ou "vencimento do cartão é dia Y", extraia esses números. Caso contrário, use null.
-      4.  **Formato:** O usuário pode enviar "500 aluguel" ou "salário 3000 categoria salário" ou "criar cartão nubank fechamento dia 10 vencimento dia 20".
+      1.  **Cenário 1: Lançamento de Despesa/Receita.**
+          *   Se o texto contém um valor monetário e uma descrição de compra/pagamento/recebimento (ex: "1500 mercado", "recebi 3000 salario").
+          *   "value": Extraia o valor numérico.
+          *   "flow": Determine se é 'expense' ou 'revenue'. Se não for claro, assuma 'expense'.
+          *   "categoryName": Mapeie para uma categoria de DESPESA [${expenseCategoryList}] ou RECEITA [${revenueCategoryList}]. Se a descrição contiver um nome óbvio que não está na lista (ex: "aluguel", "material"), use esse nome. Se não, use "Outros" para despesa ou "Receita Padrão" para receita.
+          *   "isInstallment" & "installmentCount": Se mencionar parcelas (ex: "3x", "em 2 vezes"), popule os campos.
+          *   "cardName": Se mencionar um cartão, identifique-o. A lista de cartões existentes é: [${creditCardNames}]. Se o texto mencionar um nome similar (ex: "nubak", "cartao nu"), normalize para o nome exato da lista (ex: "Nubank").
+          *   "closingDay" e "dueDay" devem ser null neste cenário.
+
+      2.  **Cenário 2: Criação de Cartão de Crédito.**
+          *   Se o texto contém palavras-chave como "criar cartão", "novo cartão", "adicionar cartão".
+          *   "value", "flow", "categoryName", "isInstallment", "installmentCount" devem ser null.
+          *   "cardName": Extraia o nome do novo cartão (ex: "Visa Platinum").
+          *   "closingDay": Extraia o número do dia de fechamento (ex: de "fechamento dia 10").
+          *   "dueDay": Extraia o número do dia de vencimento (ex: de "vencimento dia 20").
+
+      3.  **Ambiguidade:** Se o texto for ambíguo, priorize o Cenário 1 (Lançamento). Se não houver valor monetário claro, considere o Cenário 2. Se nenhum se encaixar, retorne todos os campos como null, exceto "baseDescription" com o texto original.
 
       Texto do usuário: "${userText}"
     `;
@@ -266,92 +257,85 @@ class AIService {
           content: [{ type: 'text', text: prompt }],
         }],
         response_format: { type: "json_object" },
-        temperature: 0.2, 
+        temperature: 0.1, 
       });
 
       const result = JSON.parse(response.choices[0].message.content);
       logger.info('[AIService] Análise de texto puro concluída.', result);
-      // Valida resultado com categorias de despesa E receita
-      return this._validateAnalysisResult(result, categories);
+      return this._validateAnalysisResult(result, categories, cardNames);
     } catch (error) {
       logger.error('[AIService] Erro na análise de texto puro:', error);
       return null;
     }
   }
-  // FIM NOVO MÉTODO
 
-  // MODIFICADO: _validateAnalysisResult para CategoryFlow e CardName
-  _validateAnalysisResult(result, categories) {
-    // Garante que 'flow' seja 'expense' ou 'revenue' se houver valor, ou null se não for lançamento
-    if (result.value !== null) { // Só valida flow se houver um valor a ser lançado
+  _validateAnalysisResult(result, categories, cardNames = []) {
+    if (result.value !== null) {
         if (!result.flow || !['expense', 'revenue'].includes(result.flow)) {
-            result.flow = 'expense'; // Padrão para despesa se não identificado em lançamento
-            logger.warn(`[AIService] IA sugeriu fluxo inválido/vazio ('${result.flow}') para lançamento. Usando 'expense'.`);
+            result.flow = 'expense';
+            logger.warn(`[AIService] IA sugeriu fluxo inválido/vazio para lançamento. Usando 'expense'.`);
         }
-    } else {
-        result.flow = null; // Não é um lançamento se não tem valor
-        result.categoryName = null; // E sem categoria
+    } else if (!result.cardName || !result.closingDay || !result.dueDay) {
+        // Se não for um lançamento de valor e nem uma criação de cartão válida, zera tudo.
+        return { value: null, flow: null, baseDescription: result.baseDescription || '', categoryName: null, isInstallment: false, installmentCount: null, cardName: null, closingDay: null, dueDay: null };
     }
 
-
-    // Valida e ajusta categoryName APENAS se for um lançamento
-    if (result.categoryName !== null && result.flow !== null) {
+    if (result.categoryName && result.flow) {
         const validCategory = categories.find(c => 
             c.name.toLowerCase() === result.categoryName.toLowerCase() && c.category_flow === result.flow
         );
-
-        // Se uma categoria válida for encontrada, garante o casing correto.
-        // Se não for encontrada, MANTÉM o nome sugerido pela IA para que o fluxo de criação seja acionado.
         if (validCategory) {
             result.categoryName = validCategory.name;
         }
-    } else {
-        result.categoryName = null; // Garante que categoryName é null se não é lançamento
     }
 
+    if (result.cardName && cardNames.length > 0) {
+        const lowerCaseCardName = result.cardName.toLowerCase();
+        // Busca exata primeiro (case-insensitive)
+        let foundCard = cardNames.find(c => c.toLowerCase() === lowerCaseCardName);
+        // Se não encontrar, tenta uma busca por inclusão (fuzzy)
+        if (!foundCard) {
+            foundCard = cardNames.find(c => c.toLowerCase().includes(lowerCaseCardName) || lowerCaseCardName.includes(c.toLowerCase()));
+        }
+        if(foundCard) {
+            result.cardName = foundCard;
+            logger.info(`[AIService] Nome de cartão "${result.cardName}" normalizado para "${foundCard}".`);
+        }
+    }
 
-    // Valida isInstallment e installmentCount
-    if (result.flow === 'expense') { // Parcelamento só faz sentido para despesas
+    if (result.flow === 'expense') {
         if (result.isInstallment && (!result.installmentCount || result.installmentCount <= 0)) {
-            result.installmentCount = 2; // Padrão de 2x se a IA disser que é parcelado mas não der o número
+            result.installmentCount = 2;
         } else if (!result.isInstallment) {
             result.installmentCount = null;
         }
-    } else { // Para receitas ou não lançamentos, não há parcelamento
+    } else {
         result.isInstallment = false;
         result.installmentCount = null;
+        result.cardName = null;
     }
 
-
-    // Valida cardName (apenas para despesas)
-    if (result.flow !== 'expense' && result.cardName) {
-        result.cardName = null; // Receita não deve estar associada a cartão de crédito
-        logger.warn(`[AIService] IA sugeriu cartão para uma receita ou não lançamento. Ignorando.`);
-    }
-
-    // Garante que o valor seja um número, se existir
     if (result.value !== null) {
-        result.value = parseFloat(result.value);
+        result.value = parseFloat(String(result.value).replace(',', '.'));
         if (isNaN(result.value)) {
-            logger.error(`[AIService] IA não conseguiu extrair um valor numérico válido para lançamento.`);
-            result.value = null; // Anula o valor se for inválido
-            result.flow = null; // E anula o fluxo, pois não pode ser um lançamento sem valor
+            logger.error(`[AIService] IA não conseguiu extrair um valor numérico válido.`);
+            result.value = null;
+            result.flow = null;
             result.categoryName = null;
         }
     }
 
-    // Valida closingDay e dueDay
     if (result.closingDay) {
         result.closingDay = parseInt(result.closingDay, 10);
         if (isNaN(result.closingDay) || result.closingDay < 1 || result.closingDay > 31) {
-            logger.warn(`[AIService] IA sugeriu closingDay inválido (${result.closingDay}). Anulando.`);
+            logger.warn(`[AIService] IA sugeriu closingDay inválido. Anulando.`);
             result.closingDay = null;
         }
     }
     if (result.dueDay) {
         result.dueDay = parseInt(result.dueDay, 10);
         if (isNaN(result.dueDay) || result.dueDay < 1 || result.dueDay > 31) {
-            logger.warn(`[AIService] IA sugeriu dueDay inválido (${result.dueDay}). Anulando.`);
+            logger.warn(`[AIService] IA sugeriu dueDay inválido. Anulando.`);
             result.dueDay = null;
         }
     }
@@ -360,4 +344,4 @@ class AIService {
   }
 }
 
-module.exports = new AIService();
+module.exports = new AIService();```

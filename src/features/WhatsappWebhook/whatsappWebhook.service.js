@@ -641,12 +641,9 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             if (textMessage && /^\d+$/.test(textMessage)) {
                 const day = parseInt(textMessage, 10);
                 if (day >= 1 && day <= 31) {
-                    // <<< INÍCIO DA CORREÇÃO >>>
-                    // Armazenar o dia de vencimento como um inteiro no campo description.
-                    pending.description = day.toString(); // Garante que seja string para o campo de texto
+                    pending.description = day.toString();
                     
                     try {
-                        // Converter os valores para inteiros antes de chamar o serviço.
                         const closingDayInt = parseInt(pending.value, 10);
                         const dueDayInt = parseInt(pending.description, 10);
 
@@ -659,7 +656,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
                         await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
                         await pending.destroy();
                         await this.sendMainMenu(groupId);
-                    // <<< FIM DA CORREÇÃO >>>
                     } catch (error) {
                         logger.error('[Webhook] Erro ao criar cartão de crédito:', error);
                         await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao criar o cartão. ${error.message}`);
@@ -721,7 +717,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         return;
     }
 
-    // --- Tratamento de Comandos Específicos ---
     if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
         return this.sendSpendingReport(groupId, participantPhone, profileId);
     }
@@ -793,7 +788,8 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       
       const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
       if (mediaBuffer && userContext) {
-        const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, pendingMedia.profile_id);
+        const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
+        const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, profileId, cardNames);
         if (analysisResult) {
           return this.decideAndSaveExpenseOrRevenue(pendingMedia, analysisResult, userContext);
         } else {
@@ -831,8 +827,9 @@ Acesse em: https://obras-fabio.vercel.app/login`;
                 action_expected: 'awaiting_ai_analysis_complete',
                 expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
             });
-
-            const analysisResult = await aiService.analyzeTextForExpenseOrRevenue(userContext, profileId);
+            
+            const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
+            const analysisResult = await aiService.analyzeTextForExpenseOrRevenue(userContext, profileId, cardNames);
             
             if (analysisResult && (analysisResult.value !== null || (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay))) {
                 if (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay && analysisResult.value === null) {

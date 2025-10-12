@@ -13,7 +13,8 @@ const cookieParser = require('cookie-parser');
 const db = require('./models');
 const mainRouter = require('./routes');
 const { Op } = require('sequelize');
-const webhookService = require('./features/WhatsappWebhook/whatsappWebhook.service'); // Importar o serviço
+// <<< MUDANÇA: Importar a classe, não a instância >>>
+const WebhookService = require('./features/WhatsappWebhook/whatsappWebhook.service'); 
 
 class App {
   constructor() {
@@ -58,11 +59,15 @@ class App {
     }
   }
   
+  // <<< INÍCIO DA MUDANÇA: Seeder agora associa o grupo de teste >>>
   async seedAdminUser() {
-    const { User, Profile } = db;
+    const { User, Profile, MonitoredGroup } = db;
     const adminEmail = 'fabio@gmail.com'; 
     const adminPassword = 'Fabio123'; 
-    const adminWhatsappPhone = '5571983141335';  
+    const adminWhatsappPhone = '5571983141335';
+    const testGroupId = process.env.ZAPI_GROUP_ID || '120363422133729566@g.us'; // Pega do .env ou usa um padrão
+    const testGroupName = 'Grupo de Teste Admin';
+
     console.log('[SEEDER] Verificando usuário administrador...');
     
     try {
@@ -100,8 +105,33 @@ class App {
             await this.seedEssentialCategoriesForNewProfile(profile.id);
             await this.seedAdminSpecificCategories(profile.id);
         }
+
+        // Nova lógica para garantir que o grupo de teste está monitorado
+        if (testGroupId) {
+            console.log(`[SEEDER] Verificando monitoramento do grupo de teste: ${testGroupId}`);
+            const [monitoredGroup, created] = await MonitoredGroup.findOrCreate({
+                where: { group_id: testGroupId, profile_id: profile.id },
+                defaults: {
+                    name: testGroupName,
+                    is_active: true,
+                    profile_id: profile.id
+                }
+            });
+
+            if (created) {
+                console.log(`[SEEDER] Grupo '${testGroupName}' adicionado ao monitoramento.`);
+            } else {
+                if (!monitoredGroup.is_active) {
+                    await monitoredGroup.update({ is_active: true, name: testGroupName });
+                    console.log(`[SEEDER] Monitoramento do grupo '${testGroupName}' foi reativado.`);
+                } else {
+                    console.log(`[SEEDER] Grupo '${testGroupName}' já está sendo monitorado ativamente.`);
+                }
+            }
+        }
+        // <<< FIM DA MUDANÇA >>>
     } catch (error) {
-        console.error('[SEEDER] ❌ Falha ao verificar ou criar o usuário/perfil administrador:', error);
+        console.error('[SEEDER] ❌ Falha ao verificar ou criar o usuário/perfil/grupo administrador:', error);
     }
   }
 
@@ -164,13 +194,11 @@ class App {
     console.log('[SEEDER] Categorias específicas do administrador verificadas.');
   }
 
-  // <<< INÍCIO DA CORREÇÃO >>>
+  // <<< MUDANÇA: Chamar o método estático da classe >>>
   startPendingExpenseWorker() {
-    // Usar uma arrow function para garantir que o 'this' (contexto) seja preservado
-    // e a função `runPendingExpenseWorker` seja chamada corretamente a partir do objeto `webhookService`.
-    setInterval(() => webhookService.runPendingExpenseWorker(), 30000); 
+    setInterval(() => WebhookService.runPendingExpenseWorker(), 30000); 
   }
-  // <<< FIM DA CORREÇÃO >>>
+  // <<< FIM DA MUDANÇA >>>
 
   startOnboardingWorker() {
     const { OnboardingState } = db;

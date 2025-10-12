@@ -24,6 +24,91 @@ const MENU_COMMAND = 'MENU';
 
 class WebhookService {
 
+  static async runPendingExpenseWorker() {
+    const now = new Date();
+    try {
+        await PendingExpense.destroy({ 
+            where: { 
+                action_expected: 'awaiting_validation', 
+                expires_at: { [Op.lte]: now } 
+            } 
+        });
+        
+        const expiredCategoryActions = await PendingExpense.findAll({ 
+            where: { 
+                action_expected: { 
+                    [Op.in]: [
+                        'awaiting_category_reply', 
+                        'awaiting_new_category_decision', 
+                        'awaiting_new_category_type', 
+                        'awaiting_category_flow_decision', 
+                        'awaiting_new_category_goal'
+                    ] 
+                }, 
+                expires_at: { [Op.lte]: now } 
+            }, 
+            include: [
+                { model: Category, as: 'suggestedCategory' }, 
+                { model: Expense, as: 'expense' },
+                { model: Revenue, as: 'revenue' }
+            ] 
+        });
+
+        for (const pending of expiredCategoryActions) {
+            const entryValue = pending.value;
+            const entryType = pending.suggested_category_flow || 'despesa';
+
+            const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
+            const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para ${pending.action_expected === 'awaiting_category_reply' ? 'selecionar uma nova categoria' : 'decidir sobre a categoria'} para o lançamento de *${formattedValue}* expirou.`;
+            
+            if (pending.expense_id || pending.revenue_id) {
+                const existingEntry = pending.expense || pending.revenue;
+                if (existingEntry) {
+                    let defaultCategory = await Category.findOne({
+                        where: {
+                            profile_id: pending.profile_id,
+                            category_flow: pending.suggested_category_flow,
+                            name: pending.suggested_category_flow === 'expense' ? 'Outros' : 'Receita Padrão'
+                        }
+                    });
+
+                    if (defaultCategory) {
+                        await existingEntry.update({ category_id: defaultCategory.id });
+                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} O item foi categorizado como: *${defaultCategory.name}*.`);
+                    } else {
+                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} Não foi possível categorizar automaticamente.`);
+                    }
+                }
+            } else {
+                await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
+            }
+            
+            await pending.destroy();
+        }
+        
+        await PendingExpense.destroy({ 
+            where: { 
+                action_expected: { 
+                    [Op.in]: [
+                        'awaiting_context', 
+                        'awaiting_ai_analysis_complete', 
+                        'awaiting_credit_card_choice', 
+                        'awaiting_installment_count', 
+                        'awaiting_new_card_name', 
+                        'awaiting_new_card_closing_day', 
+                        'awaiting_new_card_due_day', 
+                        'awaiting_card_creation_confirmation'
+                    ] 
+                }, 
+                expires_at: { [Op.lte]: now } 
+            } 
+        });
+
+    } catch (error) {
+        console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
+    }
+  }
+
   async _findUserByFlexiblePhone(phone) {
     if (!phone) return null;
     const variations = new Set([phone]);
@@ -509,7 +594,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     if (buttonId.startsWith('card_')) {
         return this.handleCreditCardButtonResponse(payload);
     }
-
+    
     if (buttonId.startsWith('select_card_')) {
         return this.handleCardSelectionButton(payload);
     }
@@ -1492,94 +1577,5 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       }
   }
 }
-
-const runPendingExpenseWorker = async () => {
-    const now = new Date();
-    try {
-        await PendingExpense.destroy({ 
-            where: { 
-                action_expected: 'awaiting_validation', 
-                expires_at: { [Op.lte]: now } 
-            } 
-        });
-        
-        const expiredCategoryActions = await PendingExpense.findAll({ 
-            where: { 
-                action_expected: { 
-                    [Op.in]: [
-                        'awaiting_category_reply', 
-                        'awaiting_new_category_decision', 
-                        'awaiting_new_category_type', 
-                        'awaiting_category_flow_decision', 
-                        'awaiting_new_category_goal'
-                    ] 
-                }, 
-                expires_at: { [Op.lte]: now } 
-            }, 
-            include: [
-                { model: Category, as: 'suggestedCategory' }, 
-                { model: Expense, as: 'expense' },
-                { model: Revenue, as: 'revenue' }
-            ] 
-        });
-
-        for (const pending of expiredCategoryActions) {
-            const entryValue = pending.value;
-            const entryType = pending.suggested_category_flow || 'despesa';
-            const originalCategoryName = pending.suggested_new_category_name || 'N/A';
-
-            const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
-            const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para ${pending.action_expected === 'awaiting_category_reply' ? 'selecionar uma nova categoria' : 'decidir sobre a categoria'} para o lançamento de *${formattedValue}* expirou.`;
-            
-            if (pending.expense_id || pending.revenue_id) {
-                const existingEntry = pending.expense || pending.revenue;
-                if (existingEntry) {
-                    let defaultCategory = await Category.findOne({
-                        where: {
-                            profile_id: pending.profile_id,
-                            category_flow: pending.suggested_category_flow,
-                            name: pending.suggested_category_flow === 'expense' ? 'Outros' : 'Receita Padrão'
-                        }
-                    });
-
-                    if (defaultCategory) {
-                        await existingEntry.update({ category_id: defaultCategory.id });
-                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} O item foi categorizado como: *${defaultCategory.name}*.`);
-                    } else {
-                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} Não foi possível categorizar automaticamente. Por favor, adicione a categoria manualmente.`);
-                    }
-                }
-            } else {
-                await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
-            }
-            
-            await pending.destroy();
-        }
-        
-        await PendingExpense.destroy({ 
-            where: { 
-                action_expected: { 
-                    [Op.in]: [
-                        'awaiting_context', 
-                        'awaiting_ai_analysis_complete', 
-                        'awaiting_credit_card_choice', 
-                        'awaiting_installment_count', 
-                        'awaiting_new_card_name', 
-                        'awaiting_new_card_closing_day', 
-                        'awaiting_new_card_due_day', 
-                        'awaiting_card_creation_confirmation'
-                    ] 
-                }, 
-                expires_at: { [Op.lte]: now } 
-            } 
-        });
-
-    } catch (error) {
-        console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
-    }
-};
-
-WebhookService.runPendingExpenseWorker = runPendingExpenseWorker;
-
 
 module.exports = new WebhookService();

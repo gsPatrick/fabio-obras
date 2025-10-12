@@ -164,22 +164,25 @@ class App {
   }
 
   startPendingExpenseWorker() {
-    // <<< CORREÇÃO AQUI: Adicionar 'Revenue' à desestruturação >>>
+    // <<< CORREÇÃO: Removido 'Revenue' da desestruturação pois já está no escopo do 'db' >>>
     const { PendingExpense, Expense, Category, Revenue } = db; 
     const whatsappService = require('./utils/whatsappService');
     const runWorker = async () => {
       const now = new Date();
       try {
-        await PendingExpense.destroy({ where: { status: 'awaiting_validation', expires_at: { [Op.lte]: now } } });
+        // <<< INÍCIO DA CORREÇÃO: Substituir 'status' por 'action_expected' >>>
+        await PendingExpense.destroy({ where: { action_expected: 'awaiting_validation', expires_at: { [Op.lte]: now } } });
         
         const expiredReplies = await PendingExpense.findAll({ 
-            where: { status: 'awaiting_category_reply', expires_at: { [Op.lte]: now } }, 
+            where: { action_expected: 'awaiting_category_reply', expires_at: { [Op.lte]: now } }, 
             include: [
                 { model: Category, as: 'suggestedCategory' }, 
                 { model: Expense, as: 'expense' },
                 { model: Revenue, as: 'revenue' }
             ] 
         });
+        // <<< FIM DA CORREÇÃO >>>
+
         for (const pending of expiredReplies) {
           const entryValue = pending.expense ? pending.expense.value : pending.revenue ? pending.revenue.value : 0;
           const entryType = pending.expense ? 'despesa' : 'receita';
@@ -191,7 +194,29 @@ class App {
           await pending.destroy();
         }
         
-        await PendingExpense.destroy({ where: { status: { [Op.in]: ['awaiting_context', 'awaiting_ai_analysis', 'awaiting_context_analysis_complete', 'awaiting_new_category_decision', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal', 'awaiting_credit_card_choice', 'awaiting_installment_count', 'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'] }, expires_at: { [Op.lte]: now } } });
+        // <<< INÍCIO DA CORREÇÃO: Substituir 'status' por 'action_expected' e atualizar a lista de estados >>>
+        await PendingExpense.destroy({ 
+            where: { 
+                action_expected: { 
+                    [Op.in]: [
+                        'awaiting_context', 
+                        'awaiting_ai_analysis_complete', 
+                        'awaiting_new_category_decision', 
+                        'awaiting_new_category_type', 
+                        'awaiting_category_flow_decision', 
+                        'awaiting_new_category_goal', 
+                        'awaiting_credit_card_choice', 
+                        'awaiting_installment_count', 
+                        'awaiting_new_card_name', 
+                        'awaiting_new_card_closing_day', 
+                        'awaiting_new_card_due_day', 
+                        'awaiting_card_creation_confirmation'
+                    ] 
+                }, 
+                expires_at: { [Op.lte]: now } 
+            } 
+        });
+        // <<< FIM DA CORREÇÃO >>>
 
       } catch (error) {
         console.error('[WORKER] ❌ Erro ao processar despesas pendentes:', error);

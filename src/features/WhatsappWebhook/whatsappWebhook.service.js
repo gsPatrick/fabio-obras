@@ -752,9 +752,16 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     if (textMessage && textMessage.toLowerCase().trim() === MENU_COMMAND) {
         return this.sendMainMenu(groupId);
     }
+    
+    // <<< INÍCIO DA CORREÇÃO: Mover a checagem de resposta numérica para cima >>>
+    if (textMessage && /^\d+$/.test(textMessage)) {
+        // A função handleNumericReply retorna true se conseguiu lidar com o número, ou false se não encontrou um fluxo pendente.
+        const handled = await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone, profileId);
+        // Se foi tratado (era uma resposta para uma lista), interrompe o processamento aqui.
+        if (handled) return;
+    }
+    // <<< FIM DA CORREÇÃO >>>
 
-    // === MUDANÇAS AQUI ===
-    // Agora o pendingFlow é encontrado pelo 'action_expected'
     const pendingFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
@@ -785,7 +792,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
           participant_phone: participantPhone, 
           whatsapp_group_id: groupId, 
           profile_id: profileId, 
-          action_expected: 'awaiting_context', // NOVO CAMPO
+          action_expected: 'awaiting_context',
           expires_at: { [Op.gt]: new Date() } 
       },
       order: [['createdAt', 'DESC']]
@@ -814,16 +821,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       if (mediaBuffer && userContext) {
         const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, pendingMedia.profile_id);
         if (analysisResult) {
-          // === MUDANÇAS AQUI ===
-          // Em vez de salvar em temp_ai_parsed_*, passamos os dados diretamente ou armazenamos
-          // no PendingExpense de forma mais genérica para o próximo passo.
-          // Para simplificar, vou usar campos existentes do PendingExpense para guardar
-          // os resultados da análise da IA temporariamente, se o fluxo precisar.
-          // Se não precisar de um PendingExpense intermediário com dados da IA,
-          // podemos ir direto para decideAndSaveExpenseOrRevenue
-          
-          // Neste fluxo, o PendingExpense é mais um "token" do que um container de dados.
-          // A função decideAndSaveExpenseOrRevenue receberá o analysisResult diretamente.
           return this.decideAndSaveExpenseOrRevenue(pendingMedia, analysisResult, userContext);
         } else {
           await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui analisar o documento e o texto/áudio. Tente enviar novamente.`);
@@ -844,35 +841,26 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         }
 
         if (userContext) {
-            // === MUDANÇAS AQUI ===
-            // Limpa PendingExpenses antigos para este participant/group/profile
             await PendingExpense.destroy({ 
                 where: { 
                     participant_phone: participantPhone, 
                     whatsapp_group_id: groupId, 
                     profile_id: profileId,
-                    // Remove condição de status
                 } 
             });
 
-            // Cria um novo PendingExpense para o contexto atual
             const tempPending = await PendingExpense.create({
                 whatsapp_message_id: payload.messageId,
                 whatsapp_group_id: groupId,
                 participant_phone: participantPhone,
                 profile_id: profileId,
-                action_expected: 'awaiting_ai_analysis_complete', // NOVO CAMPO
+                action_expected: 'awaiting_ai_analysis_complete',
                 expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
             });
 
             const analysisResult = await aiService.analyzeTextForExpenseOrRevenue(userContext, profileId);
             
             if (analysisResult && (analysisResult.value !== null || (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay))) {
-                // === MUDANÇAS AQUI ===
-                // Para o fluxo de criação de cartão, precisamos persistir os dados da IA
-                // Reutilizando suggested_new_category_name para cardName
-                // Reutilizando value para closingDay
-                // Reutilizando description para dueDay
                 if (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay && analysisResult.value === null) {
                     tempPending.suggested_new_category_name = analysisResult.cardName;
                     tempPending.value = analysisResult.closingDay;
@@ -899,19 +887,14 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
         } else {
             await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o áudio/texto. Por favor, tente novamente.`);
-            // === MUDANÇAS AQUI ===
-            // Remoção da query de destruição por messageId, já que o PendingExpense pode ser antigo
             await PendingExpense.destroy({ 
                 where: { 
                     participant_phone: participantPhone, 
                     whatsapp_group_id: groupId, 
                     profile_id: profileId,
-                    // Remove condição de status
                 } 
             });
         }
-    } else if (textMessage && /^\d+$/.test(textMessage)) {
-        await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone, profileId);
     }
   }
 
@@ -1446,7 +1429,10 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
     });
 
-    if (!pendingExpense) { logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada.`); return false; }
+    if (!pendingExpense) { 
+        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada porque não há fluxo de resposta de categoria pendente.`);
+        return false; // <<< CORREÇÃO: Retorna false para indicar que não foi tratado.
+    }
     
     const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : null);
 
@@ -1600,18 +1586,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
   }
 }
 
-// === INÍCIO DA CORREÇÃO ===
-// Adaptando o worker para usar 'action_expected' em vez de 'status'
-// E reutilizando 'value' e 'description' do pendingExpense para dados temporários
-
-// As constantes já foram importadas no topo do arquivo.
-// A linha duplicada abaixo foi removida.
-// const { PendingExpense, Expense, Category, Revenue } = require('../../models'); 
-
-// O whatsappService já foi importado no topo do arquivo.
-// A linha duplicada abaixo foi removida.
-// const whatsappService = require('../../utils/whatsappService');
-
 // Worker para limpar PendingExpenses expirados
 const runPendingExpenseWorker = async () => {
     const now = new Date();
@@ -1704,7 +1678,6 @@ const runPendingExpenseWorker = async () => {
         console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
     }
 };
-// === FIM DA CORREÇÃO ===
 
 // Exporta o worker para ser iniciado em app.js
 WebhookService.runPendingExpenseWorker = runPendingExpenseWorker;

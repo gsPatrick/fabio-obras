@@ -181,7 +181,7 @@ class AIService {
       Regras CRÍTICAS:
       1.  **Valor:** Extraia o valor monetário principal. Se o contexto indicar "salário" ou "recebimento", o valor é positivo. Se for "pagamento", "compra", "gasto", é uma despesa.
       2.  **Flow:** Determine se é 'expense' (despesa) ou 'revenue' (receita) com base na imagem e no contexto. Priorize 'expense' para documentos de compra/gasto.
-      3.  **CategoryName:** DEVE ser uma das categorias de DESPESA existentes: [${expenseCategoryList}] OU uma das categorias de RECEITA existentes: [${revenueCategoryList}]. Use "Outros" para despesas ou "Receita Padrão" para receitas se não houver mapeamento claro.
+      3.  **CategoryName:** Sua prioridade é mapear para uma categoria existente. DESPESAS: [${expenseCategoryList}]. RECEITAS: [${revenueCategoryList}]. SE a descrição indicar um nome de categoria que não está na lista (ex: "gasolina", "mercado"), use esse nome como 'categoryName'. Caso contrário, se não houver mapeamento claro, use "Outros" para despesas ou "Receita Padrão" para receitas.
       4.  **isInstallment:** Se a despesa for parcelada (ex: "3x", "parcelado", "prestação"), defina como true.
       5.  **installmentCount:** Se for parcelado, extraia o número total de parcelas (ex: "3" de "3x").
       6.  **cardName:** Se a despesa for de cartão de crédito, identifique o nome do cartão entre as opções: [${creditCardNames}].
@@ -246,7 +246,7 @@ class AIService {
       2.  **Lançamento de Despesa/Receita:**
           *   **Valor:** O valor é obrigatório para lançamentos. Extraia o valor monetário. Se o texto indicar "salário", "recebi", "entrada", o "flow" é 'revenue'. Se for "paguei", "gastei", "comprei", "despesa", o "flow" é 'expense'.
           *   **Flow:** Determine 'expense' ou 'revenue' com base nas palavras-chave e no contexto. Priorize 'expense' se não for claro.
-          *   **CategoryName:** DEVE ser uma das categorias de DESPESA existentes: [${expenseCategoryList}] OU uma das categorias de RECEITA existentes: [${revenueCategoryList}]. Use "Outros" para despesas ou "Receita Padrão" para receitas se não houver mapeamento claro.
+          *   **CategoryName:** Sua prioridade é mapear para uma categoria existente. DESPESAS: [${expenseCategoryList}]. RECEITAS: [${revenueCategoryList}]. SE a descrição indicar um nome de categoria que não está na lista (ex: "gasolina", "mercado"), use esse nome como 'categoryName'. Caso contrário, se não houver mapeamento claro, use "Outros" para despesas ou "Receita Padrão" para receitas.
           *   **isInstallment:** Se a despesa for parcelada (ex: "3x", "parcelado"), defina como true.
           *   **installmentCount:** Se for parcelado, extraia o número total de parcelas (ex: "3" de "3x"). Se não indicado mas "parcelado", use 2.
           *   **cardName:** Se o texto mencionar um cartão de crédito, identifique o nome do cartão entre as opções: [${creditCardNames}].
@@ -282,9 +282,6 @@ class AIService {
 
   // MODIFICADO: _validateAnalysisResult para CategoryFlow e CardName
   _validateAnalysisResult(result, categories) {
-    const defaultExpenseCategory = 'Outros';
-    const defaultRevenueCategory = 'Receita Padrão';
-    
     // Garante que 'flow' seja 'expense' ou 'revenue' se houver valor, ou null se não for lançamento
     if (result.value !== null) { // Só valida flow se houver um valor a ser lançado
         if (!result.flow || !['expense', 'revenue'].includes(result.flow)) {
@@ -303,12 +300,10 @@ class AIService {
             c.name.toLowerCase() === result.categoryName.toLowerCase() && c.category_flow === result.flow
         );
 
-        if (!validCategory) {
-          const defaultCategoryName = result.flow === 'expense' ? defaultExpenseCategory : defaultRevenueCategory;
-          logger.warn(`[AIService] IA sugeriu categoria inválida/vazia ('${result.categoryName}') para o fluxo '${result.flow}'. Usando '${defaultCategoryName}'.`);
-          result.categoryName = defaultCategoryName;
-        } else {
-            result.categoryName = validCategory.name; // Garante o casing correto da categoria existente
+        // Se uma categoria válida for encontrada, garante o casing correto.
+        // Se não for encontrada, MANTÉM o nome sugerido pela IA para que o fluxo de criação seja acionado.
+        if (validCategory) {
+            result.categoryName = validCategory.name;
         }
     } else {
         result.categoryName = null; // Garante que categoryName é null se não é lançamento

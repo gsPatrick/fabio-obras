@@ -13,8 +13,6 @@ const cookieParser = require('cookie-parser');
 const db = require('./models');
 const mainRouter = require('./routes');
 const { Op } = require('sequelize');
-// <<< MUDANÇA: Importar a classe, não a instância >>>
-const WebhookService = require('./features/WhatsappWebhook/whatsappWebhook.service'); 
 
 class App {
   constructor() {
@@ -50,7 +48,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: true});
+      await db.sequelize.sync({ force: false});
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser();
     } catch (error) {
@@ -59,15 +57,11 @@ class App {
     }
   }
   
-  // <<< INÍCIO DA MUDANÇA: Seeder agora associa o grupo de teste >>>
   async seedAdminUser() {
-    const { User, Profile, MonitoredGroup } = db;
+    const { User, Profile } = db;
     const adminEmail = 'fabio@gmail.com'; 
     const adminPassword = 'Fabio123'; 
-    const adminWhatsappPhone = '5571983141335';
-    const testGroupId = process.env.ZAPI_GROUP_ID || '120363422133729566@g.us'; // Pega do .env ou usa um padrão
-    const testGroupName = 'Grupo de Teste Admin';
-
+    const adminWhatsappPhone = '5571983141335';  
     console.log('[SEEDER] Verificando usuário administrador...');
     
     try {
@@ -105,33 +99,8 @@ class App {
             await this.seedEssentialCategoriesForNewProfile(profile.id);
             await this.seedAdminSpecificCategories(profile.id);
         }
-
-        // Nova lógica para garantir que o grupo de teste está monitorado
-        if (testGroupId) {
-            console.log(`[SEEDER] Verificando monitoramento do grupo de teste: ${testGroupId}`);
-            const [monitoredGroup, created] = await MonitoredGroup.findOrCreate({
-                where: { group_id: testGroupId, profile_id: profile.id },
-                defaults: {
-                    name: testGroupName,
-                    is_active: true,
-                    profile_id: profile.id
-                }
-            });
-
-            if (created) {
-                console.log(`[SEEDER] Grupo '${testGroupName}' adicionado ao monitoramento.`);
-            } else {
-                if (!monitoredGroup.is_active) {
-                    await monitoredGroup.update({ is_active: true, name: testGroupName });
-                    console.log(`[SEEDER] Monitoramento do grupo '${testGroupName}' foi reativado.`);
-                } else {
-                    console.log(`[SEEDER] Grupo '${testGroupName}' já está sendo monitorado ativamente.`);
-                }
-            }
-        }
-        // <<< FIM DA MUDANÇA >>>
     } catch (error) {
-        console.error('[SEEDER] ❌ Falha ao verificar ou criar o usuário/perfil/grupo administrador:', error);
+        console.error('[SEEDER] ❌ Falha ao verificar ou criar o usuário/perfil administrador:', error);
     }
   }
 
@@ -194,11 +163,67 @@ class App {
     console.log('[SEEDER] Categorias específicas do administrador verificadas.');
   }
 
-  // <<< MUDANÇA: Chamar o método estático da classe >>>
   startPendingExpenseWorker() {
-    setInterval(() => WebhookService.runPendingExpenseWorker(), 30000); 
+    // <<< CORREÇÃO: Removido 'Revenue' da desestruturação pois já está no escopo do 'db' >>>
+    const { PendingExpense, Expense, Category, Revenue } = db; 
+    const whatsappService = require('./utils/whatsappService');
+    const runWorker = async () => {
+      const now = new Date();
+      try {
+        // <<< INÍCIO DA CORREÇÃO: Substituir 'status' por 'action_expected' >>>
+        await PendingExpense.destroy({ where: { action_expected: 'awaiting_validation', expires_at: { [Op.lte]: now } } });
+        
+        const expiredReplies = await PendingExpense.findAll({ 
+            where: { action_expected: 'awaiting_category_reply', expires_at: { [Op.lte]: now } }, 
+            include: [
+                { model: Category, as: 'suggestedCategory' }, 
+                { model: Expense, as: 'expense' },
+                { model: Revenue, as: 'revenue' }
+            ] 
+        });
+        // <<< FIM DA CORREÇÃO >>>
+
+        for (const pending of expiredReplies) {
+          const entryValue = pending.expense ? pending.expense.value : pending.revenue ? pending.revenue.value : 0;
+          const entryType = pending.expense ? 'despesa' : 'receita';
+          const originalCategoryName = pending.suggestedCategory?.name || 'N/A';
+
+          const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
+          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria para a ${entryType} de *${formattedValue}* expirou. O item foi mantido com a categoria original: *${originalCategoryName}*.`;
+          await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
+          await pending.destroy();
+        }
+        
+        // <<< INÍCIO DA CORREÇÃO: Substituir 'status' por 'action_expected' e atualizar a lista de estados >>>
+        await PendingExpense.destroy({ 
+            where: { 
+                action_expected: { 
+                    [Op.in]: [
+                        'awaiting_context', 
+                        'awaiting_ai_analysis_complete', 
+                        'awaiting_new_category_decision', 
+                        'awaiting_new_category_type', 
+                        'awaiting_category_flow_decision', 
+                        'awaiting_new_category_goal', 
+                        'awaiting_credit_card_choice', 
+                        'awaiting_installment_count', 
+                        'awaiting_new_card_name', 
+                        'awaiting_new_card_closing_day', 
+                        'awaiting_new_card_due_day', 
+                        'awaiting_card_creation_confirmation'
+                    ] 
+                }, 
+                expires_at: { [Op.lte]: now } 
+            } 
+        });
+        // <<< FIM DA CORREÇÃO >>>
+
+      } catch (error) {
+        console.error('[WORKER] ❌ Erro ao processar despesas pendentes:', error);
+      }
+    };
+    setInterval(runWorker, 30000); 
   }
-  // <<< FIM DA MUDANÇA >>>
 
   startOnboardingWorker() {
     const { OnboardingState } = db;

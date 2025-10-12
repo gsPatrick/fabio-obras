@@ -1600,11 +1600,17 @@ Acesse em: https://obras-fabio.vercel.app/login`;
   }
 }
 
-// === MUDANÇAS AQUI ===
+// === INÍCIO DA CORREÇÃO ===
 // Adaptando o worker para usar 'action_expected' em vez de 'status'
 // E reutilizando 'value' e 'description' do pendingExpense para dados temporários
-const { PendingExpense, Expense, Category, Revenue } = require('../../models'); 
-const whatsappService = require('../../utils/whatsappService'); // Garante que o whatsappService esteja disponível
+
+// As constantes já foram importadas no topo do arquivo.
+// A linha duplicada abaixo foi removida.
+// const { PendingExpense, Expense, Category, Revenue } = require('../../models'); 
+
+// O whatsappService já foi importado no topo do arquivo.
+// A linha duplicada abaixo foi removida.
+// const whatsappService = require('../../utils/whatsappService');
 
 // Worker para limpar PendingExpenses expirados
 const runPendingExpenseWorker = async () => {
@@ -1698,6 +1704,7 @@ const runPendingExpenseWorker = async () => {
         console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
     }
 };
+// === FIM DA CORREÇÃO ===
 
 // Exporta o worker para ser iniciado em app.js
 WebhookService.runPendingExpenseWorker = runPendingExpenseWorker;

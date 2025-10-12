@@ -134,10 +134,10 @@ class WebhookService {
     }
   }
   
+  // <<< INÍCIO DA MUDANÇA: Menu principal ajustado >>>
   async sendMainMenu(groupId) {
-    const message = `Olá! O que você gostaria de fazer?`;
+    const message = `Olá! Escolha uma das opções abaixo:`;
     const buttons = [
-        { id: 'menu_create_expense_revenue', label: '💸 Lançar Despesa/Receita' },
         { id: 'menu_view_report', label: '📊 Ver Relatório Mensal' },
         { id: 'menu_export_excel', label: '📝 Exportar Planilha' },
         { id: 'menu_create_category', label: '➕ Criar Categoria' },
@@ -146,6 +146,7 @@ class WebhookService {
     await whatsappService.sendButtonList(groupId, message, buttons);
     logger.info(`[Webhook] Menu principal enviado para ${groupId}.`);
   }
+  // <<< FIM DA MUDANÇA >>>
 
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
@@ -475,13 +476,12 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
     if (buttonId.startsWith('menu_')) {
         const action = buttonId.split('_')[1];
-        if (action === 'create_expense_revenue') {
-             await whatsappService.sendWhatsappMessage(groupId, `Ok! Por favor, me envie a despesa ou receita.\n\nVocê pode mandar o texto (ex: "R$ 500 Aluguel", ou "Salário 3000"), um áudio ou um comprovante.`);
-        } else if (action === 'view_report') {
+        // <<< MUDANÇA: Ação 'create' removida, pois o fluxo principal é enviar mensagem direta >>>
+        if (action === 'view') { // O ID agora é 'menu_view_report'
             await this.sendSpendingReport(groupId, payload.participantPhone, profileId);
-        } else if (action === 'export_excel') {
+        } else if (action === 'export') { // O ID agora é 'menu_export_excel'
             await this.sendExpensesExcelReport(groupId, payload.participantPhone, profileId);
-        } else if (action === 'create_category') {
+        } else if (action === 'create') { // O ID agora é 'menu_create_category'
              const pending = await PendingExpense.create({ 
                 whatsapp_message_id: payload.messageId + '_menu_cat',
                 whatsapp_group_id: groupId,
@@ -491,7 +491,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
                 expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
              });
              await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Salário")');
-        } else if (action === 'manage_cards') {
+        } else if (action === 'manage') { // O ID agora é 'menu_manage_cards'
             return this.handleManageCardsAction(groupId, payload.participantPhone, profileId, payload.messageId);
         }
         return;
@@ -525,6 +525,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     }
   }
 
+  // <<< INÍCIO DA CORREÇÃO: Lógica de gerenciamento de cartões >>>
   async handleManageCardsAction(groupId, participantPhone, profileId, messageId) {
     const cards = await creditCardService.getAllCreditCards(profileId);
     let message = '💳 *Gerenciar Cartões de Crédito*\n\n';
@@ -546,6 +547,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     await whatsappService.sendButtonList(groupId, message, buttons);
     logger.info(`[Webhook] Menu de gerenciamento de cartões enviado para ${groupId}.`);
   }
+  // <<< FIM DA CORREÇÃO >>>
 
   async handleCreditCardButtonResponse(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
@@ -608,9 +610,11 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         if (pending) await pending.destroy();
         await whatsappService.sendWhatsappMessage(groupId, `Criação de cartão cancelada.`);
         await this.sendMainMenu(groupId);
+    // <<< INÍCIO DA ADIÇÃO: Lidar com o botão de voltar ao menu >>>
     } else if (buttonId.startsWith('menu_back_to_main_')) {
         return this.sendMainMenu(groupId);
     }
+    // <<< FIM DA ADIÇÃO >>>
   }
 
   async handleCreditCardCreationFlowFromPending(payload, pending) {

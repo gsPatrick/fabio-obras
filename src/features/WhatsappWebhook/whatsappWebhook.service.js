@@ -24,91 +24,6 @@ const MENU_COMMAND = 'MENU';
 
 class WebhookService {
 
-  static async runPendingExpenseWorker() {
-    const now = new Date();
-    try {
-        await PendingExpense.destroy({ 
-            where: { 
-                action_expected: 'awaiting_validation', 
-                expires_at: { [Op.lte]: now } 
-            } 
-        });
-        
-        const expiredCategoryActions = await PendingExpense.findAll({ 
-            where: { 
-                action_expected: { 
-                    [Op.in]: [
-                        'awaiting_category_reply', 
-                        'awaiting_new_category_decision', 
-                        'awaiting_new_category_type', 
-                        'awaiting_category_flow_decision', 
-                        'awaiting_new_category_goal'
-                    ] 
-                }, 
-                expires_at: { [Op.lte]: now } 
-            }, 
-            include: [
-                { model: Category, as: 'suggestedCategory' }, 
-                { model: Expense, as: 'expense' },
-                { model: Revenue, as: 'revenue' }
-            ] 
-        });
-
-        for (const pending of expiredCategoryActions) {
-            const entryValue = pending.value;
-            const entryType = pending.suggested_category_flow || 'despesa';
-
-            const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
-            const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para ${pending.action_expected === 'awaiting_category_reply' ? 'selecionar uma nova categoria' : 'decidir sobre a categoria'} para o lançamento de *${formattedValue}* expirou.`;
-            
-            if (pending.expense_id || pending.revenue_id) {
-                const existingEntry = pending.expense || pending.revenue;
-                if (existingEntry) {
-                    let defaultCategory = await Category.findOne({
-                        where: {
-                            profile_id: pending.profile_id,
-                            category_flow: pending.suggested_category_flow,
-                            name: pending.suggested_category_flow === 'expense' ? 'Outros' : 'Receita Padrão'
-                        }
-                    });
-
-                    if (defaultCategory) {
-                        await existingEntry.update({ category_id: defaultCategory.id });
-                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} O item foi categorizado como: *${defaultCategory.name}*.`);
-                    } else {
-                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} Não foi possível categorizar automaticamente.`);
-                    }
-                }
-            } else {
-                await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
-            }
-            
-            await pending.destroy();
-        }
-        
-        await PendingExpense.destroy({ 
-            where: { 
-                action_expected: { 
-                    [Op.in]: [
-                        'awaiting_context', 
-                        'awaiting_ai_analysis_complete', 
-                        'awaiting_credit_card_choice', 
-                        'awaiting_installment_count', 
-                        'awaiting_new_card_name', 
-                        'awaiting_new_card_closing_day', 
-                        'awaiting_new_card_due_day', 
-                        'awaiting_card_creation_confirmation'
-                    ] 
-                }, 
-                expires_at: { [Op.lte]: now } 
-            } 
-        });
-
-    } catch (error) {
-        console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
-    }
-  }
-
   async _findUserByFlexiblePhone(phone) {
     if (!phone) return null;
     const variations = new Set([phone]);
@@ -594,10 +509,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     if (buttonId.startsWith('card_')) {
         return this.handleCreditCardButtonResponse(payload);
     }
-    
-    if (buttonId.startsWith('select_card_')) {
-        return this.handleCardSelectionButton(payload);
-    }
 
     if (buttonId.startsWith('pending_generate_link_')) {
         const userId = buttonId.split('_')[3];
@@ -985,23 +896,18 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
             const creditCards = await creditCardService.getAllCreditCards(profileId);
             if (creditCards.length > 0) {
-                let message = `Essa despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* (${category.name}) foi no cartão?`;
-                if (cardName) {
-                    message = `A IA sugeriu o cartão *${cardName}* para a despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* (${category.name}). Confirma?`;
-                }
+                const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name} (final ${card.last_four_digits || 'N/A'})`).join('\n');
+                let cardMessage = `ℹ️ A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}* pode ser de cartão.\n\nSelecione o *número* do cartão para registrar ou responda *0* para registrar como dinheiro/débito.\n\n${cardListText}`;
                 
-                const buttons = creditCards.map(card => ({
-                    id: `select_card_${pendingData.id}_${card.id}`,
-                    label: `💳 ${card.name}`
-                }));
-
-                buttons.push({ id: `select_card_${pendingData.id}_0`, label: '✅ Usar Dinheiro/Outros' });
-                buttons.push({ id: `select_card_${pendingData.id}_cancel`, label: '❌ Cancelar' });
-
-                await whatsappService.sendButtonList(groupId, message, buttons);
-                logger.info(`[Webhook] Despesa de cartão/parcelada. Aguardando escolha via botões para pendência #${pendingData.id}.`);
+                if (cardName) {
+                    const suggestedCard = creditCards.find(c => c.name.toLowerCase() === cardName.toLowerCase());
+                    if (suggestedCard) {
+                        cardMessage = `ℹ️ A IA sugeriu o cartão *${suggestedCard.name}* para a despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}*.\n\nConfirma? Responda com o *número* do cartão ou *0* para dinheiro/débito.\n\n${cardListText}`;
+                    }
+                }
+                await whatsappService.sendWhatsappMessage(groupId, cardMessage);
+                logger.info(`[Webhook] Despesa de cartão/parcelada. Aguardando escolha de cartão para pendência #${pendingData.id}.`);
                 return;
-
             } else {
                 await whatsappService.sendWhatsappMessage(groupId, `ℹ️ Despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}*.\n\nNão há cartões de crédito cadastrados para este perfil. Será registrada como dinheiro/débito. ${isInstallment ? 'Para parcelar, você precisa de um cartão cadastrado.' : ''}`);
                 return this.createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, category.id, null);
@@ -1032,53 +938,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     ];
     await whatsappService.sendButtonList(groupId, message, buttons);
     logger.info(`[Webhook] Nova categoria "${categoryName}" sugerida. Aguardando decisão do usuário para pendência #${pendingData.id}.`);
-  }
-
-  async handleCardSelectionButton(payload) {
-    const buttonId = payload.buttonsResponseMessage.buttonId;
-    const parts = buttonId.split('_');
-    const pendingExpenseId = parts[2];
-    const selectedCardId = parts[3];
-    const groupId = payload.phone;
-    const profileId = payload.profileId;
-
-    const pendingExpense = await PendingExpense.findOne({
-      where: { id: pendingExpenseId, profile_id: profileId, action_expected: 'awaiting_credit_card_choice' },
-    });
-
-    if (!pendingExpense) {
-        await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou ou a ação já foi concluída.`);
-        return;
-    }
-
-    if (selectedCardId === 'cancel') {
-        await pendingExpense.destroy();
-        await whatsappService.sendWhatsappMessage(groupId, `Lançamento cancelado.`);
-        return;
-    }
-
-    const cardId = parseInt(selectedCardId, 10) === 0 ? null : parseInt(selectedCardId, 10);
-
-    const analysisResult = {
-        value: pendingExpense.value,
-        baseDescription: pendingExpense.description,
-        categoryName: pendingExpense.suggested_new_category_name,
-        flow: pendingExpense.suggested_category_flow,
-        isInstallment: !!pendingExpense.installment_count,
-        installmentCount: pendingExpense.installment_count,
-        cardName: null,
-    };
-    const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
-    const categoryId = pendingExpense.suggested_category_id;
-
-    if (cardId) {
-        const card = await CreditCard.findByPk(cardId);
-        await whatsappService.sendWhatsappMessage(groupId, `✅ Registrando no cartão *${card.name}*.`);
-    } else {
-        await whatsappService.sendWhatsappMessage(groupId, `✅ Registrando como dinheiro/débito.`);
-    }
-
-    await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, cardId);
   }
 
   async createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, categoryId, creditCardId = null) {
@@ -1414,12 +1273,99 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     }
   }
 
+
+  async handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId) {
+    const pendingExpense = await PendingExpense.findOne({
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_credit_card_choice' },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (!pendingExpense) { 
+        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} para cartão ignorada.`); 
+        return false; 
+    }
+
+    const analysisResult = {
+        value: pendingExpense.value,
+        baseDescription: pendingExpense.description,
+        categoryName: pendingExpense.suggested_new_category_name,
+        flow: pendingExpense.suggested_category_flow,
+        isInstallment: !!pendingExpense.installment_count,
+        installmentCount: pendingExpense.installment_count,
+        cardName: null,
+    };
+    const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+    const categoryId = pendingExpense.suggested_category_id;
+
+    if (selectedNumber === 0) {
+        await whatsappService.sendWhatsappMessage(groupId, `✅ Registrando como dinheiro/débito.`);
+        return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, null);
+    }
+
+    const creditCards = await creditCardService.getAllCreditCards(profileId);
+    const selectedCard = creditCards[selectedNumber - 1];
+
+    if (!selectedCard) {
+        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!* \n\nO número *${selectedNumber}* não corresponde a um cartão. Responda com um número da lista ou *0* para dinheiro/débito.`);
+        return true;
+    }
+
+    pendingExpense.credit_card_id = selectedCard.id;
+    if (analysisResult.isInstallment && analysisResult.installmentCount > 1) {
+        pendingExpense.action_expected = 'awaiting_installment_count';
+        await pendingExpense.save();
+        await whatsappService.sendWhatsappMessage(groupId, `Em quantas parcelas (total) esta despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(analysisResult.value)}* será feita no cartão *${selectedCard.name}*? (Responda apenas com o número, ex: 3)`);
+    } else {
+        return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, selectedCard.id);
+    }
+    return true;
+  }
+
+  async handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId) {
+    const pendingExpense = await PendingExpense.findOne({
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_installment_count' },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (!pendingExpense) { 
+        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} para parcelas ignorada.`); 
+        return false; 
+    }
+
+    const installmentCount = parseInt(selectedNumber, 10);
+    if (isNaN(installmentCount) || installmentCount <= 0 || installmentCount > 36) {
+        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Número de Parcelas Inválido!* \n\nPor favor, responda com um número de parcelas válido (entre 1 e 36).`);
+        return true;
+    }
+
+    const analysisResult = {
+        value: pendingExpense.value,
+        baseDescription: pendingExpense.description,
+        categoryName: pendingExpense.suggested_new_category_name,
+        flow: pendingExpense.suggested_category_flow,
+        isInstallment: true,
+        installmentCount: installmentCount,
+        cardName: null,
+    };
+    const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+    const categoryId = pendingExpense.suggested_category_id;
+    const creditCardId = pendingExpense.credit_card_id;
+
+    return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, creditCardId);
+  }
+
   async handleNumericReply(groupId, selectedNumber, participantPhone, profileId) {
     const pendingOnboarding = await OnboardingState.findOne({where: { group_id: groupId, initiator_phone: participantPhone, status: 'awaiting_profile_choice'}});
     if (pendingOnboarding) {
         return this.handleOnboardingResponse({phone: groupId, participantPhone, text: { message: selectedNumber.toString() }}, pendingOnboarding);
     }
-    
+
+    const isHandlingCreditCard = await this.handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId);
+    if (isHandlingCreditCard) return true;
+
+    const isHandlingInstallmentCount = await this.handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId);
+    if (isHandlingInstallmentCount) return true;
+
     const pendingExpense = await PendingExpense.findOne({
       where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_category_reply' },
       include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
@@ -1577,5 +1523,94 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       }
   }
 }
+
+const runPendingExpenseWorker = async () => {
+    const now = new Date();
+    try {
+        await PendingExpense.destroy({ 
+            where: { 
+                action_expected: 'awaiting_validation', 
+                expires_at: { [Op.lte]: now } 
+            } 
+        });
+        
+        const expiredCategoryActions = await PendingExpense.findAll({ 
+            where: { 
+                action_expected: { 
+                    [Op.in]: [
+                        'awaiting_category_reply', 
+                        'awaiting_new_category_decision', 
+                        'awaiting_new_category_type', 
+                        'awaiting_category_flow_decision', 
+                        'awaiting_new_category_goal'
+                    ] 
+                }, 
+                expires_at: { [Op.lte]: now } 
+            }, 
+            include: [
+                { model: Category, as: 'suggestedCategory' }, 
+                { model: Expense, as: 'expense' },
+                { model: Revenue, as: 'revenue' }
+            ] 
+        });
+
+        for (const pending of expiredCategoryActions) {
+            const entryValue = pending.value;
+            const entryType = pending.suggested_category_flow || 'despesa';
+            const originalCategoryName = pending.suggested_new_category_name || 'N/A';
+
+            const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
+            const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para ${pending.action_expected === 'awaiting_category_reply' ? 'selecionar uma nova categoria' : 'decidir sobre a categoria'} para o lançamento de *${formattedValue}* expirou.`;
+            
+            if (pending.expense_id || pending.revenue_id) {
+                const existingEntry = pending.expense || pending.revenue;
+                if (existingEntry) {
+                    let defaultCategory = await Category.findOne({
+                        where: {
+                            profile_id: pending.profile_id,
+                            category_flow: pending.suggested_category_flow,
+                            name: pending.suggested_category_flow === 'expense' ? 'Outros' : 'Receita Padrão'
+                        }
+                    });
+
+                    if (defaultCategory) {
+                        await existingEntry.update({ category_id: defaultCategory.id });
+                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} O item foi categorizado como: *${defaultCategory.name}*.`);
+                    } else {
+                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} Não foi possível categorizar automaticamente. Por favor, adicione a categoria manualmente.`);
+                    }
+                }
+            } else {
+                await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
+            }
+            
+            await pending.destroy();
+        }
+        
+        await PendingExpense.destroy({ 
+            where: { 
+                action_expected: { 
+                    [Op.in]: [
+                        'awaiting_context', 
+                        'awaiting_ai_analysis_complete', 
+                        'awaiting_credit_card_choice', 
+                        'awaiting_installment_count', 
+                        'awaiting_new_card_name', 
+                        'awaiting_new_card_closing_day', 
+                        'awaiting_new_card_due_day', 
+                        'awaiting_card_creation_confirmation'
+                    ] 
+                }, 
+                expires_at: { [Op.lte]: now } 
+            } 
+        });
+
+    } catch (error) {
+        console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
+    }
+};
+
+WebhookService.runPendingExpenseWorker = runPendingExpenseWorker;
+
 
 module.exports = new WebhookService();

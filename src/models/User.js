@@ -44,14 +44,13 @@ class User extends Model {
     return bcrypt.compare(password, this.password);
   }
 
-  // <<< INÍCIO DA CORREÇÃO >>>
   static associate(models) {
-    // 1:1 - Um Usuário tem uma Assinatura
-    this.hasOne(models.Subscription, { foreignKey: 'user_id', as: 'subscription' });
-    // 1:N - Um Usuário tem muitos Perfis
-    this.hasMany(models.Profile, { foreignKey: 'user_id', as: 'profiles' });
+    // <<< INÍCIO DA CORREÇÃO >>>
+    // Adicionar onDelete: 'CASCADE'
+    this.hasOne(models.Subscription, { foreignKey: 'user_id', as: 'subscription', onDelete: 'CASCADE' });
+    this.hasMany(models.Profile, { foreignKey: 'user_id', as: 'profiles', onDelete: 'CASCADE' });
+    // <<< FIM DA CORREÇÃO >>>
   }
-  // <<< FIM DA CORREÇÃO >>>
 }
 
 module.exports = User;

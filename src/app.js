@@ -13,6 +13,7 @@ const cookieParser = require('cookie-parser');
 const db = require('./models');
 const mainRouter = require('./routes');
 const { Op } = require('sequelize');
+const webhookService = require('./features/WhatsappWebhook/whatsappWebhook.service'); // Importar o serviço
 
 class App {
   constructor() {
@@ -21,7 +22,7 @@ class App {
     this.middlewares();
     this.routes();
     this.exposeModels();
-    this.startPendingExpenseWorker();
+    this.startPendingExpenseWorker(); // Esta função agora vai usar o novo worker
     this.startOnboardingWorker();
   }
 
@@ -48,7 +49,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: false});
+      await db.sequelize.sync({ force: true});
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser();
     } catch (error) {
@@ -163,67 +164,11 @@ class App {
     console.log('[SEEDER] Categorias específicas do administrador verificadas.');
   }
 
+  // <<< MUDANÇA: Usar o worker do webhookService >>>
   startPendingExpenseWorker() {
-    // <<< CORREÇÃO: Removido 'Revenue' da desestruturação pois já está no escopo do 'db' >>>
-    const { PendingExpense, Expense, Category, Revenue } = db; 
-    const whatsappService = require('./utils/whatsappService');
-    const runWorker = async () => {
-      const now = new Date();
-      try {
-        // <<< INÍCIO DA CORREÇÃO: Substituir 'status' por 'action_expected' >>>
-        await PendingExpense.destroy({ where: { action_expected: 'awaiting_validation', expires_at: { [Op.lte]: now } } });
-        
-        const expiredReplies = await PendingExpense.findAll({ 
-            where: { action_expected: 'awaiting_category_reply', expires_at: { [Op.lte]: now } }, 
-            include: [
-                { model: Category, as: 'suggestedCategory' }, 
-                { model: Expense, as: 'expense' },
-                { model: Revenue, as: 'revenue' }
-            ] 
-        });
-        // <<< FIM DA CORREÇÃO >>>
-
-        for (const pending of expiredReplies) {
-          const entryValue = pending.expense ? pending.expense.value : pending.revenue ? pending.revenue.value : 0;
-          const entryType = pending.expense ? 'despesa' : 'receita';
-          const originalCategoryName = pending.suggestedCategory?.name || 'N/A';
-
-          const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
-          const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para selecionar uma nova categoria para a ${entryType} de *${formattedValue}* expirou. O item foi mantido com a categoria original: *${originalCategoryName}*.`;
-          await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
-          await pending.destroy();
-        }
-        
-        // <<< INÍCIO DA CORREÇÃO: Substituir 'status' por 'action_expected' e atualizar a lista de estados >>>
-        await PendingExpense.destroy({ 
-            where: { 
-                action_expected: { 
-                    [Op.in]: [
-                        'awaiting_context', 
-                        'awaiting_ai_analysis_complete', 
-                        'awaiting_new_category_decision', 
-                        'awaiting_new_category_type', 
-                        'awaiting_category_flow_decision', 
-                        'awaiting_new_category_goal', 
-                        'awaiting_credit_card_choice', 
-                        'awaiting_installment_count', 
-                        'awaiting_new_card_name', 
-                        'awaiting_new_card_closing_day', 
-                        'awaiting_new_card_due_day', 
-                        'awaiting_card_creation_confirmation'
-                    ] 
-                }, 
-                expires_at: { [Op.lte]: now } 
-            } 
-        });
-        // <<< FIM DA CORREÇÃO >>>
-
-      } catch (error) {
-        console.error('[WORKER] ❌ Erro ao processar despesas pendentes:', error);
-      }
-    };
-    setInterval(runWorker, 30000); 
+    setInterval(webhookService.runPendingExpenseWorker, 30000); 
   }
+  // <<< FIM DA MUDANÇA >>>
 
   startOnboardingWorker() {
     const { OnboardingState } = db;

@@ -1104,7 +1104,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     logger.info(`[Webhook] ${category.category_flow === 'expense' ? 'Despesa' : 'Receita'} #${createdEntry.id} salva e fluxo de edição iniciado para ${pendingData.participant_phone}.`);
   }
 
-  // <<< INÍCIO DA CORREÇÃO >>>
   async handleNewCategoryDecisionFlow(payload) {
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const parts = buttonId.split('_');
@@ -1174,7 +1173,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense);
     }
   }
-  // <<< FIM DA CORREÇÃO >>>
 
   async finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense, goalValue = 0) {
     const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;

@@ -122,7 +122,7 @@ class WebhookService {
     }
     
     if (payload.text?.message?.toUpperCase().trim() === MENU_COMMAND) {
-        return this.sendMainMenu(payload.phone, payload.participantPhone, payload.profileId);
+        return this.sendMainMenu(payload.phone);
     }
 
     if (payload.image || payload.document) { 
@@ -134,12 +134,7 @@ class WebhookService {
     }
   }
   
-  async sendMainMenu(groupId, participantPhone, profileId) {
-    // <<< MUDANÇA >>> Limpa qualquer estado pendente do usuário ao chamar o menu principal.
-    if (participantPhone && profileId) {
-        await PendingExpense.destroy({ where: { participant_phone: participantPhone, profile_id: profileId, whatsapp_group_id: groupId } });
-        logger.info(`[Webhook] Estados pendentes limpos para ${participantPhone} ao chamar o menu.`);
-    }
+  async sendMainMenu(groupId) {
     const message = `Olá! Escolha uma das opções abaixo:`;
     const buttons = [
         { id: 'menu_view_report', label: '📊 Ver Relatório Mensal' },
@@ -475,32 +470,26 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     if (payload.fromMe) return;
     const buttonId = payload.buttonsResponseMessage.buttonId;
     const groupId = payload.phone;
-    const participantPhone = payload.participantPhone; // <<< Adicionado
     const profileId = payload.profileId;
 
     if (buttonId.startsWith('menu_')) {
         const action = buttonId.split('_')[1];
-
-        // <<< MUDANÇA >>> Limpa o contexto pendente ANTES de iniciar um novo fluxo do menu
-        await PendingExpense.destroy({ where: { participant_phone: participantPhone, profile_id: profileId, whatsapp_group_id: groupId } });
-        logger.info(`[Webhook] Limpando estados pendentes para ${participantPhone} antes da ação de menu.`);
-
         if (action === 'view') { 
-            await this.sendSpendingReport(groupId, participantPhone, profileId);
+            await this.sendSpendingReport(groupId, payload.participantPhone, profileId);
         } else if (action === 'export') { 
-            await this.sendExpensesExcelReport(groupId, participantPhone, profileId);
+            await this.sendExpensesExcelReport(groupId, payload.participantPhone, profileId);
         } else if (action === 'create') { 
              const pending = await PendingExpense.create({ 
                 whatsapp_message_id: payload.messageId + '_menu_cat',
                 whatsapp_group_id: groupId,
-                participant_phone: participantPhone,
+                participant_phone: payload.participantPhone,
                 profile_id: profileId,
                 action_expected: 'awaiting_new_category_name',
                 expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
              });
              await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Salário")');
         } else if (action === 'manage') { 
-            return this.handleManageCardsAction(groupId, participantPhone, profileId, payload.messageId);
+            return this.handleManageCardsAction(groupId, payload.participantPhone, profileId, payload.messageId);
         }
         return;
     }
@@ -560,14 +549,13 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const messageId = buttonId.split('_')[2];
 
     if (buttonId.startsWith('card_create_')) {
-        // <<< MUDANÇA >>> Garante que qualquer outro fluxo de criação de cartão seja limpo
         await PendingExpense.destroy({ 
             where: { 
                 participant_phone: participantPhone, 
                 whatsapp_group_id: groupId, 
                 profile_id: profileId, 
                 action_expected: { 
-                    [Op.like]: 'awaiting_new_card_%' 
+                    [Op.in]: ['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'] 
                 } 
             } 
         });
@@ -600,12 +588,12 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             });
             await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
             await pending.destroy();
-            await this.sendMainMenu(groupId, participantPhone, profileId);
+            await this.sendMainMenu(groupId);
         } catch (error) {
             logger.error('[Webhook] Erro ao criar cartão de crédito (confirmação):', error);
             await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao criar o cartão. ${error.message}`);
             await pending.destroy();
-            await this.sendMainMenu(groupId, participantPhone, profileId);
+            await this.sendMainMenu(groupId);
         }
 
     } else if (buttonId.startsWith('card_cancel_create_')) {
@@ -613,16 +601,14 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         const pending = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
         if (pending) await pending.destroy();
         await whatsappService.sendWhatsappMessage(groupId, `Criação de cartão cancelada.`);
-        await this.sendMainMenu(groupId, participantPhone, profileId);
+        await this.sendMainMenu(groupId);
     } else if (buttonId.startsWith('menu_back_to_main_')) {
-        return this.sendMainMenu(groupId, participantPhone, profileId);
+        return this.sendMainMenu(groupId);
     }
   }
 
   async handleCreditCardCreationFlowFromPending(payload, pending) {
     const groupId = payload.phone;
-    const participantPhone = payload.participantPhone; // <<< Adicionado
-    const profileId = payload.profileId; // <<< Adicionado
     const textMessage = payload.text?.message;
 
     switch (pending.action_expected) {
@@ -669,12 +655,12 @@ Acesse em: https://obras-fabio.vercel.app/login`;
                         });
                         await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
                         await pending.destroy();
-                        await this.sendMainMenu(groupId, participantPhone, profileId);
+                        await this.sendMainMenu(groupId);
                     } catch (error) {
                         logger.error('[Webhook] Erro ao criar cartão de crédito:', error);
                         await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao criar o cartão. ${error.message}`);
                         await pending.destroy();
-                        await this.sendMainMenu(groupId, participantPhone, profileId);
+                        await this.sendMainMenu(groupId);
                     }
                 } else {
                     await whatsappService.sendWhatsappMessage(groupId, `Dia inválido. Por favor, responda com um número entre 1 e 31.`);
@@ -730,21 +716,21 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         logger.warn(`[Webhook] ProfileId não encontrado para o grupo ${groupId}. Ignorando contexto.`);
         return;
     }
-    
-    // <<< MUDANÇA >>> Tratamento de resposta numérica movido para o início para maior prioridade
-    if (textMessage && /^\d+$/.test(textMessage)) {
-        const handled = await this.handleNumericReply(payload, parseInt(textMessage, 10));
-        if (handled) return;
-    }
 
-    // Comandos de menu e relatórios
     if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
         return this.sendSpendingReport(groupId, participantPhone, profileId);
     }
     if (textMessage && textMessage.toLowerCase().trim() === '#exportardespesas') {
         return this.sendExpensesExcelReport(groupId, participantPhone, profileId);
     }
-    // O comando MENU já é tratado em processIncomingMessage
+    if (textMessage && textMessage.toLowerCase().trim() === MENU_COMMAND) {
+        return this.sendMainMenu(groupId);
+    }
+    
+    if (textMessage && /^\d+$/.test(textMessage)) {
+        const handled = await this.handleNumericReply(groupId, parseInt(textMessage, 10), participantPhone, profileId);
+        if (handled) return;
+    }
 
     const pendingFlow = await PendingExpense.findOne({
         where: { 
@@ -752,7 +738,10 @@ Acesse em: https://obras-fabio.vercel.app/login`;
             whatsapp_group_id: groupId, 
             profile_id: profileId, 
             action_expected: { 
-                [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] // <<< MUDANÇA >>> Evita pegar fluxos errados
+                [Op.in]: [
+                    'awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal',
+                    'awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'
+                ] 
             }
         },
         order: [['createdAt', 'DESC']]
@@ -933,7 +922,6 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         }
     }
 
-    // <<< MUDANÇA >>> Lógica para lidar com categoria sugerida pela IA que não existe
     pendingData.value = value;
     pendingData.description = userContext ? `${baseDescription} (${userContext})` : baseDescription;
     pendingData.suggested_new_category_name = categoryName;
@@ -1285,9 +1273,15 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     }
   }
 
-  // <<< MUDANÇA >>> Lógica refatorada para ser chamada de `handleNumericReply`
-  async handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId, pendingExpense) {
-    if (!pendingExpense || pendingExpense.action_expected !== 'awaiting_credit_card_choice') { 
+
+  async handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId) {
+    const pendingExpense = await PendingExpense.findOne({
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_credit_card_choice' },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (!pendingExpense) { 
+        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} para cartão ignorada.`); 
         return false; 
     }
 
@@ -1305,8 +1299,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
 
     if (selectedNumber === 0) {
         await whatsappService.sendWhatsappMessage(groupId, `✅ Registrando como dinheiro/débito.`);
-        this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, null);
-        return true;
+        return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, null);
     }
 
     const creditCards = await creditCardService.getAllCreditCards(profileId);
@@ -1323,14 +1316,19 @@ Acesse em: https://obras-fabio.vercel.app/login`;
         await pendingExpense.save();
         await whatsappService.sendWhatsappMessage(groupId, `Em quantas parcelas (total) esta despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(analysisResult.value)}* será feita no cartão *${selectedCard.name}*? (Responda apenas com o número, ex: 3)`);
     } else {
-        this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, selectedCard.id);
+        return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, selectedCard.id);
     }
     return true;
   }
-  
-  // <<< MUDANÇA >>> Lógica refatorada para ser chamada de `handleNumericReply`
-  async handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId, pendingExpense) {
-    if (!pendingExpense || pendingExpense.action_expected !== 'awaiting_installment_count') {
+
+  async handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId) {
+    const pendingExpense = await PendingExpense.findOne({
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_installment_count' },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (!pendingExpense) { 
+        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} para parcelas ignorada.`); 
         return false; 
     }
 
@@ -1353,39 +1351,28 @@ Acesse em: https://obras-fabio.vercel.app/login`;
     const categoryId = pendingExpense.suggested_category_id;
     const creditCardId = pendingExpense.credit_card_id;
 
-    this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, creditCardId);
-    return true;
+    return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, creditCardId);
   }
 
-  // <<< MUDANÇA >>> Lógica centralizada para tratar todas as respostas numéricas
-  async handleNumericReply(payload, selectedNumber) {
-    const { phone: groupId, participantPhone, profileId } = payload;
-
+  async handleNumericReply(groupId, selectedNumber, participantPhone, profileId) {
     const pendingOnboarding = await OnboardingState.findOne({where: { group_id: groupId, initiator_phone: participantPhone, status: 'awaiting_profile_choice'}});
     if (pendingOnboarding) {
-        this.handleOnboardingResponse({ ...payload, text: { message: selectedNumber.toString() }}, pendingOnboarding);
-        return true;
+        return this.handleOnboardingResponse({phone: groupId, participantPhone, text: { message: selectedNumber.toString() }}, pendingOnboarding);
     }
 
-    // Busca o fluxo PENDENTE MAIS RECENTE para o usuário
+    const isHandlingCreditCard = await this.handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId);
+    if (isHandlingCreditCard) return true;
+
+    const isHandlingInstallmentCount = await this.handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId);
+    if (isHandlingInstallmentCount) return true;
+
     const pendingExpense = await PendingExpense.findOne({
-      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId },
-      order: [['createdAt', 'DESC']],
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_category_reply' },
       include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
     });
 
     if (!pendingExpense) { 
-        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada porque não há fluxo pendente.`);
-        return false;
-    }
-    
-    // Delega para a função correta baseado no estado esperado
-    if (await this.handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId, pendingExpense)) return true;
-    if (await this.handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId, pendingExpense)) return true;
-
-    // A partir daqui, só pode ser resposta para correção de categoria
-    if (pendingExpense.action_expected !== 'awaiting_category_reply') {
-        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada para o estado '${pendingExpense.action_expected}'.`);
+        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada porque não há fluxo de resposta de categoria pendente.`);
         return false;
     }
     
@@ -1461,11 +1448,9 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       });
 
       if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ⏳\n\nO prazo para editar esta despesa já expirou ou ela não existe.`); return; }
+      if (pendingExpense.participant_phone !== clickerPhone) { await whatsappService.sendWhatsappMessage(groupId, `🤚 *Atenção, ${clickerPhone}!* \n\nApenas a pessoa que registrou o item (${pendingExpense.participant_phone}) pode editá-lo.`); return; }
       
-      // <<< MUDANÇA >>> Permite que qualquer pessoa no grupo corrija, mas idealmente seria o registrador.
-      // if (pendingExpense.participant_phone !== clickerPhone) { await whatsappService.sendWhatsappMessage(groupId, `🤚 *Atenção, ${clickerPhone}!* \n\nApenas a pessoa que registrou o item (${pendingExpense.participant_phone}) pode editá-lo.`); return; }
-      
-      const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : (pendingExpense.suggested_category_flow || null));
+      const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : null);
 
       const allCategories = await Category.findAll({ 
           where: { 
@@ -1478,7 +1463,7 @@ Acesse em: https://obras-fabio.vercel.app/login`;
       
       const valueToFormat = pendingExpense.expense ? pendingExpense.expense.value : pendingExpense.revenue ? pendingExpense.revenue.value : pendingExpense.value;
       const descriptionToUse = pendingExpense.expense ? pendingExpense.expense.description : pendingExpense.revenue ? pendingExpense.revenue.description : pendingExpense.description;
-      const flowText = originalFlow === 'expense' ? 'despesa' : 'receita';
+      const flowText = pendingExpense.expense ? 'despesa' : 'receita';
 
       const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);
       const message = `📋 *Escolha a Categoria Correta*\n\nVocê está definindo a categoria para a ${flowText} de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
@@ -1575,18 +1560,30 @@ const runPendingExpenseWorker = async () => {
             const originalCategoryName = pending.suggested_new_category_name || 'N/A';
 
             const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
-            let timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para ${pending.action_expected === 'awaiting_category_reply' ? 'selecionar uma nova categoria' : 'decidir sobre a categoria'} para o lançamento de *${formattedValue}* expirou.`;
+            const timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para ${pending.action_expected === 'awaiting_category_reply' ? 'selecionar uma nova categoria' : 'decidir sobre a categoria'} para o lançamento de *${formattedValue}* expirou.`;
             
             if (pending.expense_id || pending.revenue_id) {
                 const existingEntry = pending.expense || pending.revenue;
                 if (existingEntry) {
-                     timeoutMessage += ` O item foi mantido com a categoria original.`
+                    let defaultCategory = await Category.findOne({
+                        where: {
+                            profile_id: pending.profile_id,
+                            category_flow: pending.suggested_category_flow,
+                            name: pending.suggested_category_flow === 'expense' ? 'Outros' : 'Receita Padrão'
+                        }
+                    });
+
+                    if (defaultCategory) {
+                        await existingEntry.update({ category_id: defaultCategory.id });
+                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} O item foi categorizado como: *${defaultCategory.name}*.`);
+                    } else {
+                        await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, `${timeoutMessage} Não foi possível categorizar automaticamente. Por favor, adicione a categoria manualmente.`);
+                    }
                 }
             } else {
-                 timeoutMessage += ` A ação foi cancelada.`
+                await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
             }
-
-            await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
+            
             await pending.destroy();
         }
         

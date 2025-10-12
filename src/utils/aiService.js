@@ -90,7 +90,7 @@ class AIService {
       Regras CRÍTICAS Universais:
       1.  **Foco APENAS em Despesas:** Ignore qualquer coluna ou valor que represente 'ENTRADA', 'RECEITA', ou valores positivos que não sejam despesas (a menos que a descrição indique um custo). **O sistema é APENAS para despesas.**
       2.  **Identificação de Colunas:** A coluna de Valor de CUSTO é a que contém a maioria dos números monetários de SAÍDA. A coluna de Data é a que contém o formato de data mais consistente. A coluna de Descrição é a que possui o texto mais descritivo.
-      3.  **Consolidação de Despesas:** Para cada linha com uma DATA e DESCRIÇÃO, se houver um valor em UMA ou MAIS colunas de CUSTO, gere uma DESPESA SEPARADA para CADA valor de custo.
+      3.  **Consolidação de Despesas:** Para cada linha com uma DATA e DESCRIÇÃO, se houver um valor em UMA ou mais colunas de CUSTO, gere uma DESPESA SEPARADA para CADA valor de custo.
       4.  **Descrição Final:** A descrição deve ser a DESCRIÇÃO ORIGINAL CONCATENADA com o NOME DO CABEÇALHO DA COLUNA DE CUSTO (Ex: 'COMPRA DE CIMENTO - FABIO').
       5.  **Data:** Converta para o formato 'YYYY-MM-DD'. Use o ano atual (ou o ano mais provável, como 2024/2025) se o ano não estiver especificado (Ex: '12-abr.' -> '2025-04-12').
       6.  **Categorização:** Mapeie para uma das categorias de DESPESA existentes: [${expenseCategoryOptions}]. Use "Outros" se não houver mapeamento claro.
@@ -176,7 +176,7 @@ class AIService {
       Regras CRÍTICAS:
       1.  **Valor:** Extraia o valor monetário principal. Se o contexto indicar "salário" ou "recebimento", o valor é positivo. Se for "pagamento", "compra", "gasto", é uma despesa.
       2.  **Flow:** Determine se é 'expense' (despesa) ou 'revenue' (receita) com base na imagem e no contexto. Priorize 'expense' para documentos de compra/gasto.
-      3.  **CategoryName:** Sua prioridade é mapear para uma categoria existente. DESPESAS: [${expenseCategoryList}]. RECEITAS: [${revenueCategoryList}]. SE a descrição indicar um nome de categoria que não está na lista (ex: "gasolina", "mercado"), use esse nome como 'categoryName'. Caso contrário, se não houver mapeamento claro, use "Outros" para despesas ou "Receita Padrão" para receitas.
+      3.  **CategoryName:** Sua prioridade é mapear para uma categoria existente. DESPESAS: [${expenseCategoryList}]. RECEITAS: [${revenueCategoryList}]. <<< MUDANÇA IMPORTANTE >>> SE o texto/imagem indicar um nome de categoria que não está na lista (ex: "gasolina", "mercado"), USE ESSE NOME como 'categoryName'. Caso contrário, se não houver mapeamento claro, use "Outros" para despesas ou "Receita Padrão" para receitas.
       4.  **isInstallment:** Se a despesa for parcelada (ex: "3x", "parcelado", "prestação"), defina como true.
       5.  **installmentCount:** Se for parcelado, extraia o número total de parcelas (ex: "3" de "3x").
       6.  **cardName:** Se o texto ou a imagem indicar um cartão de crédito, identifique-o. Você tem uma lista de cartões existentes: [${creditCardNames}]. Se o texto mencionar um nome similar (ex: "nubak", "nu bank"), normalize para o nome correto da lista (ex: "Nubank"). Se não houver correspondência clara, mas a compra for de crédito, use o nome mencionado.
@@ -232,7 +232,7 @@ class AIService {
           *   Se o texto contém um valor monetário e uma descrição de compra/pagamento/recebimento (ex: "1500 mercado", "recebi 3000 salario").
           *   "value": Extraia o valor numérico.
           *   "flow": Determine se é 'expense' ou 'revenue'. Se não for claro, assuma 'expense'.
-          *   "categoryName": Mapeie para uma categoria de DESPESA [${expenseCategoryList}] ou RECEITA [${revenueCategoryList}]. Se a descrição contiver um nome óbvio que não está na lista (ex: "aluguel", "material"), use esse nome. Se não, use "Outros" para despesa ou "Receita Padrão" para receita.
+          *   "categoryName": <<< MUDANÇA IMPORTANTE >>> Mapeie para uma categoria de DESPESA [${expenseCategoryList}] ou RECEITA [${revenueCategoryList}]. Se a descrição contiver um nome óbvio que NÃO está na lista (ex: "aluguel", "mercado", "material de pintura"), USE ESSE NOME. Se não houver nome claro, use "Outros" para despesa ou "Receita Padrão" para receita.
           *   "isInstallment" & "installmentCount": Se mencionar parcelas (ex: "3x", "em 2 vezes"), popule os campos.
           *   "cardName": Se mencionar um cartão, identifique-o. A lista de cartões existentes é: [${creditCardNames}]. Se o texto mencionar um nome similar (ex: "nubak", "cartao nu"), normalize para o nome exato da lista (ex: "Nubank").
           *   "closingDay" e "dueDay" devem ser null neste cenário.

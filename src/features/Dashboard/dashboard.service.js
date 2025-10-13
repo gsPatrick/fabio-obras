@@ -2,6 +2,7 @@
 const { Expense, Category, Revenue, MonthlyGoal, CreditCard, sequelize } = require('../../models'); // <<< MODIFICADO: Adicionado CreditCard
 const { Op } = require('sequelize');
 const { parseISO, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfQuarter, endOfQuarter, startOfYear, endOfYear, subDays, eachDayOfInterval, format, addMonths } = require('date-fns'); // <<< MODIFICADO: addMonths
+const logger = require('../../utils/logger'); // <<< CORREÇÃO ADICIONADA AQUI
 
 class DashboardService {
 
@@ -454,9 +455,9 @@ class DashboardService {
       throw new Error('ID do Perfil, ID do Cartão, Mês e Ano são obrigatórios.');
     }
 
-    const creditCard = await CreditCard.findByPk(creditCardId, { where: { profile_id: profileId } });
+    const creditCard = await CreditCard.findOne({ where: { id: creditCardId, profile_id: profileId } });
     if (!creditCard) {
-      throw new Error('Cartão de crédito não encontrado.');
+      throw new Error('Cartão de crédito não encontrado ou não pertence a este perfil.');
     }
 
     // Calcular o período de fechamento da fatura
@@ -494,13 +495,13 @@ class DashboardService {
       where: {
         profile_id: profileId,
         credit_card_id: creditCardId,
-        charge_date: { [Op.between]: [invoiceStartDate, invoiceEndDate] }, // Filtra pela charge_date
+        expense_date: { [Op.between]: [invoiceStartDate, invoiceEndDate] }, // <<< CORREÇÃO CRÍTICA: deve filtrar por expense_date, não charge_date
       },
       include: [
         { model: Category, as: 'category', attributes: ['name', 'category_flow'] },
         { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value', 'total_installments'] } // Para parcelas
       ],
-      order: [['charge_date', 'ASC'], ['expense_date', 'ASC']],
+      order: [['expense_date', 'ASC']],
     });
 
     // Calcula o total da fatura

@@ -5,10 +5,6 @@ const { Op } = require('sequelize');
 const { startOfMonth, endOfMonth } = require('date-fns');
 
 class CategoryService {
-  /**
-   * <<< MÉTODO CORRIGIDO >>>
-   * Lista todas as categorias de um perfil com o total de gastos/receitas do mês corrente e a meta.
-   */
   async getAllWithSummary(profileId) {
     if (!profileId) {
       throw new Error('ID do Perfil é obrigatório.');
@@ -22,7 +18,7 @@ class CategoryService {
       where: { profile_id: profileId },
       include: [{
         model: MonthlyGoal,
-        as: 'monthlyGoals', // <<< CORREÇÃO 1: Usar o alias correto 'monthlyGoals'
+        as: 'monthlyGoals',
         required: false,
       }],
       order: [['category_flow', 'ASC'], ['name', 'ASC']],
@@ -30,7 +26,6 @@ class CategoryService {
 
     const categoryIds = categories.map(c => c.id);
 
-    // Buscar totais de despesas e receitas do mês em paralelo
     const [expenseTotals, revenueTotals] = await Promise.all([
       Expense.findAll({
         where: {
@@ -38,12 +33,8 @@ class CategoryService {
           profile_id: profileId,
           expense_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] },
         },
-        attributes: [
-          'category_id',
-          [sequelize.fn('SUM', sequelize.col('value')), 'total'],
-        ],
-        group: ['category_id'],
-        raw: true,
+        attributes: [ 'category_id', [sequelize.fn('SUM', sequelize.col('value')), 'total'], ],
+        group: ['category_id'], raw: true,
       }),
       Revenue.findAll({
         where: {
@@ -51,26 +42,21 @@ class CategoryService {
           profile_id: profileId,
           revenue_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] },
         },
-        attributes: [
-          'category_id',
-          [sequelize.fn('SUM', sequelize.col('value')), 'total'],
-        ],
-        group: ['category_id'],
-        raw: true,
+        attributes: [ 'category_id', [sequelize.fn('SUM', sequelize.col('value')), 'total'], ],
+        group: ['category_id'], raw: true,
       }),
     ]);
 
     const expenseMap = new Map(expenseTotals.map(item => [item.category_id, parseFloat(item.total)]));
     const revenueMap = new Map(revenueTotals.map(item => [item.category_id, parseFloat(item.total)]));
     
-    // Combinar os dados e remapear o alias para 'goal' para o front-end
     return categories.map(cat => {
       const categoryJson = cat.toJSON();
       
-      // <<< CORREÇÃO 2: Renomear a propriedade para manter a compatibilidade com o front-end >>>
-      const goalData = categoryJson.monthlyGoals; 
-      delete categoryJson.monthlyGoals; // Limpa a propriedade original
-      categoryJson.goal = goalData; // Adiciona a propriedade 'goal' que o front-end espera
+      const goalDataArray = categoryJson.monthlyGoals;
+      delete categoryJson.monthlyGoals;
+      // Pega o primeiro (e único) objetivo, se existir
+      categoryJson.goal = goalDataArray && goalDataArray.length > 0 ? goalDataArray[0] : null;
 
       const total = cat.category_flow === 'expense' 
         ? (expenseMap.get(cat.id) || 0) 
@@ -83,17 +69,22 @@ class CategoryService {
     });
   }
   
-  // ... (outros métodos do service permanecem iguais)
+  /**
+   * <<< ESTA FUNÇÃO AGORA FUNCIONARÁ CORRETAMENTE >>>
+   * Lista todas as categorias pertencentes a um perfil específico.
+   * @param {number} profileId - O ID do perfil do usuário logado.
+   * @param {'expense' | 'revenue'} [flowType] - Opcional: filtra por fluxo (despesa/receita).
+   */
   async getAll(profileId, flowType = null) {
     if (!profileId) {
       throw new Error('ID do Perfil é obrigatório.');
     }
     const where = { profile_id: profileId };
-    if (flowType) {
+    if (flowType) { // Aplica filtro de fluxo se fornecido
         where.category_flow = flowType;
     }
     return Category.findAll({ 
-      where,
+      where, // Usa o 'where' filtrado
       order: [['category_flow', 'ASC'], ['type', 'ASC'], ['name', 'ASC']]
     });
   }

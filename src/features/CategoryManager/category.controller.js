@@ -3,7 +3,6 @@
 const categoryService = require('./category.service');
 
 class CategoryController {
-  // <<< NOVO MÉTODO >>>
   async getAllWithSummary(req, res) {
     try {
       const categoriesWithSummary = await categoryService.getAllWithSummary(req.profileId);
@@ -13,9 +12,12 @@ class CategoryController {
     }
   }
   
+  // <<< CORREÇÃO APLICADA AQUI >>>
   async getAll(req, res) {
     try {
-      const categories = await categoryService.getAll(req.profileId);
+      // Pega o flowType da query string da URL (ex: /categories?flowType=revenue)
+      const { flowType } = req.query;
+      const categories = await categoryService.getAll(req.profileId, flowType); 
       res.status(200).json(categories);
     } catch (error) {
       res.status(400).json({ error: error.message });

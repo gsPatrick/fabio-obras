@@ -48,7 +48,7 @@ class App {
     try {
       await db.sequelize.authenticate();
       console.log('✅ Conexão com o banco de dados estabelecida com sucesso.');
-      await db.sequelize.sync({ force: false});
+      await db.sequelize.sync({ force: true});
       console.log('🔄 Modelos sincronizados com o banco de dados.');
       await this.seedAdminUser();
     } catch (error) {
@@ -61,7 +61,7 @@ class App {
     const { User, Profile } = db;
     const adminEmail = 'fabio@gmail.com'; 
     const adminPassword = 'Fabio123'; 
-    const adminWhatsappPhone = '5571983141335';  
+    const adminWhatsappPhone = '5521983311000';   
     console.log('[SEEDER] Verificando usuário administrador...');
     
     try {

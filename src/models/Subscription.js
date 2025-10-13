@@ -14,6 +14,11 @@ class Subscription extends Model {
         type: DataTypes.DATE,
         allowNull: true,
       },
+          profile_limit: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 1, // Por padrão, todo novo plano começa com limite de 1 perfil
+    },
       preapproval_id: {
         type: DataTypes.STRING,
         allowNull: true, // ID da pré-aprovação do Mercado Pago

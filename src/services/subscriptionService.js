@@ -1,78 +1,87 @@
 // src/services/subscriptionService.js
-const { User, Subscription } = require('../models');
+const { User, Subscription, Profile } = require('../models'); // <<< Adicionado Profile
 const mercadopago = require('../config/mercadoPago'); 
 const logger = require('../utils/logger');
 const { Op } = require('sequelize');
 const whatsappService = require('../utils/whatsappService');
 
 
-// ===================================================================
-// FUNÇÃO CRÍTICA: CORRIGIR O FORMATO DE DATA PARA O MERCADO PAGO
-// ===================================================================
 function formatMercadoPagoDate(date) {
     const pad = (n) => String(n).padStart(2, '0');
     const padMs = (n) => String(n).padStart(3, '0');
     
     const year = date.getFullYear();
-    const month = pad(date.getMonth() + 1); // getMonth() é 0-base
+    const month = pad(date.getMonth() + 1);
     const day = pad(date.getDate());
     const hours = pad(date.getHours());
     const minutes = pad(date.getMinutes());
     const seconds = pad(date.getSeconds());
     const ms = padMs(date.getMilliseconds());
     
-    // Cálculo do Offset de Fuso Horário
-    // IMPORTANTE: Mercado Pago SEMPRE espera o sinal negativo no offset (formato -03:00, não +03:00)
-    const offset = -date.getTimezoneOffset(); // Offset em minutos
+    const offset = -date.getTimezoneOffset();
     const offsetHours = Math.floor(Math.abs(offset) / 60);
     const offsetMinutes = Math.abs(offset) % 60;
     const offsetFormatted = `-${pad(offsetHours)}:${pad(offsetMinutes)}`;
     
-    // Formato final: YYYY-MM-DDTHH:MM:SS.MMM-ZZ:ZZ (sinal sempre negativo)
     return `${year}-${month}-${day}T${hours}:${minutes}:${seconds}.${ms}${offsetFormatted}`;
 }
-// ===================================================================
-
 
 const subscriptionService = {
   
   /**
    * Verifica se o usuário tem uma assinatura ativa.
-   * @param {number} userId 
-   * @returns {Promise<boolean>}
    */
   async isUserActive(userId) {
-    // 1. Checagem de Administrador (fabio@gmail.com)
     const user = await User.findByPk(userId);
     if (user?.email === 'fabio@gmail.com') {
       return true;
     }
     
-    // 2. Checagem de Assinatura
     const activeSubscription = await Subscription.findOne({
       where: {
         user_id: userId,
         status: 'active',
-        expires_at: { [Op.gt]: new Date() } // Não expirado
+        expires_at: { [Op.gt]: new Date() }
       }
     });
 
     return !!activeSubscription;
   },
-  
+
   /**
-   * Obtém o status de assinatura para o Front-end.
-   * @param {number} userId 
-   * @returns {Promise<object>} - { status: 'active' | 'pending' | 'inactive' | 'admin' }
+   * <<< NOVA FUNÇÃO INTERNA >>>
+   * Verifica se um usuário pode criar um novo perfil com base no seu limite.
+   * Lança um erro se o limite for atingido.
+   * @param {number} userId - ID do usuário.
    */
+  async _checkProfileLimit(userId) {
+      const user = await User.findByPk(userId, {
+          include: [{ model: Subscription, as: 'subscription' }]
+      });
+
+      // Admin principal tem limite infinito
+      if (user?.email === 'fabio@gmail.com') {
+          return;
+      }
+
+      const subscription = user?.subscription;
+      if (!subscription) {
+          throw new Error('Nenhuma assinatura encontrada para este usuário.');
+      }
+
+      const currentProfileCount = await Profile.count({ where: { user_id: userId } });
+      
+      if (currentProfileCount >= subscription.profile_limit) {
+          throw new Error(`Limite de ${subscription.profile_limit} perfis atingido. Para criar mais perfis, contate o suporte.`);
+      }
+  },
+  
   async getSubscriptionStatus(userId) {
-      // 1. Checagem de Administrador (fabio@gmail.com)
       const user = await User.findByPk(userId);
       if (user?.email === 'fabio@gmail.com') {
           return { status: 'active', isAdmin: true, message: 'Conta Administradora.' };
       }
       
-      // 2. Checagem de Assinatura (active/pending/inactive)
       const subscription = await Subscription.findOne({
           where: { user_id: userId },
           order: [['expires_at', 'DESC']]
@@ -95,45 +104,35 @@ const subscriptionService = {
       return { status: 'inactive', message: 'Assinatura cancelada ou expirada.' };
   },
 
-  /**
-   * Cria uma preferência de pré-aprovação (Assinatura Recorrente) no Mercado Pago.
-   * @param {number} userId - O ID do usuário no nosso sistema.
-   */
   async createSubscriptionCheckout(userId) {
     const user = await User.findByPk(userId);
     if (!user) throw new Error("Usuário não encontrado.");
     
-    // Valores do plano (Exemplo: $49.90 Mensal)
     const PLAN_VALUE = 49.90;
-    
-    // Calcula a data de fim (1 ano a partir de agora)
     const endDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000);
 
     const preference = {
-      // ... (Restante dos dados de preferência de assinatura)
       reason: "Assinatura do Serviço de Monitoramento de Custos",
       external_reference: userId.toString(),
       auto_recurring: {
-        frequency: 1, // Mensal
+        frequency: 1,
         frequency_type: "months",
-        transaction_amount: PLAN_VALUE, // Valor
+        transaction_amount: PLAN_VALUE,
         currency_id: "BRL",
-        // CRÍTICO: USAR O NOVO FORMATADOR
         start_date: formatMercadoPagoDate(new Date()), 
-        end_date: formatMercadoPagoDate(endDate), // CRÍTICO: USAR O NOVO FORMATADOR
+        end_date: formatMercadoPagoDate(endDate),
       },
       payer_email: user.email,
       back_url: `${process.env.FRONTEND_URL}/settings?subscription=success`,
       notification_url: `${process.env.BASE_URL}/api/payments/webhook`,
-      binary_mode: true, // Garante que apenas pagamentos aprovados passem
+      binary_mode: true,
     };
 
     const response = await mercadopago.preapproval.create(preference);
 
-    // Cria/Atualiza o registro no nosso banco de dados
     const [subscription] = await Subscription.findOrCreate({
       where: { user_id: userId },
-      defaults: { status: 'pending', preapproval_id: response.body.id, user_id: userId }
+      defaults: { status: 'pending', preapproval_id: response.body.id, user_id: userId, profile_limit: 1 }
     });
     
     await subscription.update({
@@ -147,28 +146,18 @@ const subscriptionService = {
     };
   },
 
-  /**
-   * NOVO: Processa a renovação bem-sucedida de um ciclo de assinatura (Webhook de Payment).
-   * @param {number} userId - ID do usuário no nosso sistema (do external_reference).
-   * @param {object} paymentData - Dados do pagamento do MP.
-   */
   async processSubscriptionRenewal(userId, paymentData) {
-      // 1. Busca a assinatura do usuário (deve haver apenas uma)
       const subscription = await Subscription.findOne({ where: { user_id: userId } });
       if (!subscription) {
           logger.warn(`Renovação: Assinatura não encontrada para o User ${userId}.`);
           return;
       }
       
-      // 2. Calcula a nova data de expiração (adiciona 1 mês à expiração ATUAL ou à data de hoje)
       const now = new Date();
-      // Se a data de expiração não for válida ou já passou, usamos 'now' como base
       let baseDate = subscription.expires_at && subscription.expires_at > now ? subscription.expires_at : now;
       
-      // Adiciona 1 mês à data base
       const nextMonth = new Date(baseDate.setMonth(baseDate.getMonth() + 1));
 
-      // 3. Atualiza o status e a expiração
       await subscription.update({
           status: 'active',
           expires_at: nextMonth,
@@ -178,13 +167,15 @@ const subscriptionService = {
   },
 
   /**
-   * <<< NOVA FUNÇÃO >>>
-   * Permite que um admin ative ou desative a assinatura de um usuário.
+   * <<< FUNÇÃO ATUALIZADA >>>
+   * Permite que um admin ative, desative ou atualize o limite de perfis de um usuário.
    * @param {number} userId - ID do usuário a ser modificado.
-   * @param {'active' | 'cancelled'} newStatus - O novo status da assinatura.
+   * @param {object} data - Contém { status: 'active' | 'cancelled', profileLimit: number }
    * @returns {Promise<Subscription>} A assinatura atualizada.
    */
-  async adminUpdateUserSubscription(userId, newStatus) {
+  async adminUpdateUserSubscription(userId, data) {
+    const { status: newStatus, profileLimit } = data;
+
     const user = await User.findByPk(userId);
     if (!user) {
         throw new Error("Usuário não encontrado.");
@@ -195,62 +186,53 @@ const subscriptionService = {
     
     const [subscription] = await Subscription.findOrCreate({
         where: { user_id: userId },
-        defaults: { user_id: userId, status: 'pending' }
+        defaults: { user_id: userId, status: 'pending', profile_limit: 1 }
     });
     
-    if (newStatus === 'active') {
-        // ATIVAR A ASSINATURA
-        const expiresAt = new Date();
-        expiresAt.setDate(expiresAt.getDate() + 30); // Define a expiração para 30 dias a partir de hoje
+    // Prepara o objeto de atualização
+    const updateData = {
+        status: newStatus,
+        profile_limit: profileLimit !== undefined ? parseInt(profileLimit, 10) : subscription.profile_limit,
+    };
 
-        await subscription.update({
-            status: 'active',
-            expires_at: expiresAt
-        });
+    if (newStatus === 'active') {
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 30);
+        updateData.expires_at = expiresAt;
+
+        await subscription.update(updateData);
         
-        // Ativa o usuário se ele estava pendente
         if (user.status === 'pending') {
             user.status = 'active';
             await user.save();
         }
 
-        // Envia mensagem de onboarding para o WhatsApp do usuário
         if (user.whatsapp_phone) {
-            const onboardingMessage = `Olá! 👋 Seu plano na plataforma Obra.AI foi ativado por um administrador.\n\nPara começar a monitorar os custos, siga os passos:\n\n1️⃣ Crie um grupo no WhatsApp para sua obra.\n2️⃣ Me adicione ao grupo.\n\nEu irei te guiar na configuração do seu perfil diretamente por lá!`;
+            const onboardingMessage = `Olá! 👋 Seu plano na plataforma foi ativado por um administrador.\n\nPara começar a monitorar os custos, siga os passos:\n\n1️⃣ Crie um grupo no WhatsApp para seu projeto.\n2️⃣ Me adicione ao grupo.\n\nEu irei te guiar na configuração do seu perfil diretamente por lá!`;
             await whatsappService.sendWhatsappMessage(user.whatsapp_phone, onboardingMessage);
-            logger.info(`[Admin] Onboarding por ativação manual enviado para ${user.email} no número ${user.whatsapp_phone}`);
+            logger.info(`[Admin] Onboarding por ativação manual enviado para ${user.email}`);
         } else {
             logger.warn(`[Admin] Usuário ${user.email} ativado, mas sem número de WhatsApp para notificação.`);
         }
 
     } else { // newStatus === 'cancelled'
-        // DESATIVAR A ASSINATURA
-        await subscription.update({
-            status: 'cancelled',
-            expires_at: new Date() // Expira imediatamente
-        });
-        logger.info(`[Admin] Assinatura do usuário ${user.email} foi desativada.`);
+        updateData.expires_at = new Date(); // Expira imediatamente
+        await subscription.update(updateData);
+        logger.info(`[Admin] Assinatura do usuário ${user.email} foi desativada/atualizada.`);
     }
     
     return subscription.reload();
   },
 
-
-  /**
-   * Processa o Webhook de Pré-Aprovação do Mercado Pago (Criação/Cancelamento).
-   * @param {object} data - Dados do webhook.
-   */
   async processPreapprovalWebhook(data) {
-      const { id, external_reference, status, reason, date_created, next_payment_date } = data;
+      const { id, external_reference, status } = data;
       const userId = external_reference;
       
-      // Mapeamento de status do Mercado Pago para nosso sistema
       let newStatus = 'pending';
       if (status === 'authorized' || status === 'pending' || status === 'in_process') newStatus = 'pending';
       if (status === 'approved') newStatus = 'active';
       if (status === 'cancelled' || status === 'suspended' || status === 'paused') newStatus = 'cancelled';
       
-      // Busca a assinatura (usa o preapproval_id que é único)
       const subscription = await Subscription.findOne({ where: { preapproval_id: id } });
 
       if (!subscription) {
@@ -258,21 +240,21 @@ const subscriptionService = {
         return;
       }
       
-      // Calcula o próximo vencimento para a expiração
       let expirationDate = subscription.expires_at;
       if (newStatus === 'active') {
-          // Se for a primeira aprovação, usa a data do próximo pagamento do MP (next_payment_date)
-          // ou calcula a partir de hoje (+30 dias)
-          expirationDate = next_payment_date ? new Date(next_payment_date) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+          expirationDate = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       }
       
       await subscription.update({
         status: newStatus,
         expires_at: expirationDate, 
+        // Ao ser ativado via MP, o plano padrão tem limite 1
+        profile_limit: newStatus === 'active' ? 1 : subscription.profile_limit,
       });
       
       logger.info(`Webhook: Assinatura do User ${userId} (${id}) atualizada para status: ${newStatus}`);
   },
 };
 
+// Exporta o objeto inteiro, incluindo a nova função interna
 module.exports = subscriptionService;

@@ -1,12 +1,22 @@
 // src/features/ProfileManager/profile.service.js
 const { Profile, MonitoredGroup } = require('../../models');
+// <<< IMPORTAR O SERVIÇO DE ASSINATURA >>>
+const subscriptionService = require('../../services/subscriptionService');
 
 class ProfileService {
   /**
    * Cria um novo perfil para um usuário.
+   * <<< LÓGICA DE VALIDAÇÃO ADICIONADA AQUI >>>
    */
   async createProfile(data) {
     const { name, image_url, user_id } = data;
+
+    // 1. Chamar a validação de limite de perfis ANTES de criar.
+    // O método _checkProfileLimit lançará um erro se o limite for atingido.
+    // Tornamos o método público no service para poder ser chamado aqui.
+    await subscriptionService._checkProfileLimit(user_id);
+    
+    // 2. Se a validação passar, cria o perfil normalmente.
     return Profile.create({ name, image_url, user_id });
   }
 
@@ -14,8 +24,6 @@ class ProfileService {
    * Lista todos os perfis de um usuário, incluindo o grupo monitorado.
    */
   async getProfilesByUserId(userId) {
-    // Nota: O MonitoredGroup precisa ser incluído diretamente
-    // Aqui usamos o import direto no service, que é mais robusto
     return Profile.findAll({
       where: { user_id: userId },
       include: [{ 
@@ -45,6 +53,8 @@ class ProfileService {
     const profile = await Profile.findOne({ where: { id: profileId, user_id: userId } });
     if (!profile) throw new Error('Perfil não encontrado.');
     
+    // IMPORTANTE: A lógica de CASCADE DELETE no banco de dados deve
+    // cuidar da exclusão de todos os dados associados (despesas, receitas, etc.).
     await profile.destroy();
   }
 }

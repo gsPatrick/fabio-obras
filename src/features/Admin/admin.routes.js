@@ -12,10 +12,12 @@ router.use(adminMiddleware);
 router.get('/users', adminController.getAllUsers);
 router.get('/profits', adminController.getProfits);
 
-// <<< NOVAS ROTAS DE CRUD DE USUÁRIO >>>
-router.post('/users', adminController.createUser); // Criar novo usuário
-router.put('/users/:id', adminController.updateUser); // Atualizar usuário
-router.delete('/users/:id', adminController.deleteUser); // Deletar usuário
+// Rotas de CRUD de USUÁRIO
+router.post('/users', adminController.createUser);
+router.put('/users/:id', adminController.updateUser);
+router.delete('/users/:id', adminController.deleteUser);
+
+// Rota de CRUD de ASSINATURA (a que estava causando o erro)
 router.put('/users/:id/subscription/status', adminController.updateUserSubscriptionStatus);
 
 module.exports = router;

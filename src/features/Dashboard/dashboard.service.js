@@ -1,8 +1,8 @@
 // src/features/Dashboard/dashboard.service.js
-const { Expense, Category, Revenue, MonthlyGoal, CreditCard, sequelize } = require('../../models'); // <<< MODIFICADO: Adicionado CreditCard
+const { Expense, Category, Revenue, MonthlyGoal, CreditCard, sequelize } = require('../../models');
 const { Op } = require('sequelize');
-const { parseISO, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfQuarter, endOfQuarter, startOfYear, endOfYear, subDays, eachDayOfInterval, format, addMonths } = require('date-fns'); // <<< MODIFICADO: addMonths
-const logger = require('../../utils/logger'); // <<< CORREÇÃO ADICIONADA AQUI
+const { parseISO, startOfDay, endOfDay, startOfWeek, endOfWeek, startOfMonth, endOfMonth, startOfQuarter, endOfQuarter, startOfYear, endOfYear, subDays, eachDayOfInterval, format, addMonths } = require('date-fns');
+const logger = require('../../utils/logger');
 
 class DashboardService {
 
@@ -12,42 +12,36 @@ class DashboardService {
   async getKPIs(filters, profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
       
-    const { whereClause: expenseWhere } = this._buildWhereClause(filters, 'expense'); // <<< MODIFICADO: Passa 'expense'
+    const { whereClause: expenseWhere } = this._buildWhereClause(filters, 'expense');
     
-    // Sobrescreve o período para o MÊS CORRENTE para o cálculo da meta
     const now = new Date();
     const startOfCurrentMonth = startOfMonth(now);
     const endOfCurrentMonth = endOfMonth(now);
     
     const monthlyExpenseWhere = { 
         profile_id: profileId,
-        // Garante que o cálculo da meta use expense_date, ou charge_date se for cartão
         [Op.or]: [
             { expense_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } },
             { charge_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } }
         ],
-        is_installment: { [Op.ne]: true } // Considera apenas a despesa original para KPIs
+        is_installment: { [Op.ne]: true }
     };
     
-    // --- Cálculo de KPIs (baseado no filtro fornecido) ---
     expenseWhere.profile_id = profileId;
-    // Exclui parcelas subsequentes de serem contadas como despesas individuais para KPIs
     expenseWhere.original_expense_id = { [Op.eq]: null }; 
 
     const revenueWhere = { profile_id: profileId };
-    if (expenseWhere.expense_date) { // Se o filtro tem data, aplica em receita
-        revenueWhere.revenue_date = expenseWhere.expense_date;
+    if (expenseWhere[Op.or]) {
+        // Se o filtro de despesa usa OR para datas, aplicamos o mesmo range em receitas
+        const dateRange = expenseWhere[Op.or][0].expense_date || expenseWhere[Op.or][1].charge_date;
+        if (dateRange) {
+            revenueWhere.revenue_date = dateRange;
+        }
     }
-    // <<< NOVO: Se o filtro de despesa usa charge_date, ajusta para revenue_date >>>
-    else if (expenseWhere.charge_date) {
-        revenueWhere.revenue_date = expenseWhere.charge_date; // Heurística, pode ser mais sofisticado
-    }
-    // <<< FIM NOVO >>>
 
     const totalExpenses = await Expense.sum('value', { where: expenseWhere });
     const totalRevenues = await Revenue.sum('value', { where: revenueWhere });
 
-    // <<< MODIFICADO: As categorias devem ser filtradas por category_flow 'expense' >>>
     const expensesByCategory = await Expense.findAll({
         where: expenseWhere,
         attributes: [
@@ -59,15 +53,12 @@ class DashboardService {
         limit: 1,
         raw: true
     });
-    // <<< FIM MODIFICADO >>>
 
     const highestCategory = expensesByCategory.length > 0 ? {
         name: expensesByCategory[0]['category.name'],
         total: parseFloat(expensesByCategory[0].total)
     } : { name: 'N/A', total: 0 };
     
-    // --- Lógica de Meta Mensal (baseado no MÊS CORRENTE) ---
-    // Usar a mesma lógica de data da consulta principal para a meta
     const currentMonthExpenses = await Expense.sum('value', { where: monthlyExpenseWhere });
     const totalGoal = await MonthlyGoal.findOne({ where: { profile_id: profileId, is_total_goal: true, category_id: null } });
 
@@ -79,7 +70,7 @@ class DashboardService {
         balance: (totalRevenues || 0) - (totalExpenses || 0),
         expenseCount: await Expense.count({ where: expenseWhere }),
         highestCategory,
-        goalAlert, // NOVO CAMPO
+        goalAlert,
     };
 }
 
@@ -94,12 +85,11 @@ class DashboardService {
     
     const percentage = (currentExpenses / goalValue) * 100;
     
-    // Define os limites de alerta conforme pedido (70, 80, 90, 100, 110)
     const limits = [70, 80, 90, 100, 110];
     let alertMessage = null;
     
     for (const limit of limits) {
-        if (percentage >= limit && percentage < limit + 10) { // Verifica o intervalo 70-79.99, 80-89.99 etc.
+        if (percentage >= limit && percentage < limit + 10) {
             alertMessage = `Atenção: Você atingiu ${limit}% da sua meta mensal de custo total!`;
             break; 
         } else if (percentage >= 110) {
@@ -127,16 +117,14 @@ class DashboardService {
   async getChartData(filters, profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
 
-    const { whereClause: expenseWhere, startDate, endDate } = this._buildWhereClause(filters, 'expense'); // <<< MODIFICADO
-    expenseWhere.profile_id = profileId; // FILTRO POR PERFIL
-    expenseWhere.original_expense_id = { [Op.eq]: null }; // Ignora parcelas para gráficos de distribuição
+    const { whereClause: expenseWhere, startDate, endDate } = this._buildWhereClause(filters, 'expense');
+    expenseWhere.profile_id = profileId;
     
-    const { whereClause: revenueWhere } = this._buildWhereClause(filters, 'revenue'); // <<< NOVO
+    const { whereClause: revenueWhere } = this._buildWhereClause(filters, 'revenue');
     revenueWhere.profile_id = profileId;
 
-    // <<< MODIFICADO: expensesByCategory para filtrar por category_flow 'expense' >>>
     const expensesByCategory = await Expense.findAll({
-      where: expenseWhere,
+      where: { ...expenseWhere, original_expense_id: { [Op.eq]: null } },
       attributes: [
         'category.name',
         [sequelize.fn('SUM', sequelize.col('Expense.value')), 'total'],
@@ -145,9 +133,7 @@ class DashboardService {
       group: ['category.name'],
       raw: true,
     });
-    // <<< FIM MODIFICADO >>>
     
-    // <<< NOVO: revenuesByCategory para filtrar por category_flow 'revenue' >>>
     const revenuesByCategory = await Revenue.findAll({
         where: revenueWhere,
         attributes: [
@@ -158,11 +144,9 @@ class DashboardService {
         group: ['category.name'],
         raw: true,
     });
-    // <<< FIM NOVO >>>
 
-    // <<< NOVO: expensesByType para agrupar por tipo de categoria de despesa >>>
     const expensesByType = await Expense.findAll({
-        where: expenseWhere,
+        where: { ...expenseWhere, original_expense_id: { [Op.eq]: null } },
         attributes: [
             'category.type',
             [sequelize.fn('SUM', sequelize.col('Expense.value')), 'total'],
@@ -171,60 +155,57 @@ class DashboardService {
         group: ['category.type'],
         raw: true,
     });
-    // <<< FIM NOVO >>>
 
-
+    // <<< INÍCIO DA CORREÇÃO >>>
+    // A query agora usa COALESCE para garantir que sempre haja uma data.
     const dailyExpenses = await Expense.findAll({
       where: expenseWhere,
       attributes: [
-        [sequelize.fn('DATE', sequelize.col('Expense.charge_date')), 'date'], // Usa charge_date se disponível
+        [sequelize.fn('DATE', sequelize.fn('COALESCE', sequelize.col('Expense.charge_date'), sequelize.col('Expense.expense_date'))), 'date'],
         [sequelize.fn('SUM', sequelize.col('Expense.value')), 'total'],
       ],
-      group: [sequelize.fn('DATE', sequelize.col('Expense.charge_date'))],
-      order: [[sequelize.fn('DATE', sequelize.col('Expense.charge_date')), 'ASC']],
+      group: [sequelize.fn('DATE', sequelize.fn('COALESCE', sequelize.col('Expense.charge_date'), sequelize.col('Expense.expense_date')))],
+      order: [[sequelize.fn('DATE', sequelize.fn('COALESCE', sequelize.col('Expense.charge_date'), sequelize.col('Expense.expense_date'))), 'ASC']],
       raw: true
     });
-    // Corrigir dataKey se for nula
+    
+    // O fallback aqui se torna uma segurança extra, mas a query já deve resolver o problema.
     const formattedDailyExpenses = dailyExpenses.map(item => ({
-        date: item.date || format(item.expense_date, 'yyyy-MM-dd'), // Fallback para expense_date
+        date: item.date, // A query agora garante que item.date não é nulo
         total: parseFloat(item.total)
     }));
-
+    // <<< FIM DA CORREÇÃO >>>
 
     const evolution = this._fillMissingDays(formattedDailyExpenses, startDate, endDate);
 
     return {
       pieChart: expensesByCategory.map(item => ({ name: item.name, value: parseFloat(item.total) })),
-      // <<< NOVO: Adicionado pieChartByType >>>
       pieChartByType: expensesByType.map(item => ({ name: item.type, value: parseFloat(item.total) })),
-      // <<< FIM NOVO >>>
       lineChart: {
         labels: evolution.map(item => item.date),
         data: evolution.map(item => item.total)
       },
-      // TODO: Adicionar um gráfico de Receitas x Despesas ao longo do tempo (lineChart combinado)
-      // TODO: Adicionar um gráfico de pizza para receitas por categoria
     };
   }
 
+  // ... (Restante do arquivo permanece o mesmo) ...
   // ===================================================================
   // 3. ENDPOINT PARA RELATÓRIOS (LISTA DETALHADA COM FILTROS)
   // ===================================================================
-  // <<< MODIFICADO: getDetailedExpenses agora usa charge_date >>>
   async getDetailedExpenses(filters, profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
       
-    const { whereClause, limit, offset } = this._buildWhereClause(filters, 'expense'); // <<< MODIFICADO
-    whereClause.profile_id = profileId; // FILTRO POR PERFIL
+    const { whereClause, limit, offset } = this._buildWhereClause(filters, 'expense');
+    whereClause.profile_id = profileId;
 
     const { count, rows } = await Expense.findAndCountAll({
       where: whereClause,
       include: [
-        { model: Category, as: 'category', attributes: ['id', 'name', 'type', 'category_flow'] }, // Inclui category_flow
-        { model: CreditCard, as: 'creditCard', attributes: ['id', 'name', 'last_four_digits'] }, // Inclui CreditCard
-        { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value'] } // Para parcelas
+        { model: Category, as: 'category', attributes: ['id', 'name', 'type', 'category_flow'] },
+        { model: CreditCard, as: 'creditCard', attributes: ['id', 'name', 'last_four_digits'] },
+        { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value'] }
       ],
-      order: [['charge_date', 'DESC'], ['expense_date', 'DESC']], // Orderna por charge_date primário
+      order: [[sequelize.fn('COALESCE', sequelize.col('charge_date'), sequelize.col('expense_date')), 'DESC']],
       limit,
       offset,
     });
@@ -236,9 +217,7 @@ class DashboardService {
       data: rows,
     };
   }
-  // <<< FIM MODIFICADO >>>
   
-  // <<< NOVO: getDetailedRevenues >>>
   async getDetailedRevenues(filters, profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
       
@@ -260,25 +239,21 @@ class DashboardService {
       data: rows,
     };
   }
-  // <<< FIM NOVO >>>
 
-  // <<< MODIFICADO: getAllExpenses para incluir CreditCard e Parcelas >>>
   async getAllExpenses(profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
       
     return Expense.findAll({
-      where: { profile_id: profileId }, // FILTRO POR PERFIL
+      where: { profile_id: profileId },
       include: [
         { model: Category, as: 'category', attributes: ['name', 'type', 'category_flow'] },
         { model: CreditCard, as: 'creditCard', attributes: ['name', 'last_four_digits'] },
         { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value'] }
       ],
-      order: [['charge_date', 'DESC'], ['expense_date', 'DESC']],
+      order: [[sequelize.fn('COALESCE', sequelize.col('charge_date'), sequelize.col('expense_date')), 'DESC']],
     });
   }
-  // <<< FIM MODIFICADO >>>
   
-  // <<< NOVO: getAllRevenues >>>
   async getAllRevenues(profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
       
@@ -288,17 +263,14 @@ class DashboardService {
       order: [['revenue_date', 'DESC']],
     });
   }
-  // <<< FIM NOVO >>>
 
   // ===================================================================
   // 4. ENDPOINTS CRUD (CRIAR, ATUALIZAR, DELETAR)
   // ===================================================================
-  // <<< MODIFICADO: updateExpense para lidar com parcelas >>>
   async updateExpense(id, data, profileId) {
     const expense = await Expense.findOne({ where: { id, profile_id: profileId } });
     if (!expense) throw new Error('Despesa não encontrada ou não pertence ao perfil');
 
-    // Se for uma parcela e tentar alterar valor/parcelas, deve-se avisar
     if (expense.original_expense_id && (data.value || data.total_installments || data.is_installment)) {
         throw new Error('Não é permitido alterar valor ou dados de parcelamento diretamente em uma parcela. Edite a despesa original.');
     }
@@ -306,21 +278,17 @@ class DashboardService {
     await expense.update(data);
     return expense;
   }
-  // <<< FIM MODIFICADO >>>
   
-  // <<< MODIFICADO: deleteExpense para lidar com parcelas >>>
   async deleteExpense(id, profileId) {
     const expense = await Expense.findOne({ where: { id, profile_id: profileId } });
     if (!expense) throw new Error('Despesa não encontrada ou não pertence ao perfil');
 
-    // Se for uma despesa original com parcelas, deleta todas as parcelas
     if (expense.is_installment && expense.total_installments > 1) {
         await Expense.destroy({ where: { original_expense_id: expense.id, profile_id: profileId } });
     }
     await expense.destroy();
     return { message: 'Despesa e suas parcelas (se houver) deletadas com sucesso.' };
   }
-  // <<< FIM MODIFICADO >>>
   
   async createRevenue(data, profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
@@ -333,7 +301,6 @@ class DashboardService {
     return Revenue.create({ ...data, profile_id: profileId });
   }
 
-  // <<< NOVO: updateRevenue >>>
   async updateRevenue(id, data, profileId) {
     const revenue = await Revenue.findOne({ where: { id, profile_id: profileId } });
     if (!revenue) throw new Error('Receita não encontrada ou não pertence ao perfil');
@@ -348,28 +315,23 @@ class DashboardService {
     await revenue.update(data);
     return revenue;
   }
-  // <<< FIM NOVO >>>
 
-  // <<< NOVO: deleteRevenue >>>
   async deleteRevenue(id, profileId) {
     const revenue = await Revenue.findOne({ where: { id, profile_id: profileId } });
     if (!revenue) throw new Error('Receita não encontrada ou não pertence ao perfil');
     await revenue.destroy();
     return { message: 'Receita deletada com sucesso.' };
   }
-  // <<< FIM NOVO >>>
 
   // ===================================================================
-  // LÓGICA INTERNA DE FILTROS (MUITO PODEROSA)
-  // <<< MODIFICADO: _buildWhereClause para lidar com charge_date e flow >>>
+  // LÓGICA INTERNA DE FILTROS
   // ===================================================================
-  _buildWhereClause(filters, flowType = 'expense') { // flowType: 'expense' ou 'revenue'
+  _buildWhereClause(filters, flowType = 'expense') {
     const whereClause = {};
     let startDate, endDate;
 
-    // A data principal a ser filtrada (expense_date ou revenue_date)
     const dateField = flowType === 'expense' ? 'expense_date' : 'revenue_date';
-    const chargeDateField = 'charge_date'; // Campo específico para despesas de cartão
+    const chargeDateField = 'charge_date';
 
     if (filters.period) {
       const now = new Date();
@@ -389,21 +351,16 @@ class DashboardService {
     }
     
     if (startDate && endDate) {
-        // Para despesas, busca tanto em expense_date quanto em charge_date
         if (flowType === 'expense') {
             whereClause[Op.or] = [
                 { [dateField]: { [Op.between]: [startDate, endDate] } },
                 { [chargeDateField]: { [Op.between]: [startDate, endDate] } }
             ];
-        } else { // Para receitas, usa apenas revenue_date
+        } else {
             whereClause[dateField] = { [Op.between]: [startDate, endDate] };
         }
     }
-    // Para despesas, queremos apenas as "despesas originais" para evitar duplicidade de parcelas em relatórios
-    if (flowType === 'expense') {
-        whereClause.original_expense_id = { [Op.eq]: null }; 
-    }
-
+    
     if (filters.categoryId) {
       whereClause.category_id = filters.categoryId;
     }
@@ -419,11 +376,9 @@ class DashboardService {
       whereClause.value = { ...whereClause.value, [Op.lte]: filters.maxValue };
     }
     
-    // <<< NOVO: Filtro por CreditCardId >>>
     if (flowType === 'expense' && filters.creditCardId) {
         whereClause.credit_card_id = filters.creditCardId;
     }
-    // <<< FIM NOVO >>>
 
     const page = parseInt(filters.page, 10) || 1;
     const limit = parseInt(filters.limit, 10) || 20;
@@ -431,11 +386,10 @@ class DashboardService {
 
     return { whereClause, limit, offset, startDate, endDate };
   }
-  // <<< FIM MODIFICADO >>>
 
-  // <<< MODIFICADO: _fillMissingDays para usar o dateField correto (charge_date para despesa) >>>
   _fillMissingDays(data, startDate, endDate) {
-    // Garante que o campo 'date' exista e seja formatado corretamente
+    if (!startDate || !endDate) return data; // Retorna os dados como estão se não houver intervalo
+    
     const dataMap = new Map(data.map(item => [format(new Date(item.date), 'yyyy-MM-dd'), parseFloat(item.total)]));
     const interval = eachDayOfInterval({ start: startDate, end: endDate });
 
@@ -447,9 +401,7 @@ class DashboardService {
       };
     });
   }
-  // <<< FIM MODIFICADO >>>
 
-  // <<< NOVO: getCreditCardInvoice - Lógica para simular uma fatura de cartão >>>
   async getCreditCardInvoice(profileId, creditCardId, month, year) {
     if (!profileId || !creditCardId || !month || !year) {
       throw new Error('ID do Perfil, ID do Cartão, Mês e Ano são obrigatórios.');
@@ -459,52 +411,37 @@ class DashboardService {
     if (!creditCard) {
       throw new Error('Cartão de crédito não encontrado ou não pertence a este perfil.');
     }
-
-    // Calcular o período de fechamento da fatura
-    // A fatura de "Referência: Mês/Ano" é para despesas que caem nela.
-    // Ex: Se closing_day = 10, e vence em 20.
-    // Fatura de OUTUBRO/2025 (vencimento 20/OUT)
-    // Coleta despesas do dia 11 de SETEMBRO até o dia 10 de OUTUBRO.
-
-    // A lógica abaixo considera:
-    // nextClosingDay: dia de fechamento do MÊS DE REFERÊNCIA da fatura (ex: 10 de Outubro)
-    // previousClosingDay: dia de fechamento do mês anterior (ex: 10 de Setembro)
     
-    let invoiceEndDate = new Date(year, month - 1, creditCard.closing_day); // Mês é 0-index no JS
+    let invoiceEndDate = new Date(year, month - 1, creditCard.closing_day);
     let invoiceStartDate = addMonths(invoiceEndDate, -1);
-    invoiceStartDate.setDate(creditCard.closing_day + 1); // Começa um dia depois do fechamento anterior
+    invoiceStartDate.setDate(creditCard.closing_day + 1);
     
-    // Ajuste para datas válidas (ex: dia 31 em fevereiro)
     if (invoiceStartDate.getDate() !== (creditCard.closing_day + 1)) {
-        invoiceStartDate = startOfMonth(addMonths(invoiceEndDate, -1)); // Começa no primeiro dia do mês anterior se o dia de fechamento for maior que os dias do mês
+        invoiceStartDate = startOfMonth(addMonths(invoiceEndDate, -1));
         invoiceStartDate.setDate(creditCard.closing_day + 1);
     }
     if (invoiceEndDate.getDate() !== creditCard.closing_day) {
-        invoiceEndDate = endOfMonth(new Date(year, month - 1, 1)); // Vai para o último dia do mês se o dia de fechamento não existir
+        invoiceEndDate = endOfMonth(new Date(year, month - 1, 1));
     }
 
-
-    invoiceEndDate = endOfDay(invoiceEndDate); // Inclui o dia inteiro
-    invoiceStartDate = startOfDay(invoiceStartDate); // Inclui o dia inteiro
+    invoiceEndDate = endOfDay(invoiceEndDate);
+    invoiceStartDate = startOfDay(invoiceStartDate);
 
     logger.info(`[CreditCardService] Buscando fatura para ${creditCard.name} (${month}/${year}). Período: ${invoiceStartDate.toISOString()} a ${invoiceEndDate.toISOString()}`);
 
-
-    // Busca todas as despesas vinculadas ao cartão que caem nesse período de fatura
     const expenses = await Expense.findAll({
       where: {
         profile_id: profileId,
         credit_card_id: creditCardId,
-        expense_date: { [Op.between]: [invoiceStartDate, invoiceEndDate] }, // <<< CORREÇÃO CRÍTICA: deve filtrar por expense_date, não charge_date
+        expense_date: { [Op.between]: [invoiceStartDate, invoiceEndDate] },
       },
       include: [
         { model: Category, as: 'category', attributes: ['name', 'category_flow'] },
-        { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value', 'total_installments'] } // Para parcelas
+        { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value', 'total_installments'] }
       ],
       order: [['expense_date', 'ASC']],
     });
 
-    // Calcula o total da fatura
     const totalAmount = expenses.reduce((sum, exp) => sum + parseFloat(exp.value), 0);
 
     return {
@@ -520,13 +457,12 @@ class DashboardService {
         endDate: invoiceEndDate.toISOString(),
         referenceMonth: month,
         referenceYear: year,
-        dueDate: new Date(year, month -1, creditCard.due_day).toISOString(), // Vencimento no mês da referência
+        dueDate: new Date(year, month -1, creditCard.due_day).toISOString(),
       },
       expenses: expenses,
       totalAmount: totalAmount,
     };
   }
-  // <<< FIM NOVO >>>
 }
 
 module.exports = new DashboardService();

@@ -1142,7 +1142,14 @@ class WebhookService {
         await pendingExpense.save();
         await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pendingExpense.suggested_new_category_name}*" (Despesa)?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
     } else {
-        await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense);
+        // **INÍCIO DA CORREÇÃO**
+        // Verifica se a criação de categoria veio do menu ou de um lançamento
+        if (pendingExpense.whatsapp_message_id.endsWith('_menu_cat')) {
+            await this._finalizeCategoryCreationFromMenu(pendingExpense);
+        } else {
+            await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense);
+        }
+        // **FIM DA CORREÇÃO**
     }
   }
 
@@ -1188,6 +1195,41 @@ class WebhookService {
         await pendingExpense.destroy();
     }
   }
+
+  // **INÍCIO DA CORREÇÃO: Nova função auxiliar**
+  async _finalizeCategoryCreationFromMenu(pendingExpense, goalValue = 0) {
+    const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
+    const categoryType = pendingExpense.description || 'Outros'; 
+
+    try {
+        const newCategory = await categoryService.create(
+            { name: suggested_new_category_name, type: categoryType, category_flow: suggested_category_flow },
+            profile_id
+        );
+
+        let msg = `✅ Nova categoria "*${suggested_new_category_name}*" (${suggested_category_flow === 'expense' ? 'Despesa' : 'Receita'}) foi criada com sucesso!`;
+
+        if (suggested_category_flow === 'expense' && goalValue > 0) {
+            const goalService = require('../GoalManager/goal.service');
+            await goalService.createOrUpdateGoal(profile_id, {
+                value: goalValue,
+                categoryId: newCategory.id,
+                isTotalGoal: false,
+            });
+            msg += `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
+        }
+
+        await whatsappService.sendWhatsappMessage(whatsapp_group_id, msg);
+        await this.sendMainMenu(whatsapp_group_id, pendingExpense.participant_phone, profile_id);
+
+    } catch (error) {
+        logger.error('[Webhook] Erro ao finalizar criação de categoria vinda do MENU:', error);
+        await whatsappService.sendWhatsappMessage(whatsapp_group_id, `❌ Houve um erro ao criar a categoria "${suggested_new_category_name}". ${error.message}`);
+    } finally {
+        await pendingExpense.destroy();
+    }
+  }
+  // **FIM DA CORREÇÃO**
   
   async handleNewCategoryCreationFlowFromPending(payload, pending) {
     const groupId = payload.phone;
@@ -1226,7 +1268,13 @@ class WebhookService {
                     await pending.save();
                     await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pending.suggested_new_category_name}*" (Despesa)?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
                 } else {
-                    await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending);
+                    // **INÍCIO DA CORREÇÃO**
+                    if (pending.whatsapp_message_id.endsWith('_menu_cat')) {
+                        await this._finalizeCategoryCreationFromMenu(pending);
+                    } else {
+                        await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending);
+                    }
+                    // **FIM DA CORREÇÃO**
                 }
             } else {
                 await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, selecione "Despesa" ou "Receita".`);
@@ -1240,7 +1288,13 @@ class WebhookService {
                     await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números positivos (ex: 1500 ou 0).`);
                     return;
                 }
-                await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending, goalValue);
+                // **INÍCIO DA CORREÇÃO**
+                if (pending.whatsapp_message_id.endsWith('_menu_cat')) {
+                    await this._finalizeCategoryCreationFromMenu(pending, goalValue);
+                } else {
+                    await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending, goalValue);
+                }
+                // **FIM DA CORREÇÃO**
             }
             break;
     }
@@ -1352,14 +1406,12 @@ class WebhookService {
         return false;
     }
     
-    // **INÍCIO DA CORREÇÃO APLICADA**
     const allCategories = await Category.findAll({ 
         where: { 
             profile_id: profileId
         }, 
         order: [['category_flow', 'DESC'], ['name', 'ASC']]
     });
-    // **FIM DA CORREÇÃO**
 
     const selectedCategory = allCategories[selectedNumber - 1];
 
@@ -1371,8 +1423,6 @@ class WebhookService {
 
     let updatedEntry;
     if (pendingExpense.expense) {
-        // Se a categoria selecionada for de receita, não podemos apenas atualizar. 
-        // Precisamos deletar a despesa e criar uma receita.
         if (selectedCategory.category_flow !== 'expense') {
             await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Receitas*. O lançamento original será convertido de Despesa para Receita.`);
             const originalExpense = pendingExpense.expense;
@@ -1391,7 +1441,6 @@ class WebhookService {
             updatedEntry = pendingExpense.expense;
         }
     } else if (pendingExpense.revenue) {
-        // Lógica inversa: converter receita em despesa
         if (selectedCategory.category_flow !== 'revenue') {
              await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Despesas*. O lançamento original será convertido de Receita para Despesa.`);
             const originalRevenue = pendingExpense.revenue;
@@ -1450,14 +1499,12 @@ class WebhookService {
 
       if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ⏳\n\nO prazo para editar esta despesa já expirou ou ela não existe.`); return; }
       
-      // **INÍCIO DA CORREÇÃO APLICADA**
       const allCategories = await Category.findAll({ 
           where: { 
               profile_id: profileId
           }, 
           order: [['category_flow', 'DESC'],['name', 'ASC']]
       });
-      // **FIM DA CORREÇÃO**
 
       const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name} (${cat.category_flow === 'expense' ? 'Despesa' : 'Receita'})`).join('\n');
       

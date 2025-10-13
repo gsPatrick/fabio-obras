@@ -7,7 +7,7 @@ const logger = require('../../utils/logger');
 class DashboardService {
 
   // ===================================================================
-  // 1. ENDPOINT DE KPIs (NÚMEROS PRINCIPAIS) - COM ALERTA DE META
+  // 1. ENDPOINT DE KPIs
   // ===================================================================
   async getKPIs(filters, profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
@@ -24,7 +24,8 @@ class DashboardService {
             { expense_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } },
             { charge_date: { [Op.between]: [startOfCurrentMonth, endOfCurrentMonth] } }
         ],
-        is_installment: { [Op.ne]: true }
+        // Exclui parcelas subsequentes da soma de metas
+        original_expense_id: { [Op.eq]: null },
     };
     
     expenseWhere.profile_id = profileId;
@@ -32,7 +33,6 @@ class DashboardService {
 
     const revenueWhere = { profile_id: profileId };
     if (expenseWhere[Op.or]) {
-        // Se o filtro de despesa usa OR para datas, aplicamos o mesmo range em receitas
         const dateRange = expenseWhere[Op.or][0].expense_date || expenseWhere[Op.or][1].charge_date;
         if (dateRange) {
             revenueWhere.revenue_date = dateRange;
@@ -47,7 +47,7 @@ class DashboardService {
         attributes: [
             [sequelize.fn('SUM', sequelize.col('Expense.value')), 'total'],
         ],
-        include: [{ model: Category, as: 'category', attributes: ['name', 'category_flow'], where: { category_flow: 'expense' } }],
+        include: [{ model: Category, as: 'category', attributes: ['name'], where: { category_flow: 'expense' } }],
         group: ['category.id', 'category.name'],
         order: [[sequelize.fn('SUM', sequelize.col('Expense.value')), 'DESC']],
         limit: 1,
@@ -78,7 +78,7 @@ class DashboardService {
   // LÓGICA INTERNA: CÁLCULO DE ALERTA DE META
   // ===================================================================
   _calculateGoalAlert(currentExpenses, totalGoal) {
-    if (!totalGoal) return null;
+    if (!totalGoal || !currentExpenses) return null;
 
     const goalValue = parseFloat(totalGoal.value);
     if (goalValue <= 0) return null;
@@ -125,39 +125,25 @@ class DashboardService {
 
     const expensesByCategory = await Expense.findAll({
       where: { ...expenseWhere, original_expense_id: { [Op.eq]: null } },
-      attributes: [
-        'category.name',
-        [sequelize.fn('SUM', sequelize.col('Expense.value')), 'total'],
-      ],
+      attributes: [ 'category.name', [sequelize.fn('SUM', sequelize.col('Expense.value')), 'total'], ],
       include: [{ model: Category, as: 'category', attributes: [], where: { category_flow: 'expense' } }],
-      group: ['category.name'],
-      raw: true,
+      group: ['category.name'], raw: true,
     });
     
     const revenuesByCategory = await Revenue.findAll({
         where: revenueWhere,
-        attributes: [
-            'category.name',
-            [sequelize.fn('SUM', sequelize.col('Revenue.value')), 'total'],
-        ],
+        attributes: [ 'category.name', [sequelize.fn('SUM', sequelize.col('Revenue.value')), 'total'], ],
         include: [{ model: Category, as: 'category', attributes: [], where: { category_flow: 'revenue' } }],
-        group: ['category.name'],
-        raw: true,
+        group: ['category.name'], raw: true,
     });
 
     const expensesByType = await Expense.findAll({
         where: { ...expenseWhere, original_expense_id: { [Op.eq]: null } },
-        attributes: [
-            'category.type',
-            [sequelize.fn('SUM', sequelize.col('Expense.value')), 'total'],
-        ],
+        attributes: [ 'category.type', [sequelize.fn('SUM', sequelize.col('Expense.value')), 'total'], ],
         include: [{ model: Category, as: 'category', attributes: [], where: { category_flow: 'expense' } }],
-        group: ['category.type'],
-        raw: true,
+        group: ['category.type'], raw: true,
     });
 
-    // <<< INÍCIO DA CORREÇÃO >>>
-    // A query agora usa COALESCE para garantir que sempre haja uma data.
     const dailyExpenses = await Expense.findAll({
       where: expenseWhere,
       attributes: [
@@ -169,26 +155,17 @@ class DashboardService {
       raw: true
     });
     
-    // O fallback aqui se torna uma segurança extra, mas a query já deve resolver o problema.
-    const formattedDailyExpenses = dailyExpenses.map(item => ({
-        date: item.date, // A query agora garante que item.date não é nulo
-        total: parseFloat(item.total)
-    }));
-    // <<< FIM DA CORREÇÃO >>>
+    const formattedDailyExpenses = dailyExpenses.map(item => ({ date: item.date, total: parseFloat(item.total) }));
 
     const evolution = this._fillMissingDays(formattedDailyExpenses, startDate, endDate);
 
     return {
       pieChart: expensesByCategory.map(item => ({ name: item.name, value: parseFloat(item.total) })),
       pieChartByType: expensesByType.map(item => ({ name: item.type, value: parseFloat(item.total) })),
-      lineChart: {
-        labels: evolution.map(item => item.date),
-        data: evolution.map(item => item.total)
-      },
+      lineChart: { labels: evolution.map(item => item.date), data: evolution.map(item => item.total) },
     };
   }
 
-  // ... (Restante do arquivo permanece o mesmo) ...
   // ===================================================================
   // 3. ENDPOINT PARA RELATÓRIOS (LISTA DETALHADA COM FILTROS)
   // ===================================================================
@@ -205,7 +182,8 @@ class DashboardService {
         { model: CreditCard, as: 'creditCard', attributes: ['id', 'name', 'last_four_digits'] },
         { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value'] }
       ],
-      order: [[sequelize.fn('COALESCE', sequelize.col('charge_date'), sequelize.col('expense_date')), 'DESC']],
+      // <<< CORREÇÃO APLICADA AQUI >>>
+      order: [[sequelize.fn('COALESCE', sequelize.col('Expense.charge_date'), sequelize.col('Expense.expense_date')), 'DESC']],
       limit,
       offset,
     });
@@ -250,7 +228,8 @@ class DashboardService {
         { model: CreditCard, as: 'creditCard', attributes: ['name', 'last_four_digits'] },
         { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value'] }
       ],
-      order: [[sequelize.fn('COALESCE', sequelize.col('charge_date'), sequelize.col('expense_date')), 'DESC']],
+      // <<< CORREÇÃO APLICADA AQUI >>>
+      order: [[sequelize.fn('COALESCE', sequelize.col('Expense.charge_date'), sequelize.col('Expense.expense_date')), 'DESC']],
     });
   }
   
@@ -265,7 +244,7 @@ class DashboardService {
   }
 
   // ===================================================================
-  // 4. ENDPOINTS CRUD (CRIAR, ATUALIZAR, DELETAR)
+  // 4. ENDPOINTS CRUD
   // ===================================================================
   async updateExpense(id, data, profileId) {
     const expense = await Expense.findOne({ where: { id, profile_id: profileId } });
@@ -283,7 +262,7 @@ class DashboardService {
     const expense = await Expense.findOne({ where: { id, profile_id: profileId } });
     if (!expense) throw new Error('Despesa não encontrada ou não pertence ao perfil');
 
-    if (expense.is_installment && expense.total_installments > 1) {
+    if (expense.is_installment && !expense.original_expense_id && expense.total_installments > 1) {
         await Expense.destroy({ where: { original_expense_id: expense.id, profile_id: profileId } });
     }
     await expense.destroy();
@@ -388,7 +367,7 @@ class DashboardService {
   }
 
   _fillMissingDays(data, startDate, endDate) {
-    if (!startDate || !endDate) return data; // Retorna os dados como estão se não houver intervalo
+    if (!startDate || !endDate) return data;
     
     const dataMap = new Map(data.map(item => [format(new Date(item.date), 'yyyy-MM-dd'), parseFloat(item.total)]));
     const interval = eachDayOfInterval({ start: startDate, end: endDate });

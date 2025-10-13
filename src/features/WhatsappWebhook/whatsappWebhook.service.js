@@ -380,6 +380,8 @@ class WebhookService {
         } else if (buttonId === 'onboarding_finish') {
             const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos e receitas.\n\n*Dica:* Você sabia que também pode acessar um painel web completo para ver gráficos, relatórios e gerenciar todos os seus dados?\n\nAcesse em: https://obras-fabio.vercel.app/login`;
             await whatsappService.sendWhatsappMessage(groupId, finalMessage);
+            const menuExplanationMessage = `A qualquer momento, envie a palavra *MENU* para acessar as seguintes opções:\n\n📊 *Ver Relatório Mensal:* Receba um resumo financeiro do mês atual.\n📝 *Exportar Planilha:* Gere um arquivo Excel com todas as suas despesas.\n➕ *Criar Categoria:* Adicione novas categorias para organizar seus lançamentos.\n💳 *Gerenciar Cartões:* Crie e administre seus cartões de crédito.`;
+            await whatsappService.sendWhatsappMessage(groupId, menuExplanationMessage);
             await state.destroy();
         }
         break;
@@ -1465,12 +1467,17 @@ class WebhookService {
           if (chartData.pieChart && chartData.pieChart.length > 0) {
               expenseCategorySummary = chartData.pieChart.sort((a, b) => b.value - a.value).map(cat => `- ${cat.name}: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cat.value)}`).join('\n');
           }
+
+          let revenueCategorySummary = 'Sem receitas por categoria este mês.';
+          if (chartData.revenuePieChart && chartData.revenuePieChart.length > 0) {
+              revenueCategorySummary = chartData.revenuePieChart.sort((a, b) => b.value - a.value).map(cat => `- ${cat.name}: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cat.value)}`).join('\n');
+          }
           
           const currentMonth = new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(now);
           const currentYear = new Date().getFullYear();
           const formattedReportHeaderMonth = `${currentMonth.charAt(0).toUpperCase() + currentMonth.slice(1)}/${currentYear}`;
           
-          const reportMessage = `📊 *Relatório Mensal Financeiro* 📊\n(${formattedReportHeaderMonth}) \n\n*Resumo:*\n💸 Total Despesas: ${formattedTotalExpenses}\n💰 Total Receitas: ${formattedTotalRevenues}\n⚖️ Saldo: ${formattedBalance}\n\n*Gastos por Categoria (Despesas):*\n${expenseCategorySummary}\n\n_Este relatório é referente aos dados registrados até o momento._`;
+          const reportMessage = `📊 *Relatório Mensal Financeiro* 📊\n(${formattedReportHeaderMonth})\n\n*Resumo Geral:*\n💸 Total Despesas: ${formattedTotalExpenses}\n💰 Total Receitas: ${formattedTotalRevenues}\n⚖️ Saldo do Mês: ${formattedBalance}\n\n*Detalhes de Despesas (Gastos):*\n${expenseCategorySummary}\n\n*Detalhes de Receitas:*\n${revenueCategorySummary}\n\n_Este relatório é referente aos dados registrados até o momento._`;
           
           await whatsappService.sendWhatsappMessage(groupId, reportMessage);
       } catch (error) {

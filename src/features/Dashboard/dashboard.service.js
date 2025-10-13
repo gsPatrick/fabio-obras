@@ -161,6 +161,7 @@ class DashboardService {
 
     return {
       pieChart: expensesByCategory.map(item => ({ name: item.name, value: parseFloat(item.total) })),
+      revenuePieChart: revenuesByCategory.map(item => ({ name: item.name, value: parseFloat(item.total) })),
       pieChartByType: expensesByType.map(item => ({ name: item.type, value: parseFloat(item.total) })),
       lineChart: { labels: evolution.map(item => item.date), data: evolution.map(item => item.total) },
     };

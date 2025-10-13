@@ -167,20 +167,24 @@ class AIService {
     
     const prompt = `
       Você é um especialista em análise de documentos financeiros (comprovantes, notas) e texto.
-      Extraia as informações da IMAGEM e do TEXTO fornecido e retorne APENAS um objeto JSON válido com as chaves:
+      Sua missão é extrair informações da IMAGEM e do TEXTO fornecido pelo usuário.
+
+      **Hierarquia de Informação CRÍTICA:**
+      1. O **TEXTO DO USUÁRIO** é a fonte de verdade **PRIMÁRIA** para a 'categoryName' e 'baseDescription'.
+      2. A **IMAGEM** é a fonte de verdade **PRIMÁRIA** para o 'value' e serve para complementar a descrição.
+
+      Retorne APENAS um objeto JSON válido com as chaves:
       "value" (Número), "flow" (String: 'expense' ou 'revenue'), "baseDescription" (String), "categoryName" (String),
       "isInstallment" (Booleano), "installmentCount" (Número, se for parcelado), "cardName" (String, se for cartão de crédito),
-      "closingDay" (Número do dia do mês, se o texto mencionar "fechamento do cartão" ou "melhor dia de compra" e um número),
-      "dueDay" (Número do dia do mês, se o texto mencionar "vencimento do cartão" e um número).
+      "closingDay" (Número), "dueDay" (Número).
       
-      Regras CRÍTICAS:
-      1.  **Valor:** Extraia o valor monetário principal. Se o contexto indicar "salário" ou "recebimento", o valor é positivo. Se for "pagamento", "compra", "gasto", é uma despesa.
-      2.  **Flow:** Determine se é 'expense' (despesa) ou 'revenue' (receita) com base na imagem e no contexto. Priorize 'expense' para documentos de compra/gasto.
-      3.  **CategoryName:** Sua prioridade é mapear para uma categoria existente. DESPESAS: [${expenseCategoryList}]. RECEITAS: [${revenueCategoryList}]. <<< MUDANÇA IMPORTANTE >>> SE o texto/imagem indicar um nome de categoria que não está na lista (ex: "gasolina", "mercado"), USE ESSE NOME como 'categoryName'. Caso contrário, se não houver mapeamento claro, use "Outros" para despesas ou "Receita Padrão" para receitas.
-      4.  **isInstallment:** Se a despesa for parcelada (ex: "3x", "parcelado", "prestação"), defina como true.
-      5.  **installmentCount:** Se for parcelado, extraia o número total de parcelas (ex: "3" de "3x").
-      6.  **cardName:** Se o texto ou a imagem indicar um cartão de crédito, identifique-o. Você tem uma lista de cartões existentes: [${creditCardNames}]. Se o texto mencionar um nome similar (ex: "nubak", "nu bank"), normalize para o nome correto da lista (ex: "Nubank"). Se não houver correspondência clara, mas a compra for de crédito, use o nome mencionado.
-      7.  **closingDay e dueDay:** Apenas se o texto pedir explicitamente para CRIAR ou CONFIGURAR um cartão (ex: "criar cartão X fechamento dia Y vencimento Z"), extraia esses números. Caso contrário, devem ser null.
+      Regras CRÍTICAS de Extração:
+      1.  **Valor:** Extraia o valor monetário principal da **IMAGEM**.
+      2.  **Flow:** Determine se é 'expense' (despesa) ou 'revenue' (receita). Se o texto indicar "compra", "pagamento", ou for um comprovante de loja, é 'expense'.
+      3.  **CategoryName:** **ESTA É A REGRA MAIS IMPORTANTE.** O nome da categoria DEVE ser extraído do **TEXTO DO USUÁRIO**. Se o usuário diz "mercado", "gasolina", "cimento", a 'categoryName' DEVE ser "mercado", "gasolina" ou "cimento", mesmo que não esteja na lista de categorias existentes [${expenseCategoryList}] ou [${revenueCategoryList}]. Ignore qualquer categoria que você possa inferir da imagem se o usuário já forneceu uma no texto. Apenas se o texto NÃO fornecer uma categoria, use "Outros" (para despesa) ou "Receita Padrão" (para receita).
+      4.  **isInstallment & installmentCount:** Extraia do texto ou da imagem se a compra foi parcelada (ex: "3x").
+      5.  **cardName:** Identifique o cartão de crédito a partir da lista [${creditCardNames}]. Normalize nomes similares (ex: "nu bank" -> "Nubank").
+      6.  **closingDay e dueDay:** Extraia APENAS se o texto pedir para CRIAR um novo cartão (ex: "criar cartão X fechamento dia 10 vencimento 20"). Caso contrário, devem ser null.
       
       Contexto do usuário: "${userText || 'Nenhum'}"
     `;
@@ -232,9 +236,9 @@ class AIService {
           *   Se o texto contém um valor monetário e uma descrição de compra/pagamento/recebimento (ex: "1500 mercado", "recebi 3000 salario").
           *   "value": Extraia o valor numérico.
           *   "flow": Determine se é 'expense' ou 'revenue'. Se não for claro, assuma 'expense'.
-          *   "categoryName": <<< MUDANÇA IMPORTANTE >>> Mapeie para uma categoria de DESPESA [${expenseCategoryList}] ou RECEITA [${revenueCategoryList}]. Se a descrição contiver um nome óbvio que NÃO está na lista (ex: "aluguel", "mercado", "material de pintura"), USE ESSE NOME. Se não houver nome claro, use "Outros" para despesa ou "Receita Padrão" para receita.
+          *   "categoryName": **REGRA MAIS IMPORTANTE:** Sua prioridade MÁXIMA é extrair a categoria do texto do usuário (ex: de "1500 mercado", a categoria é "mercado"). USE ESSE NOME, mesmo que não esteja nas listas [${expenseCategoryList}] ou [${revenueCategoryList}]. Somente se NENHUMA categoria for mencionada, use "Outros" (para despesa) ou "Receita Padrão" (para receita).
           *   "isInstallment" & "installmentCount": Se mencionar parcelas (ex: "3x", "em 2 vezes"), popule os campos.
-          *   "cardName": Se mencionar um cartão, identifique-o. A lista de cartões existentes é: [${creditCardNames}]. Se o texto mencionar um nome similar (ex: "nubak", "cartao nu"), normalize para o nome exato da lista (ex: "Nubank").
+          *   "cardName": Se mencionar um cartão da lista [${creditCardNames}], identifique-o e normalize nomes similares (ex: "cartao nu" -> "Nubank").
           *   "closingDay" e "dueDay" devem ser null neste cenário.
 
       2.  **Cenário 2: Criação de Cartão de Crédito.**

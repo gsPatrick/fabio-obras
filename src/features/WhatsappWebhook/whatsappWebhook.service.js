@@ -1352,15 +1352,15 @@ class WebhookService {
         return false;
     }
     
-    const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : null);
-
+    // **INÍCIO DA CORREÇÃO APLICADA**
     const allCategories = await Category.findAll({ 
         where: { 
-            profile_id: profileId,
-            ...(originalFlow && { category_flow: originalFlow })
+            profile_id: profileId
         }, 
-        order: [['name', 'ASC']] 
+        order: [['category_flow', 'DESC'], ['name', 'ASC']]
     });
+    // **FIM DA CORREÇÃO**
+
     const selectedCategory = allCategories[selectedNumber - 1];
 
     if (!selectedCategory) { 
@@ -1371,19 +1371,44 @@ class WebhookService {
 
     let updatedEntry;
     if (pendingExpense.expense) {
+        // Se a categoria selecionada for de receita, não podemos apenas atualizar. 
+        // Precisamos deletar a despesa e criar uma receita.
         if (selectedCategory.category_flow !== 'expense') {
-            await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Receitas*, mas a despesa original é um *Custo*. Por favor, selecione uma categoria de despesa.`);
-            return true;
+            await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Receitas*. O lançamento original será convertido de Despesa para Receita.`);
+            const originalExpense = pendingExpense.expense;
+            await Revenue.create({
+                value: originalExpense.value,
+                description: originalExpense.description,
+                revenue_date: originalExpense.expense_date,
+                whatsapp_message_id: originalExpense.whatsapp_message_id,
+                category_id: selectedCategory.id,
+                profile_id: originalExpense.profile_id,
+            });
+            await originalExpense.destroy();
+            updatedEntry = await Revenue.findOne({where: {whatsapp_message_id: originalExpense.whatsapp_message_id}});
+        } else {
+            await pendingExpense.expense.update({ category_id: selectedCategory.id });
+            updatedEntry = pendingExpense.expense;
         }
-        await pendingExpense.expense.update({ category_id: selectedCategory.id });
-        updatedEntry = pendingExpense.expense;
     } else if (pendingExpense.revenue) {
+        // Lógica inversa: converter receita em despesa
         if (selectedCategory.category_flow !== 'revenue') {
-            await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Despesas*, mas a receita original é uma *Receita*. Por favor, selecione uma categoria de receita.`);
-            return true;
+             await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Despesas*. O lançamento original será convertido de Receita para Despesa.`);
+            const originalRevenue = pendingExpense.revenue;
+            await Expense.create({
+                value: originalRevenue.value,
+                description: originalRevenue.description,
+                expense_date: originalRevenue.revenue_date,
+                whatsapp_message_id: originalRevenue.whatsapp_message_id,
+                category_id: selectedCategory.id,
+                profile_id: originalRevenue.profile_id,
+            });
+            await originalRevenue.destroy();
+            updatedEntry = await Expense.findOne({where: {whatsapp_message_id: originalRevenue.whatsapp_message_id}});
+        } else {
+            await pendingExpense.revenue.update({ category_id: selectedCategory.id });
+            updatedEntry = pendingExpense.revenue;
         }
-        await pendingExpense.revenue.update({ category_id: selectedCategory.id });
-        updatedEntry = pendingExpense.revenue;
     } else {
         const analysisResult = {
             value: pendingExpense.value,
@@ -1425,19 +1450,21 @@ class WebhookService {
 
       if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ⏳\n\nO prazo para editar esta despesa já expirou ou ela não existe.`); return; }
       
-      const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : (pendingExpense.suggested_category_flow || null));
-
+      // **INÍCIO DA CORREÇÃO APLICADA**
       const allCategories = await Category.findAll({ 
           where: { 
-              profile_id: profileId,
-              ...(originalFlow && { category_flow: originalFlow })
+              profile_id: profileId
           }, 
-          order: [['name', 'ASC']] 
+          order: [['category_flow', 'DESC'],['name', 'ASC']]
       });
+      // **FIM DA CORREÇÃO**
+
       const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name} (${cat.category_flow === 'expense' ? 'Despesa' : 'Receita'})`).join('\n');
       
       const valueToFormat = pendingExpense.expense?.value || pendingExpense.revenue?.value || pendingExpense.value;
       const descriptionToUse = pendingExpense.expense?.description || pendingExpense.revenue?.description || pendingExpense.description;
+      
+      const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : (pendingExpense.suggested_category_flow || 'despesa'));
       const flowText = originalFlow === 'expense' ? 'despesa' : 'receita';
 
       const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);

@@ -3,12 +3,22 @@
 const categoryService = require('./category.service');
 
 class CategoryController {
+  // <<< NOVO MÉTODO >>>
+  async getAllWithSummary(req, res) {
+    try {
+      const categoriesWithSummary = await categoryService.getAllWithSummary(req.profileId);
+      res.status(200).json(categoriesWithSummary);
+    } catch (error) {
+      res.status(400).json({ error: error.message });
+    }
+  }
+  
   async getAll(req, res) {
     try {
-      const categories = await categoryService.getAll(req.profileId); // <<< Agora req.profileId deve vir do middleware
+      const categories = await categoryService.getAll(req.profileId);
       res.status(200).json(categories);
     } catch (error) {
-      res.status(400).json({ error: error.message }); // 400 se profileId for nulo (checado no service)
+      res.status(400).json({ error: error.message });
     }
   }
 
@@ -23,7 +33,7 @@ class CategoryController {
 
   async create(req, res) {
     try {
-      const category = await categoryService.create(req.body, req.profileId); // <<< Agora req.profileId deve vir do middleware
+      const category = await categoryService.create(req.body, req.profileId);
       res.status(201).json(category);
     } catch (error) {
       res.status(400).json({ error: error.message });

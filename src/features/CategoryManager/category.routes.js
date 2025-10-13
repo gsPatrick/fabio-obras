@@ -1,7 +1,12 @@
+// src/features/CategoryManager/category.routes.js
+
 const { Router } = require('express');
 const categoryController = require('./category.controller');
 
 const router = Router();
+
+// <<< NOVA ROTA >>>
+router.get('/with-summary', categoryController.getAllWithSummary);
 
 router.get('/', categoryController.getAll);
 router.post('/', categoryController.create);

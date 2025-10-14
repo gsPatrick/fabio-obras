@@ -86,13 +86,16 @@ class AuthController {
     }
     try {
       const user = await User.findOne({ where: { email } });
-      // <<< MUDANÇA: Verifica se usuário está ativo
       if (!user || !(await user.checkPassword(password)) || user.status !== 'active') {
         return res.status(401).json({ error: 'Credenciais inválidas ou cadastro pendente.' });
       }
+      
       const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET || 'your-default-secret', { expiresIn: '1d' });
-      const defaultProfile = await Profile.findOne({ where: { user_id: user.id }, order: [['id', 'ASC']] });
-      res.status(200).json({ message: 'Login bem-sucedido.', token: token, profileId: defaultProfile ? defaultProfile.id : null });
+      
+      // <<< MUDANÇA CRÍTICA: NÃO RETORNAMOS MAIS O profileId >>>
+      // O frontend agora será responsável por buscar os perfis e redirecionar.
+      res.status(200).json({ message: 'Login bem-sucedido.', token: token });
+
     } catch (error) {
       res.status(500).json({ error: 'Erro interno do servidor.' });
     }

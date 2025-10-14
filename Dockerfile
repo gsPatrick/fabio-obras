@@ -10,9 +10,6 @@ WORKDIR /app
 # - 'apt-get install -y poppler-utils' instala o Poppler sem pedir confirmação.
 # - '--no-install-recommends' evita pacotes desnecessários.
 # - 'rm -rf /var/lib/apt/lists/*' limpa o cache para manter a imagem final leve.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends poppler-utils && \
-    rm -rf /var/lib/apt/lists/*
 
 # Copia primeiro o package.json e package-lock.json.
 # Isso aproveita o cache do Docker — se esses arquivos não mudarem,

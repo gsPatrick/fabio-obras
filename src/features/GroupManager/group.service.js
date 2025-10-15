@@ -1,10 +1,11 @@
-// src/features/GroupManager/group.service.js
+// src/features/GroupManager/group.service.js - VERSÃO COMPLETA E CORRIGIDA
 
-const { MonitoredGroup, User } = require('../../models'); 
+const { MonitoredGroup, User, Profile } = require('../../models');
 const subscriptionService = require('../../services/subscriptionService'); 
 const groupManagerService = require('../../utils/GroupManagerService');
 const logger = require('../../utils/logger');
 const { Op } = require('sequelize');
+const whatsappService = require('../../utils/whatsappService');
 
 class GroupService {
   
@@ -19,7 +20,6 @@ class GroupService {
     const user = await User.findByPk(userId);
     const isAdmin = user?.email === 'fabio@gmail.com'; 
 
-    // <<< MUDANÇA CRÍTICA: A verificação de admin vem PRIMEIRO.
     // Se for o admin, ignora qualquer outra lógica e retorna a lista completa.
     if (isAdmin) {
       logger.info(`[GroupService] Acesso de Administrador ('${user.email}'). Retornando TODOS os grupos do cache.`);
@@ -41,13 +41,15 @@ class GroupService {
   }
 
   /**
-   * Adiciona um grupo à lista de monitoramento no banco de dados, associado a um Perfil.
-   * @param {string} groupId - O ID do grupo.
+   * Adiciona ou ATUALIZA um grupo à lista de monitoramento, garantindo que um perfil
+   * só possa monitorar UM grupo por vez.
+   * @param {string} groupId - O ID do novo grupo.
    * @param {number} profileId - O ID do perfil.
    * @param {number} userId - O ID do usuário (dono do perfil).
+   * @param {string} groupName - O nome do novo grupo.
    * @returns {Promise<object>}
    */
-async startMonitoringGroup(groupId, profileId, userId, groupName) { // <<< Adicionado groupName
+  async startMonitoringGroup(groupId, profileId, userId, groupName) {
     if (!groupId || !profileId || !userId) {
       throw new Error('O ID do grupo, perfil e usuário são obrigatórios.');
     }
@@ -57,9 +59,6 @@ async startMonitoringGroup(groupId, profileId, userId, groupName) { // <<< Adici
       throw new Error('Acesso negado: É necessário ter um plano ativo para monitorar um novo grupo.');
     }
 
-    // <<< INÍCIO DA MUDANÇA CRÍTICA: REMOVER A VALIDAÇÃO CONTRA O CACHE >>>
-    // Em vez de buscar no cache, vamos usar o nome do grupo que já sabemos pelo webhook.
-    // Se o groupName não for passado (ex: via API web), aí sim buscamos os metadados.
     let finalGroupName = groupName;
     if (!finalGroupName) {
         const groupDetails = await whatsappService.getGroupMetadata(groupId);
@@ -68,39 +67,34 @@ async startMonitoringGroup(groupId, profileId, userId, groupName) { // <<< Adici
         }
         finalGroupName = groupDetails.name;
     }
-    // <<< FIM DA MUDANÇA CRÍTICA >>>
-
-    await MonitoredGroup.update(
-        { is_active: false }, 
-        { 
-            where: { 
-                profile_id: profileId, 
-                group_id: { [Op.not]: groupId },
-                is_active: true
-            } 
-        }
-    );
-    logger.info(`[GroupService] Todos os grupos ativos foram desativados para o Perfil ${profileId}, exceto o novo.`);
-
+    
+    // LÓGICA DE CORREÇÃO:
+    // Usamos findOrCreate baseado APENAS no profile_id.
+    // Isso garante que estamos sempre operando sobre o ÚNICO registro de monitoramento
+    // para aquele perfil.
     const [monitoredGroup, created] = await MonitoredGroup.findOrCreate({
-      where: { group_id: groupId, profile_id: profileId }, 
+      where: { profile_id: profileId }, 
       defaults: {
-        name: finalGroupName, // <<< Usar o nome obtido
+        group_id: groupId,
+        name: finalGroupName,
         is_active: true,
-        profile_id: profileId, 
       },
     });
 
+    // Se o registro não foi criado, significa que ele já existia.
+    // Portanto, devemos ATUALIZÁ-LO com as informações do novo grupo.
     if (!created) {
-      monitoredGroup.is_active = true;
-      monitoredGroup.name = finalGroupName; // Garante que o nome está atualizado
-      await monitoredGroup.save();
-      logger.info(`[GroupService] Monitoramento REATIVADO (e único) para o grupo: ${finalGroupName} no Perfil ${profileId}`);
-      return { message: 'Monitoramento reativado com sucesso para este perfil. Outros grupos deste perfil desativados.', group: monitoredGroup };
+      await monitoredGroup.update({
+        group_id: groupId,
+        name: finalGroupName,
+        is_active: true, // Garante que ele fique ativo
+      });
+      logger.info(`[GroupService] Monitoramento ATUALIZADO para o grupo: ${finalGroupName} no Perfil ${profileId}`);
+      return { message: 'Monitoramento de grupo atualizado com sucesso.', group: monitoredGroup };
     }
     
-    logger.info(`[GroupService] Novo monitoramento iniciado (e único) para o grupo: ${finalGroupName} no Perfil ${profileId}`);
-    return { message: 'Grupo adicionado ao monitoramento com sucesso para este perfil. Outros grupos deste perfil desativados.', group: monitoredGroup };
+    logger.info(`[GroupService] Novo monitoramento iniciado para o grupo: ${finalGroupName} no Perfil ${profileId}`);
+    return { message: 'Grupo adicionado ao monitoramento com sucesso.', group: monitoredGroup };
   }
 
 }

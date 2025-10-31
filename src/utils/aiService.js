@@ -142,7 +142,7 @@ class AIService {
 
   /**
    * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
-   * Retorna informações detalhadas incluindo fluxo (despesa/receita), parcelamento e cartão.
+   * Retorna informações detalhadas incluindo parcelamento e cartão. O fluxo (despesa/receita) é determinado pelo sistema posteriormente.
    */
   async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg', profileId, cardNames = []) { 
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);
@@ -159,8 +159,7 @@ class AIService {
     }
     
     const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] }); 
-    const expenseCategoryList = `"${categories.filter(c => c.category_flow === 'expense').map(c => c.name).join('", "')}"`;
-    const revenueCategoryList = `"${categories.filter(c => c.category_flow === 'revenue').map(c => c.name).join('", "')}"`;
+    const allCategoryNames = `"${categories.map(c => c.name).join('", "')}"`;
 
     const creditCardNames = `"${cardNames.join('", "')}"`;
     const base64Image = finalImageBuffer.toString('base64');
@@ -174,18 +173,21 @@ class AIService {
       2. A **IMAGEM** é a fonte de verdade **PRIMÁRIA** para o 'value' e serve para complementar a descrição.
 
       Retorne APENAS um objeto JSON válido com as chaves:
-      "value" (Número), "flow" (String: 'expense' ou 'revenue'), "baseDescription" (String), "categoryName" (String),
-      "isInstallment" (Booleano), "installmentCount" (Número, se for parcelado), "cardName" (String, se for cartão de crédito),
-      "closingDay" (Número), "dueDay" (Número).
+      "value" (Número), "baseDescription" (String), "categoryName" (String, pode ser null), 
+      "ambiguousCategoryNames" (Array de strings, ou null), "isInstallment" (Booleano), 
+      "installmentCount" (Número, se for parcelado), "cardName" (String, se for cartão de crédito).
       
       Regras CRÍTICAS de Extração:
       1.  **Valor:** Extraia o valor monetário principal da **IMAGEM**.
-      2.  **Flow:** Determine se é 'expense' (despesa) ou 'revenue' (receita). Se o texto indicar "compra", "pagamento", ou for um comprovante de loja, é 'expense'.
-      3.  **CategoryName:** **ESTA É A REGRA MAIS IMPORTANTE.** O nome da categoria DEVE ser extraído do **TEXTO DO USUÁRIO**. Se o usuário diz "mercado", "gasolina", "cimento", a 'categoryName' DEVE ser "mercado", "gasolina" ou "cimento", mesmo que não esteja na lista de categorias existentes [${expenseCategoryList}] ou [${revenueCategoryList}]. Ignore qualquer categoria que você possa inferir da imagem se o usuário já forneceu uma no texto. Apenas se o texto NÃO fornecer uma categoria, use "Outros" (para despesa) ou "Receita Padrão" (para receita).
-      4.  **isInstallment & installmentCount:** Extraia do texto ou da imagem se a compra foi parcelada (ex: "3x").
-      5.  **cardName:** Identifique o cartão de crédito a partir da lista [${creditCardNames}]. Normalize nomes similares (ex: "nu bank" -> "Nubank").
-      6.  **closingDay e dueDay:** Extraia APENAS se o texto pedir para CRIAR um novo cartão (ex: "criar cartão X fechamento dia 10 vencimento 20"). Caso contrário, devem ser null.
-      
+      2.  **Descrição:** A 'baseDescription' deve ser o texto do usuário.
+      3.  **CategoryName & Ambiguidade (REGRA MAIS IMPORTANTE):**
+          a. Analise o texto do usuário (ex: "cimento", "99freela", "99") e compare-o semanticamente com a lista de categorias existentes: [${allCategoryNames}].
+          b. **PRIORIDADE 1: CORRESPONDÊNCIA EXATA.** Se o texto do usuário contiver o NOME EXATO de uma categoria existente (ex: usuário diz "gasolina para o carro" e a categoria "Gasolina" existe), use a categoria "Gasolina". Ignore ambiguidades com outras categorias parciais. Coloque o nome exato em "categoryName" e "ambiguousCategoryNames" como null.
+          c. **PRIORIDADE 2: AMBIGUIDADE REAL.** Apenas se o texto do usuário for curto e corresponder a MÚLTIPLAS categorias (ex: usuário diz "99", e existem "99pop" e "99freelas"), coloque "categoryName" como null e popule "ambiguousCategoryNames" com os nomes exatos das categorias correspondentes (ex: ["99pop", "99freelas"]). Este caso deve ser RARO.
+          d. **PRIORIDADE 3: NOVA CATEGORIA.** Se NENHUMA categoria existente corresponder, coloque o termo principal do usuário em "categoryName" para sinalizar uma nova categoria e deixe "ambiguousCategoryNames" como null.
+          e. **FALLBACK:** Se o texto não fornecer nenhuma pista de categoria, use "Outros" em "categoryName".
+      4.  **Parcelamento e Cartão:** Extraia 'isInstallment', 'installmentCount', e 'cardName' com base no texto e na imagem.
+
       Contexto do usuário: "${userText || 'Nenhum'}"
     `;
 
@@ -212,43 +214,41 @@ class AIService {
   }
 
   /**
-   * Analisa um texto puro (mensagem de WhatsApp) para extrair despesas ou receitas, parcelamento e cartão.
-   * Retorna informações detalhadas, incluindo dias de fechamento/vencimento se aplicável à criação de cartão.
+   * Analisa um texto puro (mensagem de WhatsApp) para extrair informações de lançamento.
+   * O fluxo (despesa/receita) é determinado pelo sistema posteriormente.
    */
   async analyzeTextForExpenseOrRevenue(userText, profileId, cardNames = []) {
     logger.info(`[AIService] Iniciando análise de texto puro: "${userText}"`);
 
     const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] }); 
-    const expenseCategoryList = `"${categories.filter(c => c.category_flow === 'expense').map(c => c.name).join('", "')}"`;
-    const revenueCategoryList = `"${categories.filter(c => c.category_flow === 'revenue').map(c => c.name).join('", "')}"`;
+    const allCategoryNames = `"${categories.map(c => c.name).join('", "')}"`;
 
     const creditCardNames = `"${cardNames.join('", "')}"`;
 
     const prompt = `
-      Você é um especialista em análise de texto financeiro para um bot de WhatsApp. Sua tarefa é analisar a mensagem do usuário e extrair informações de despesa, receita ou criação de cartão.
+      Você é um especialista em análise de texto financeiro para um bot de WhatsApp.
       Retorne APENAS um objeto JSON válido com as chaves:
-      "value" (Número, ou null), "flow" (String: 'expense' ou 'revenue', ou null), "baseDescription" (String),
-      "categoryName" (String, ou null), "isInstallment" (Booleano), "installmentCount" (Número, se parcelado),
-      "cardName" (String, se for cartão de crédito), "closingDay" (Número), "dueDay" (Número).
+      "value" (Número, ou null), "baseDescription" (String), "categoryName" (String, ou null), 
+      "ambiguousCategoryNames" (Array de strings, ou null), "isInstallment" (Booleano), 
+      "installmentCount" (Número, se parcelado), "cardName" (String, se for cartão de crédito), 
+      "closingDay" (Número), "dueDay" (Número).
       
       Regras CRÍTICAS:
-      1.  **Cenário 1: Lançamento de Despesa/Receita.**
-          *   Se o texto contém um valor monetário e uma descrição de compra/pagamento/recebimento (ex: "1500 mercado", "recebi 3000 salario").
-          *   "value": Extraia o valor numérico.
-          *   "flow": Determine se é 'expense' ou 'revenue'. Se não for claro, assuma 'expense'.
-          *   "categoryName": **REGRA MAIS IMPORTANTE:** Sua prioridade MÁXIMA é extrair a categoria do texto do usuário (ex: de "1500 mercado", a categoria é "mercado"). USE ESSE NOME, mesmo que não esteja nas listas [${expenseCategoryList}] ou [${revenueCategoryList}]. Somente se NENHUMA categoria for mencionada, use "Outros" (para despesa) ou "Receita Padrão" (para receita).
-          *   "isInstallment" & "installmentCount": Se mencionar parcelas (ex: "3x", "em 2 vezes"), popule os campos.
-          *   "cardName": Se mencionar um cartão da lista [${creditCardNames}], identifique-o e normalize nomes similares (ex: "cartao nu" -> "Nubank").
-          *   "closingDay" e "dueDay" devem ser null neste cenário.
+      1.  **Cenário 1: Lançamento Financeiro.**
+          *   Sua missão é identificar o "categoryName" com base no texto do usuário e na lista de categorias: [${allCategoryNames}]. O sistema definirá se é despesa ou receita baseado na sua escolha.
+          *   **CategoryName & Ambiguidade (REGRA MAIS IMPORTANTE):**
+              a. **PRIORIDADE 1: CORRESPONDÊNCIA EXATA.** Se o texto do usuário contiver o NOME EXATO de uma categoria existente (ex: usuário diz "gasolina para o carro" e a categoria "Gasolina" existe), use a categoria "Gasolina". Coloque o nome exato em "categoryName" e "ambiguousCategoryNames" como null.
+              b. **PRIORIDADE 2: AMBIGUIDADE REAL.** Apenas se o termo do usuário for curto e corresponder a MÚLTIPLAS categorias (ex: "99" e existem "99pop" e "99freelas"), coloque "categoryName" como null e popule "ambiguousCategoryNames" com os nomes exatos. Este caso deve ser RARO.
+              c. **PRIORIDADE 3: NOVA CATEGORIA.** Se NENHUMA categoria existente corresponder semanticamente, coloque o termo principal do usuário em "categoryName" para sinalizar uma nova categoria.
+              d. **FALLBACK:** Se o texto não der pista de categoria, use "Outros" em "categoryName".
+          *   Popule os demais campos (value, baseDescription, isInstallment, etc.) normalmente.
 
-      2.  **Cenário 2: Criação de Cartão de Crédito.**
-          *   Se o texto contém palavras-chave como "criar cartão", "novo cartão", "adicionar cartão".
-          *   "value", "flow", "categoryName", "isInstallment", "installmentCount" devem ser null.
-          *   "cardName": Extraia o nome do novo cartão (ex: "Visa Platinum").
-          *   "closingDay": Extraia o número do dia de fechamento (ex: de "fechamento dia 10").
-          *   "dueDay": Extraia o número do dia de vencimento (ex: de "vencimento dia 20").
+      2.  **Cenário 2: Criação de Cartão.**
+          *   Se o texto contém "criar cartão", "novo cartão", etc.
+          *   Todos os campos de lançamento devem ser null.
+          *   Popule "cardName", "closingDay", e "dueDay".
 
-      3.  **Ambiguidade:** Se o texto for ambíguo, priorize o Cenário 1 (Lançamento). Se não houver valor monetário claro, considere o Cenário 2. Se nenhum se encaixar, retorne todos os campos como null, exceto "baseDescription" com o texto original.
+      3.  **Ambiguidade Geral:** Se for ambíguo, priorize o Cenário 1. Se nenhum se encaixar, retorne todos os campos como null, exceto "baseDescription" com o texto original.
 
       Texto do usuário: "${userText}"
     `;
@@ -274,30 +274,14 @@ class AIService {
   }
 
   _validateAnalysisResult(result, categories, cardNames = []) {
-    if (result.value !== null) {
-        if (!result.flow || !['expense', 'revenue'].includes(result.flow)) {
-            result.flow = 'expense';
-            logger.warn(`[AIService] IA sugeriu fluxo inválido/vazio para lançamento. Usando 'expense'.`);
-        }
-    } else if (!result.cardName || !result.closingDay || !result.dueDay) {
-        // Se não for um lançamento de valor e nem uma criação de cartão válida, zera tudo.
-        return { value: null, flow: null, baseDescription: result.baseDescription || '', categoryName: null, isInstallment: false, installmentCount: null, cardName: null, closingDay: null, dueDay: null };
-    }
-
-    if (result.categoryName && result.flow) {
-        const validCategory = categories.find(c => 
-            c.name.toLowerCase() === result.categoryName.toLowerCase() && c.category_flow === result.flow
-        );
-        if (validCategory) {
-            result.categoryName = validCategory.name;
-        }
+    // Se não for um lançamento de valor e nem uma criação de cartão válida, zera tudo.
+    if (result.value === null && (!result.cardName || !result.closingDay || !result.dueDay)) {
+        return { value: null, baseDescription: result.baseDescription || '', categoryName: null, isInstallment: false, installmentCount: null, cardName: null, closingDay: null, dueDay: null, ambiguousCategoryNames: null };
     }
 
     if (result.cardName && cardNames.length > 0) {
         const lowerCaseCardName = result.cardName.toLowerCase();
-        // Busca exata primeiro (case-insensitive)
         let foundCard = cardNames.find(c => c.toLowerCase() === lowerCaseCardName);
-        // Se não encontrar, tenta uma busca por inclusão (fuzzy)
         if (!foundCard) {
             foundCard = cardNames.find(c => c.toLowerCase().includes(lowerCaseCardName) || lowerCaseCardName.includes(c.toLowerCase()));
         }
@@ -307,16 +291,10 @@ class AIService {
         }
     }
 
-    if (result.flow === 'expense') {
-        if (result.isInstallment && (!result.installmentCount || result.installmentCount <= 0)) {
-            result.installmentCount = 2;
-        } else if (!result.isInstallment) {
-            result.installmentCount = null;
-        }
-    } else {
-        result.isInstallment = false;
+    if (result.isInstallment && (!result.installmentCount || result.installmentCount <= 0)) {
+        result.installmentCount = 2; // Default
+    } else if (!result.isInstallment) {
         result.installmentCount = null;
-        result.cardName = null;
     }
 
     if (result.value !== null) {
@@ -324,7 +302,6 @@ class AIService {
         if (isNaN(result.value)) {
             logger.error(`[AIService] IA não conseguiu extrair um valor numérico válido.`);
             result.value = null;
-            result.flow = null;
             result.categoryName = null;
         }
     }

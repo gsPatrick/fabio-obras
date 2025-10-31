@@ -1,23 +1,49 @@
 // src/features/ProfileManager/profile.service.js
-const { Profile, MonitoredGroup } = require('../../models');
-// <<< IMPORTAR O SERVIÇO DE ASSINATURA >>>
+const { Profile, MonitoredGroup, Category } = require('../../models');
 const subscriptionService = require('../../services/subscriptionService');
+const logger = require('../../utils/logger');
+
+/**
+ * Cria as categorias essenciais para um novo perfil.
+ * @param {number} profileId - O ID do perfil recém-criado.
+ */
+async function _seedEssentialCategoriesForNewProfile(profileId) {
+    if (!profileId) return;
+    try {
+        const essentialCategories = [
+            { name: 'Outros', type: 'Outros', category_flow: 'expense' },
+            { name: 'Receita Padrão', type: 'Receita', category_flow: 'revenue' },
+        ];
+        logger.info(`[ProfileService] Criando categorias essenciais para o perfil ${profileId}...`);
+        for (const categoryData of essentialCategories) {
+            await Category.findOrCreate({
+                where: { name: categoryData.name, profile_id: profileId, category_flow: categoryData.category_flow },
+                defaults: { ...categoryData, profile_id: profileId },
+            });
+        }
+    } catch (error) {
+        logger.error(`[ProfileService] Falha ao criar categorias essenciais para o perfil ${profileId}:`, error);
+    }
+}
+
 
 class ProfileService {
   /**
-   * Cria um novo perfil para um usuário.
-   * <<< LÓGICA DE VALIDAÇÃO ADICIONADA AQUI >>>
+   * Cria um novo perfil para um usuário e popula com categorias essenciais.
    */
   async createProfile(data) {
     const { name, image_url, user_id } = data;
 
-    // 1. Chamar a validação de limite de perfis ANTES de criar.
-    // O método _checkProfileLimit lançará um erro se o limite for atingido.
-    // Tornamos o método público no service para poder ser chamado aqui.
+    // 1. Valida o limite de perfis da assinatura do usuário.
     await subscriptionService._checkProfileLimit(user_id);
     
-    // 2. Se a validação passar, cria o perfil normalmente.
-    return Profile.create({ name, image_url, user_id });
+    // 2. Cria o perfil.
+    const newProfile = await Profile.create({ name, image_url, user_id });
+
+    // 3. <<< MUDANÇA CRÍTICA >>> Adiciona as categorias padrão ao novo perfil.
+    await _seedEssentialCategoriesForNewProfile(newProfile.id);
+
+    return newProfile;
   }
 
   /**
@@ -53,8 +79,7 @@ class ProfileService {
     const profile = await Profile.findOne({ where: { id: profileId, user_id: userId } });
     if (!profile) throw new Error('Perfil não encontrado.');
     
-    // IMPORTANTE: A lógica de CASCADE DELETE no banco de dados deve
-    // cuidar da exclusão de todos os dados associados (despesas, receitas, etc.).
+    // A lógica de CASCADE DELETE configurada nos models cuidará da exclusão dos dados associados.
     await profile.destroy();
   }
 }

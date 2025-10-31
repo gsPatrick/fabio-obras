@@ -5,11 +5,16 @@ FROM mirror.gcr.io/library/node:18-slim AS base
 # Define o diretório de trabalho dentro do contêiner.
 WORKDIR /app
 
-# Instala as dependências do sistema.
+# --- INÍCIO DA CORREÇÃO ---
+# Instala as dependências do sistema operacional.
 # - 'apt-get update' atualiza a lista de pacotes.
 # - 'apt-get install -y poppler-utils' instala o Poppler sem pedir confirmação.
 # - '--no-install-recommends' evita pacotes desnecessários.
 # - 'rm -rf /var/lib/apt/lists/*' limpa o cache para manter a imagem final leve.
+RUN apt-get update && \
+    apt-get install -y poppler-utils --no-install-recommends && \
+    rm -rf /var/lib/apt/lists/*
+# --- FIM DA CORREÇÃO ---
 
 # Copia primeiro o package.json e package-lock.json.
 # Isso aproveita o cache do Docker — se esses arquivos não mudarem,

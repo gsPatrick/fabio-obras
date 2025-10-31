@@ -914,11 +914,13 @@ class WebhookService {
   }
 
   // <<< INÍCIO DA MODIFICAÇÃO: Lógica de Decisão Centralizada >>>
-  async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
-    const { categoryName, value, baseDescription, isInstallment, installmentCount, cardName, ambiguousCategoryNames } = analysisResult;
+async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
+    const { value, baseDescription, isInstallment, installmentCount, cardName, ambiguousCategoryNames } = analysisResult;
+    let categoryNameFromAI = analysisResult.categoryName; // Pega o nome sugerido pela IA
     const profileId = pendingData.profile_id;
     const groupId = pendingData.whatsapp_group_id;
 
+    // Passo 1: Lida com ambiguidade real, se a IA retornar. (Inalterado)
     if (ambiguousCategoryNames && ambiguousCategoryNames.length > 0) {
         pendingData.value = value;
         pendingData.description = JSON.stringify(ambiguousCategoryNames);
@@ -931,25 +933,50 @@ class WebhookService {
         const message = `🤔 O termo que você usou é um pouco vago e corresponde a mais de uma categoria. Qual delas você quis dizer?\n\n${categoryListText}\n\nResponda com o *número* da opção correta.`;
         
         await whatsappService.sendWhatsappMessage(groupId, message);
-        return;
+        return; 
     }
 
-    const category = await Category.findOne({ 
+    // Passo 2: Tenta encontrar a categoria sugerida pela IA.
+    let category = await Category.findOne({ 
         where: { 
-            name: { [Op.iLike]: categoryName }, 
+            name: { [Op.iLike]: categoryNameFromAI }, 
             profile_id: profileId 
         } 
     });
 
+    // Passo 2.1: Lógica de Fallback. Se a IA sugeriu "Outros", mas o texto original tinha uma pista melhor, TENTE NOVAMENTE.
+    if (!category || (categoryNameFromAI.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
+        logger.warn(`[Webhook] IA sugeriu '${categoryNameFromAI}', mas tentando fallback com texto original: '${baseDescription}'`);
+        const fallbackCategory = await Category.findOne({
+            where: {
+                profile_id: profileId,
+                // Procura por uma categoria cujo nome esteja CONTIDO no texto do usuário, ignorando maiúsculas/minúsculas.
+                [Op.and]: sequelize.where(
+                    sequelize.fn('LOWER', baseDescription), 
+                    'LIKE', 
+                    '%' + sequelize.fn('LOWER', sequelize.col('name')) + '%'
+                )
+            },
+            // Ordena para pegar a correspondência mais longa primeiro, evitando "Sal" em vez de "Salário".
+            order: [[sequelize.fn('LENGTH', sequelize.col('name')), 'DESC']]
+        });
+
+        if (fallbackCategory) {
+            logger.info(`[Webhook] Fallback bem-sucedido! Categoria encontrada: '${fallbackCategory.name}'`);
+            category = fallbackCategory; // Usa a categoria encontrada no fallback!
+        }
+    }
+
+    // Passo 3: Decidir o que fazer com base na busca.
     if (category) {
-        // SUCESSO! Categoria encontrada. O flow dela é a verdade.
+        // SUCESSO! Categoria encontrada (seja pela IA ou pelo fallback).
         const finalFlow = category.category_flow;
-        const resolvedAnalysis = { ...analysisResult, flow: finalFlow };
+        const resolvedAnalysis = { ...analysisResult, flow: finalFlow, categoryName: category.name };
 
         if (finalFlow === 'expense' && (isInstallment || cardName)) {
             pendingData.value = value;
             pendingData.description = baseDescription;
-            pendingData.suggested_new_category_name = categoryName;
+            pendingData.suggested_new_category_name = category.name; // Categoria já validada
             pendingData.installment_count = isInstallment ? installmentCount : null;
             pendingData.action_expected = 'awaiting_credit_card_choice';
             pendingData.suggested_category_id = category.id;
@@ -958,12 +985,12 @@ class WebhookService {
             const creditCards = await creditCardService.getAllCreditCards(profileId);
             if (creditCards.length > 0) {
                 const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name}`).join('\n');
-                let cardMessage = `ℹ️ A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}* pode ser de cartão.\n\nSelecione o *número* do cartão para registrar ou responda *0* para registrar como dinheiro/débito.\n\n${cardListText}`;
+                let cardMessage = `ℹ️ A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}* pode ser de cartão.\n\nSelecione o *número* do cartão ou responda *0* para dinheiro/débito.\n\n${cardListText}`;
                 
                 if (cardName) {
                     const suggestedCard = creditCards.find(c => c.name.toLowerCase() === cardName.toLowerCase());
                     if (suggestedCard) {
-                        cardMessage = `ℹ️ A IA sugeriu o cartão *${suggestedCard.name}* para a despesa. Confirma? Responda com o *número* do cartão ou *0* para dinheiro/débito.\n\n${cardListText}`;
+                        cardMessage = `ℹ️ A IA sugeriu o cartão *${suggestedCard.name}*. Confirma? Responda com o *número* do cartão ou *0* para dinheiro/débito.\n\n${cardListText}`;
                     }
                 }
                 await whatsappService.sendWhatsappMessage(groupId, cardMessage);
@@ -978,23 +1005,25 @@ class WebhookService {
             await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
         }
     } else {
-        // FALHA! Categoria não encontrada -> Fluxo de nova categoria.
+        // FALHA FINAL! Nenhuma categoria encontrada. Inicia o fluxo de criação.
+        // Usa uma parte do texto original do usuário como sugestão.
+        const categorySuggestion = baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria";
+        
         pendingData.value = value;
         pendingData.description = userContext ? `${baseDescription} (${userContext})` : baseDescription;
-        pendingData.suggested_new_category_name = categoryName;
+        pendingData.suggested_new_category_name = categorySuggestion; // Usa a sugestão limpa
         pendingData.action_expected = 'awaiting_new_category_flow_decision';
-        pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000);
         await pendingData.save();
 
-        const message = `🤔 A categoria "*${categoryName}*" é nova. Ela deve ser registrada como uma *Despesa* ou *Receita*?`;
+        const message = `🤔 A categoria "*${categorySuggestion}*" é nova. Ela deve ser registrada como uma *Despesa* ou *Receita*?`;
         const buttons = [ 
             { id: `new_cat_flow_expense_${pendingData.id}`, label: '💸 Despesa' }, 
             { id: `new_cat_flow_revenue_${pendingData.id}`, label: '💰 Receita' } 
         ];
         await whatsappService.sendButtonList(groupId, message, buttons);
-        logger.info(`[Webhook] Nova categoria "${categoryName}" sugerida. Aguardando decisão de fluxo do usuário.`);
+        logger.info(`[Webhook] Nova categoria "${categorySuggestion}" sugerida. Aguardando decisão de fluxo do usuário.`);
     }
-  }
+}
   // <<< FIM DA MODIFICAÇÃO >>>
 
 

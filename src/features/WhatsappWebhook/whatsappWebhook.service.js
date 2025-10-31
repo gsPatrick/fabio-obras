@@ -2,7 +2,7 @@
 'use strict';
 
 const logger = require('../../utils/logger');
-const { MonitoredGroup, Category, PendingExpense, Expense, Revenue, Profile, User, OnboardingState, MonthlyGoal, CreditCard } = require('../../models');
+const { MonitoredGroup, Category, PendingExpense, Expense, Revenue, Profile, User, OnboardingState, MonthlyGoal, CreditCard, sequelize } = require('../../models');
 const subscriptionService = require('../../services/subscriptionService');
 const profileService = require('../ProfileManager/profile.service');
 const groupService = require('../GroupManager/group.service');
@@ -947,19 +947,18 @@ async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
     // Passo 2.1: Lógica de Fallback. Se a IA sugeriu "Outros", mas o texto original tinha uma pista melhor, TENTE NOVAMENTE.
     if (!category || (categoryNameFromAI.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
         logger.warn(`[Webhook] IA sugeriu '${categoryNameFromAI}', mas tentando fallback com texto original: '${baseDescription}'`);
-        const fallbackCategory = await Category.findOne({
-            where: {
-                profile_id: profileId,
-                // Procura por uma categoria cujo nome esteja CONTIDO no texto do usuário, ignorando maiúsculas/minúsculas.
-                [Op.and]: sequelize.where(
-                    sequelize.fn('LOWER', baseDescription), 
-                    'LIKE', 
-                    '%' + sequelize.fn('LOWER', sequelize.col('name')) + '%'
-                )
-            },
-            // Ordena para pegar a correspondência mais longa primeiro, evitando "Sal" em vez de "Salário".
-            order: [[sequelize.fn('LENGTH', sequelize.col('name')), 'DESC']]
-        });
+const fallbackCategory = await Category.findOne({
+    where: {
+        profile_id: profileId,
+        // A expressão '$coluna$' é uma forma do Sequelize se referir a colunas
+        // em funções. Usamos a função LOWER() do SQL para ignorar case.
+        [Op.and]: sequelize.where(
+            sequelize.fn('LOWER', baseDescription), 
+            { [Op.like]: sequelize.literal(`'%' || LOWER(name) || '%'`) }
+        )
+    },
+    order: [[sequelize.fn('LENGTH', sequelize.col('name')), 'DESC']]
+});
 
         if (fallbackCategory) {
             logger.info(`[Webhook] Fallback bem-sucedido! Categoria encontrada: '${fallbackCategory.name}'`);

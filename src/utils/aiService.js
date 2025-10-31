@@ -74,7 +74,7 @@ class AIService {
     } finally {
       if (fs.existsSync(tempPdfPath)) fs.unlinkSync(tempPdfPath);
       const imagePath = `${tempOutputPath}-1.jpg`;
-      if (fs.existsSync(imagePath)) fs.existsSync(imagePath);
+      if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
     }
   }
 

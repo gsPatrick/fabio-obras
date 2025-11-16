@@ -124,28 +124,22 @@ class WebhookService {
     if (payload.text?.message?.toUpperCase().trim() === MENU_COMMAND) {
         return this.sendMainMenu(payload.phone, payload.participantPhone, payload.profileId);
     }
-
-    // <<< INÍCIO DA MODIFICAÇÃO: Lógica para Mídia com Legenda >>>
+    
     const caption = payload.image?.caption || payload.document?.caption;
 
     if ((payload.image || payload.document) && caption) {
-        // NOVO FLUXO: Mídia COM legenda. Trata como um lançamento completo.
         logger.info(`[Webhook] Mídia com legenda "${caption}" recebida. Iniciando análise direta.`);
-        // Passa a legenda como se fosse uma mensagem de texto no payload.
         payload.text = { message: caption };
         return this.handleContextArrival(payload);
     }
     
     if (payload.image || payload.document) { 
-        // Fluxo antigo: Mídia SEM legenda. Pede o contexto.
         return this.handleMediaArrival(payload); 
     }
     
     if (payload.audio || payload.text) { 
-        // Fluxo de texto/áudio puro.
         return this.handleContextArrival(payload); 
     }
-    // <<< FIM DA MODIFICAÇÃO >>>
   }
   
   async sendMainMenu(groupId, participantPhone, profileId) {
@@ -518,6 +512,52 @@ class WebhookService {
         return;
     }
 
+    // <<< INÍCIO DA NOVA LÓGICA: Manipulador para verificação de duplicidade >>>
+    if (buttonId.startsWith('duplicate_')) {
+        const [_, action, pendingId] = buttonId.split('_');
+        const pendingState = await PendingExpense.findByPk(pendingId, { where: { profile_id: profileId } });
+
+        if (!pendingState) {
+            await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`);
+            return;
+        }
+
+        const analysisResult = {
+            value: pendingState.value,
+            baseDescription: pendingState.description,
+            isInstallment: !!pendingState.installment_count,
+            installmentCount: pendingState.installment_count,
+        };
+        const userContext = ''; // O contexto já está na descrição.
+
+        if (action === 'new') {
+            logger.info(`[Webhook] Usuário confirmou que é um novo gasto. Criando...`);
+            // Se é um novo gasto, removemos o ID do gasto antigo e prosseguimos com a criação
+            pendingState.expense_id = null;
+            await this.createExpenseOrRevenueAndStartEditFlow(pendingState, analysisResult, userContext, pendingState.suggested_category_id, null);
+        } else if (action === 'update') {
+            logger.info(`[Webhook] Usuário confirmou que é uma correção. Atualizando gasto ID ${pendingState.expense_id}...`);
+            const expenseToUpdate = await Expense.findByPk(pendingState.expense_id);
+            if (expenseToUpdate) {
+                const oldValue = expenseToUpdate.value;
+                expenseToUpdate.value = pendingState.value; // Atualiza o valor para o novo
+                expenseToUpdate.description = pendingState.description; // Atualiza a descrição
+                await expenseToUpdate.save();
+                await pendingState.destroy();
+                
+                const formattedOldValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(oldValue);
+                const formattedNewValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(expenseToUpdate.value);
+
+                await whatsappService.sendWhatsappMessage(groupId, `✅ Gasto anterior atualizado de ${formattedOldValue} para *${formattedNewValue}*!`);
+            } else {
+                 await whatsappService.sendWhatsappMessage(groupId, `❌ Não foi possível encontrar o gasto original para atualizar.`);
+                 await pendingState.destroy();
+            }
+        }
+        return;
+    }
+    // <<< FIM DA NOVA LÓGICA >>>
+
     if (buttonId.startsWith('edit_expense_')) {
       return this.handleEditButtonFlow(payload);
     }
@@ -730,8 +770,30 @@ class WebhookService {
     logger.info(`[Webhook] Mídia (${mimeType}) de ${participantPhone} recebida. Mensagem de confirmação enviada.`);
   }
 
+  // <<< FUNÇÃO MODIFICADA (Dispatcher) >>>
   async handleContextArrival(payload) {
     if (payload.fromMe) { return; }
+    const textMessage = payload.text ? payload.text.message : null;
+
+    // Lógica de Múltiplas Linhas
+    if (textMessage && textMessage.includes('\n')) {
+        logger.info(`[Webhook] Mensagem com múltiplas linhas detectada. Processando sequencialmente.`);
+        const lines = textMessage.split('\n').filter(line => line.trim() !== '');
+
+        for (const line of lines) {
+            logger.info(`[Webhook] Processando linha: "${line}"`);
+            const singleLinePayload = { ...payload, text: { message: line } };
+            await this._processSingleContext(singleLinePayload);
+        }
+        return;
+    }
+    
+    // Se não for múltipla linha, processa como uma única mensagem
+    await this._processSingleContext(payload);
+  }
+
+  // <<< NOVA FUNÇÃO PRIVADA (Lógica Original) >>>
+  async _processSingleContext(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
     const profileId = payload.profileId;
@@ -761,7 +823,7 @@ class WebhookService {
             whatsapp_group_id: groupId, 
             profile_id: profileId, 
             action_expected: { 
-                [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply']
+                [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply', 'awaiting_duplicate_confirmation']
             }
         },
         order: [['createdAt', 'DESC']]
@@ -775,14 +837,12 @@ class WebhookService {
             return this.handleCreditCardCreationFlowFromPending(payload, pendingFlow);
         }
     }
-
-    // <<< INÍCIO DA MODIFICAÇÃO: Lógica para Mídia com Legenda >>>
+    
     const hasMediaInPayload = payload.image || payload.document;
 
     if (hasMediaInPayload) {
-        // NOVO CENÁRIO: A mídia e o contexto (legenda) chegaram juntos.
         await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando documento e sua descrição...`);
-        const userContext = textMessage; // A legenda
+        const userContext = textMessage;
         const mediaUrl = payload.image?.imageUrl || payload.document?.documentUrl;
         const mimeType = payload.image?.mimeType || payload.document?.mimeType;
 
@@ -798,7 +858,6 @@ class WebhookService {
             });
             
             const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
-            // ATENÇÃO: A IA não vai mais retornar o 'flow'. Isso será tratado em decideAndSaveExpenseOrRevenue.
             const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, mimeType, profileId, cardNames);
             
             if (analysisResult) {
@@ -810,9 +869,8 @@ class WebhookService {
         } else {
             await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o arquivo. Por favor, tente novamente.`);
         }
-        return; // Finaliza o fluxo aqui.
+        return;
     }
-    // <<< FIM DA MODIFICAÇÃO >>>
 
     const pendingMedia = await PendingExpense.findOne({
       where: { 
@@ -847,7 +905,6 @@ class WebhookService {
       const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
       if (mediaBuffer && userContext) {
         const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
-        // ATENÇÃO: A IA não vai mais retornar o 'flow'.
         const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, profileId, cardNames);
         if (analysisResult) {
           return this.decideAndSaveExpenseOrRevenue(pendingMedia, analysisResult, userContext);
@@ -882,7 +939,6 @@ class WebhookService {
             });
             
             const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
-            // ATENÇÃO: A IA não vai mais retornar o 'flow'.
             const analysisResult = await aiService.analyzeTextForExpenseOrRevenue(userContext, profileId, cardNames);
             
             if (analysisResult && (analysisResult.value !== null || (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay))) {
@@ -913,14 +969,13 @@ class WebhookService {
     }
   }
 
-  // <<< INÍCIO DA MODIFICAÇÃO: Lógica de Decisão Centralizada >>>
-async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
+  // <<< FUNÇÃO MODIFICADA (com verificação de duplicidade) >>>
+  async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
     const { value, baseDescription, isInstallment, installmentCount, cardName, ambiguousCategoryNames } = analysisResult;
-    let categoryNameFromAI = analysisResult.categoryName; // Pega o nome sugerido pela IA
+    let categoryNameFromAI = analysisResult.categoryName;
     const profileId = pendingData.profile_id;
     const groupId = pendingData.whatsapp_group_id;
 
-    // Passo 1: Lida com ambiguidade real, se a IA retornar. (Inalterado)
     if (ambiguousCategoryNames && ambiguousCategoryNames.length > 0) {
         pendingData.value = value;
         pendingData.description = JSON.stringify(ambiguousCategoryNames);
@@ -936,7 +991,6 @@ async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
         return; 
     }
 
-    // Passo 2: Tenta encontrar a categoria sugerida pela IA.
     let category = await Category.findOne({ 
         where: { 
             name: { [Op.iLike]: categoryNameFromAI }, 
@@ -944,38 +998,65 @@ async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
         } 
     });
 
-    // Passo 2.1: Lógica de Fallback. Se a IA sugeriu "Outros", mas o texto original tinha uma pista melhor, TENTE NOVAMENTE.
     if (!category || (categoryNameFromAI.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
         logger.warn(`[Webhook] IA sugeriu '${categoryNameFromAI}', mas tentando fallback com texto original: '${baseDescription}'`);
-const fallbackCategory = await Category.findOne({
-    where: {
-        profile_id: profileId,
-        // A expressão '$coluna$' é uma forma do Sequelize se referir a colunas
-        // em funções. Usamos a função LOWER() do SQL para ignorar case.
-        [Op.and]: sequelize.where(
-            sequelize.fn('LOWER', baseDescription), 
-            { [Op.like]: sequelize.literal(`'%' || LOWER(name) || '%'`) }
-        )
-    },
-    order: [[sequelize.fn('LENGTH', sequelize.col('name')), 'DESC']]
-});
+        const fallbackCategory = await Category.findOne({
+            where: {
+                profile_id: profileId,
+                [Op.and]: sequelize.where(
+                    sequelize.fn('LOWER', baseDescription), 
+                    { [Op.like]: sequelize.literal(`'%' || LOWER(name) || '%'`) }
+                )
+            },
+            order: [[sequelize.fn('LENGTH', sequelize.col('name')), 'DESC']]
+        });
 
         if (fallbackCategory) {
             logger.info(`[Webhook] Fallback bem-sucedido! Categoria encontrada: '${fallbackCategory.name}'`);
-            category = fallbackCategory; // Usa a categoria encontrada no fallback!
+            category = fallbackCategory;
         }
     }
 
-    // Passo 3: Decidir o que fazer com base na busca.
     if (category) {
-        // SUCESSO! Categoria encontrada (seja pela IA ou pelo fallback).
+        // <<< INÍCIO DA LÓGICA DE VERIFICAÇÃO DE DUPLICIDADE >>>
+        const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
+        const recentSimilarExpense = await Expense.findOne({
+            where: {
+                profile_id: profileId,
+                category_id: category.id,
+                createdAt: { [Op.gte]: fiveMinutesAgo }
+            },
+            order: [['createdAt', 'DESC']]
+        });
+
+        if (recentSimilarExpense && category.category_flow === 'expense') {
+            logger.info(`[Webhook] Gasto similar recente encontrado (ID: ${recentSimilarExpense.id}). Perguntando ao usuário.`);
+            
+            pendingData.value = value;
+            pendingData.description = baseDescription;
+            pendingData.suggested_category_id = category.id;
+            pendingData.expense_id = recentSimilarExpense.id; 
+            pendingData.action_expected = 'awaiting_duplicate_confirmation';
+            pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000);
+            await pendingData.save();
+
+            const message = `🤔 Um gasto na categoria *${category.name}* já foi registrado há pouco. Este é um novo gasto ou uma correção do anterior?`;
+            const buttons = [
+                { id: `duplicate_new_${pendingData.id}`, label: ' Novo Gasto' },
+                { id: `duplicate_update_${pendingData.id}`, label: ' Corrigir Anterior' }
+            ];
+            await whatsappService.sendButtonList(groupId, message, buttons);
+            return;
+        }
+        // <<< FIM DA LÓGICA DE VERIFICAÇÃO DE DUPLICIDADE >>>
+
         const finalFlow = category.category_flow;
         const resolvedAnalysis = { ...analysisResult, flow: finalFlow, categoryName: category.name };
 
         if (finalFlow === 'expense' && (isInstallment || cardName)) {
             pendingData.value = value;
             pendingData.description = baseDescription;
-            pendingData.suggested_new_category_name = category.name; // Categoria já validada
+            pendingData.suggested_new_category_name = category.name;
             pendingData.installment_count = isInstallment ? installmentCount : null;
             pendingData.action_expected = 'awaiting_credit_card_choice';
             pendingData.suggested_category_id = category.id;
@@ -1004,13 +1085,11 @@ const fallbackCategory = await Category.findOne({
             await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
         }
     } else {
-        // FALHA FINAL! Nenhuma categoria encontrada. Inicia o fluxo de criação.
-        // Usa uma parte do texto original do usuário como sugestão.
         const categorySuggestion = baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria";
         
         pendingData.value = value;
         pendingData.description = userContext ? `${baseDescription} (${userContext})` : baseDescription;
-        pendingData.suggested_new_category_name = categorySuggestion; // Usa a sugestão limpa
+        pendingData.suggested_new_category_name = categorySuggestion;
         pendingData.action_expected = 'awaiting_new_category_flow_decision';
         await pendingData.save();
 
@@ -1022,10 +1101,9 @@ const fallbackCategory = await Category.findOne({
         await whatsappService.sendButtonList(groupId, message, buttons);
         logger.info(`[Webhook] Nova categoria "${categorySuggestion}" sugerida. Aguardando decisão de fluxo do usuário.`);
     }
-}
-  // <<< FIM DA MODIFICAÇÃO >>>
+  }
 
-
+  // <<< FUNÇÃO MODIFICADA (Ajuste de terminologia na mensagem) >>>
   async createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, categoryId, creditCardId = null) {
     const { value, baseDescription, flow, isInstallment, installmentCount } = analysisResult;
     const finalDescriptionForDB = userContext ? `${baseDescription} (${userContext})` : baseDescription;
@@ -1112,7 +1190,8 @@ const fallbackCategory = await Category.findOne({
             installmentInfo = `\n*Cartão:* ${(await CreditCard.findByPk(creditCardId))?.name || 'N/A'}`;
         }
 
-        message = `💸 *Despesa Registrada:* ${formattedValue}\n*Categoria:* ${category.name}\n*Desc.:* ${baseDescription}${installmentInfo}\n*Total de Despesas:* ${formattedTotalExpenses}`;
+        // <<< MUDANÇA DE TERMINOLOGIA APLICADA AQUI >>>
+        message = `💸 *Despesa Registrada:* ${formattedValue}\n*Categoria:* ${category.name} (${baseDescription})${installmentInfo}\n*Total de Despesas:* ${formattedTotalExpenses}`;
         
         const now = new Date();
         const startOfCurrentMonth = startOfMonth(now);
@@ -1165,7 +1244,8 @@ const fallbackCategory = await Category.findOne({
     } else {
         const totalRevenues = await Revenue.sum('value', { where: { profile_id: pendingData.profile_id } });
         const formattedTotalRevenues = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalRevenues || 0);
-        message = `💰 *Receita Registrada:* ${formattedValue}\n*Categoria:* ${category.name}\n*Desc.:* ${baseDescription}\n*Total de Receitas:* ${formattedTotalRevenues}\n\nReceita *já* salva! Para alterar a categoria, clique em *Corrigir*.`;
+        // <<< MUDANÇA DE TERMINOLOGIA APLICADA AQUI >>>
+        message = `💰 *Receita Registrada:* ${formattedValue}\n*Categoria:* ${category.name} (${baseDescription})\n*Total de Receitas:* ${formattedTotalRevenues}\n\nReceita *já* salva! Para alterar a categoria, clique em *Corrigir*.`;
     }
 
     const buttons = [{ id: `edit_expense_${pendingData.id}`, label: '✏️ Corrigir Categoria' }];
@@ -1699,7 +1779,7 @@ const runPendingExpenseWorker = async () => {
     try {
         await PendingExpense.destroy({ 
             where: { 
-                action_expected: 'awaiting_validation', 
+                action_expected: { [Op.in]: ['awaiting_validation', 'awaiting_duplicate_confirmation'] },
                 expires_at: { [Op.lte]: now } 
             } 
         });

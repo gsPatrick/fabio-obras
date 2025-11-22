@@ -62,6 +62,15 @@ class DashboardService {
     const currentMonthExpenses = await Expense.sum('value', { where: monthlyExpenseWhere });
     const totalGoal = await MonthlyGoal.findOne({ where: { profile_id: profileId, is_total_goal: true, category_id: null } });
 
+    // <<< NOVA ADIÇÃO: Soma das metas individuais por categoria >>>
+    const totalCategoryGoalsSum = await MonthlyGoal.sum('value', {
+        where: {
+            profile_id: profileId,
+            is_total_goal: false,
+            category_id: { [Op.ne]: null }
+        }
+    });
+
     const goalAlert = this._calculateGoalAlert(currentMonthExpenses, totalGoal);
     
     return {
@@ -71,9 +80,15 @@ class DashboardService {
         expenseCount: await Expense.count({ where: expenseWhere }),
         highestCategory,
         goalAlert,
+        totalGoals: totalCategoryGoalsSum || 0, // Retornando a soma das metas
     };
-}
+  }
 
+  // ... (RESTO DO ARQUIVO PERMANECE IGUAL) ...
+  
+  // Mantenha os métodos _calculateGoalAlert, getChartData, getDetailedExpenses, etc...
+  // Apenas certifique-se de copiar o restante do arquivo original se for substituir o arquivo todo.
+  
   // ===================================================================
   // LÓGICA INTERNA: CÁLCULO DE ALERTA DE META
   // ===================================================================
@@ -111,9 +126,7 @@ class DashboardService {
     return null;
   }
   
-  // ===================================================================
-  // 2. ENDPOINT PARA GRÁFICOS
-  // ===================================================================
+  // ... Métodos getChartData, getDetailedExpenses, etc... (Mantenha o código original abaixo)
   async getChartData(filters, profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
 
@@ -167,9 +180,6 @@ class DashboardService {
     };
   }
 
-  // ===================================================================
-  // 3. ENDPOINT PARA RELATÓRIOS (LISTA DETALHADA COM FILTROS)
-  // ===================================================================
   async getDetailedExpenses(filters, profileId) {
     if (!profileId) throw new Error('ID do Perfil é obrigatório.');
       
@@ -183,7 +193,6 @@ class DashboardService {
         { model: CreditCard, as: 'creditCard', attributes: ['id', 'name', 'last_four_digits'] },
         { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value'] }
       ],
-      // <<< CORREÇÃO APLICADA AQUI >>>
       order: [[sequelize.fn('COALESCE', sequelize.col('Expense.charge_date'), sequelize.col('Expense.expense_date')), 'DESC']],
       limit,
       offset,
@@ -229,7 +238,6 @@ class DashboardService {
         { model: CreditCard, as: 'creditCard', attributes: ['name', 'last_four_digits'] },
         { model: Expense, as: 'originalExpense', attributes: ['id', 'description', 'value'] }
       ],
-      // <<< CORREÇÃO APLICADA AQUI >>>
       order: [[sequelize.fn('COALESCE', sequelize.col('Expense.charge_date'), sequelize.col('Expense.expense_date')), 'DESC']],
     });
   }
@@ -244,9 +252,6 @@ class DashboardService {
     });
   }
 
-  // ===================================================================
-  // 4. ENDPOINTS CRUD
-  // ===================================================================
   async updateExpense(id, data, profileId) {
     const expense = await Expense.findOne({ where: { id, profile_id: profileId } });
     if (!expense) throw new Error('Despesa não encontrada ou não pertence ao perfil');
@@ -303,9 +308,6 @@ class DashboardService {
     return { message: 'Receita deletada com sucesso.' };
   }
 
-  // ===================================================================
-  // LÓGICA INTERNA DE FILTROS
-  // ===================================================================
   _buildWhereClause(filters, flowType = 'expense') {
     const whereClause = {};
     let startDate, endDate;

@@ -17,9 +17,10 @@ const fs = require('fs');
 const path = require('path');
 const { startOfMonth, format, getMonth, getYear, addMonths, setDate, isAfter, endOfDay, startOfDay, subDays, eachDayOfInterval } = require('date-fns');
 
-const CONTEXT_WAIT_TIME_MINUTES = 2;
-const EXPENSE_EDIT_WAIT_TIME_MINUTES = 5;
-const ONBOARDING_WAIT_TIME_MINUTES = 10;
+// 24 Horas em minutos (Tempo "Ilimitado" na prática)
+const CONTEXT_WAIT_TIME_MINUTES = 1440; 
+const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1440;
+const ONBOARDING_WAIT_TIME_MINUTES = 60; 
 const MENU_COMMAND = 'MENU';
 
 class WebhookService {
@@ -50,6 +51,57 @@ class WebhookService {
     }
     logger.info(`[Auth] Buscando usuário com variações de telefone: ${Array.from(variations).join(', ')}`);
     return User.findOne({ where: { whatsapp_phone: { [Op.in]: Array.from(variations) } } });
+  }
+
+  /**
+   * Busca inteligente de categoria (Case insensitive, singular/plural, substring)
+   */
+  async _fuzzyFindCategory(profileId, text) {
+      if (!text) return null;
+      const cleanText = text.trim().toLowerCase();
+      
+      // 1. Tenta busca exata (Case Insensitive)
+      let category = await Category.findOne({ 
+          where: { 
+              name: { [Op.iLike]: cleanText }, 
+              profile_id: profileId 
+          } 
+      });
+      
+      if (category) return category;
+
+      // 2. Tenta buscar removendo o 's' do final (singular/plural simples)
+      if (cleanText.endsWith('s')) {
+          const singularText = cleanText.slice(0, -1);
+          category = await Category.findOne({ 
+              where: { 
+                  name: { [Op.iLike]: singularText }, 
+                  profile_id: profileId 
+              } 
+          });
+          if (category) return category;
+      } else {
+          // Tenta adicionar 's' (plural simples)
+          const pluralText = cleanText + 's';
+          category = await Category.findOne({ 
+              where: { 
+                  name: { [Op.iLike]: pluralText }, 
+                  profile_id: profileId 
+              } 
+          });
+          if (category) return category;
+      }
+
+      // 3. Fallback: Verifica se a string de busca está contida no nome da categoria
+      category = await Category.findOne({
+        where: {
+            profile_id: profileId,
+            name: { [Op.iLike]: `%${cleanText}%` }
+        },
+        order: [[sequelize.fn('LENGTH', sequelize.col('name')), 'ASC']] // Pega a menor string que der match
+      });
+      
+      return category;
   }
 
   async processIncomingMessage(payload) {
@@ -512,51 +564,7 @@ class WebhookService {
         return;
     }
 
-    // <<< INÍCIO DA NOVA LÓGICA: Manipulador para verificação de duplicidade >>>
-    if (buttonId.startsWith('duplicate_')) {
-        const [_, action, pendingId] = buttonId.split('_');
-        const pendingState = await PendingExpense.findByPk(pendingId, { where: { profile_id: profileId } });
-
-        if (!pendingState) {
-            await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`);
-            return;
-        }
-
-        const analysisResult = {
-            value: pendingState.value,
-            baseDescription: pendingState.description,
-            isInstallment: !!pendingState.installment_count,
-            installmentCount: pendingState.installment_count,
-        };
-        const userContext = ''; // O contexto já está na descrição.
-
-        if (action === 'new') {
-            logger.info(`[Webhook] Usuário confirmou que é um novo gasto. Criando...`);
-            // Se é um novo gasto, removemos o ID do gasto antigo e prosseguimos com a criação
-            pendingState.expense_id = null;
-            await this.createExpenseOrRevenueAndStartEditFlow(pendingState, analysisResult, userContext, pendingState.suggested_category_id, null);
-        } else if (action === 'update') {
-            logger.info(`[Webhook] Usuário confirmou que é uma correção. Atualizando gasto ID ${pendingState.expense_id}...`);
-            const expenseToUpdate = await Expense.findByPk(pendingState.expense_id);
-            if (expenseToUpdate) {
-                const oldValue = expenseToUpdate.value;
-                expenseToUpdate.value = pendingState.value; // Atualiza o valor para o novo
-                expenseToUpdate.description = pendingState.description; // Atualiza a descrição
-                await expenseToUpdate.save();
-                await pendingState.destroy();
-                
-                const formattedOldValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(oldValue);
-                const formattedNewValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(expenseToUpdate.value);
-
-                await whatsappService.sendWhatsappMessage(groupId, `✅ Gasto anterior atualizado de ${formattedOldValue} para *${formattedNewValue}*!`);
-            } else {
-                 await whatsappService.sendWhatsappMessage(groupId, `❌ Não foi possível encontrar o gasto original para atualizar.`);
-                 await pendingState.destroy();
-            }
-        }
-        return;
-    }
-    // <<< FIM DA NOVA LÓGICA >>>
+    // <<< MODIFICADO: Removemos o tratamento de 'duplicate_' pois a lógica foi desativada >>>
 
     if (buttonId.startsWith('edit_expense_')) {
       return this.handleEditButtonFlow(payload);
@@ -823,13 +831,18 @@ class WebhookService {
             whatsapp_group_id: groupId, 
             profile_id: profileId, 
             action_expected: { 
-                [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply', 'awaiting_duplicate_confirmation']
+                [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] // Removemos validações antigas
             }
         },
         order: [['createdAt', 'DESC']]
     });
 
     if (pendingFlow) {
+        // <<< NOVA LÓGICA: Entrada manual de categoria >>>
+        if (pendingFlow.action_expected === 'awaiting_new_category_flow_decision' && textMessage) {
+             return this._handleManualCategoryInputInFlow(payload, pendingFlow, textMessage);
+        }
+
         if (['awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'].includes(pendingFlow.action_expected)) {
             return this.handleNewCategoryCreationFlowFromPending(payload, pendingFlow);
         }
@@ -969,7 +982,42 @@ class WebhookService {
     }
   }
 
-  // <<< FUNÇÃO MODIFICADA (com verificação de duplicidade) >>>
+  // <<< NOVA LÓGICA: Se o usuário digitar o nome de uma categoria existente durante o fluxo de criação >>>
+  async _handleManualCategoryInputInFlow(payload, pendingExpense, textMessage) {
+      const groupId = payload.phone;
+      const profileId = payload.profileId;
+
+      logger.info(`[Webhook] Tentando mapeamento manual de categoria: "${textMessage}"`);
+      
+      const existingCategory = await this._fuzzyFindCategory(profileId, textMessage);
+      
+      if (existingCategory) {
+           // Achou uma categoria existente! Vincula e finaliza.
+           const analysisResult = {
+                value: pendingExpense.value,
+                baseDescription: pendingExpense.description, // A descrição original
+                categoryName: existingCategory.name,
+                flow: existingCategory.category_flow,
+                isInstallment: !!pendingExpense.installment_count,
+                installmentCount: pendingExpense.installment_count,
+                cardName: null, // (simplificado, assume que não mudou cartão)
+            };
+            const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+            
+            await whatsappService.sendWhatsappMessage(groupId, `✅ Entendido! Vou classificar como *${existingCategory.name}*.`);
+            await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, existingCategory.id, pendingExpense.credit_card_id);
+      } else {
+           // Não achou. Assume que é o nome da nova categoria que ele quer forçar.
+           pendingExpense.suggested_new_category_name = textMessage;
+           pendingExpense.action_expected = 'awaiting_new_category_flow_decision'; // Mantém estado
+           await pendingExpense.save();
+           
+           const message = `🤔 Não encontrei a categoria "${textMessage}". Deseja criar esta categoria como *Despesa* ou *Receita*?`;
+           const buttons = [ { id: `new_cat_flow_expense_${pendingExpense.id}`, label: '💸 Despesa' }, { id: `new_cat_flow_revenue_${pendingExpense.id}`, label: '💰 Receita' } ];
+           await whatsappService.sendButtonList(groupId, message, buttons);
+      }
+  }
+
   async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
     const { value, baseDescription, isInstallment, installmentCount, cardName, ambiguousCategoryNames } = analysisResult;
     let categoryNameFromAI = analysisResult.categoryName;
@@ -991,65 +1039,16 @@ class WebhookService {
         return; 
     }
 
-    let category = await Category.findOne({ 
-        where: { 
-            name: { [Op.iLike]: categoryNameFromAI }, 
-            profile_id: profileId 
-        } 
-    });
+    // Tenta encontrar categoria existente usando busca Fuzzy (ex: "presentes" acha "PRESENTE")
+    let category = await this._fuzzyFindCategory(profileId, categoryNameFromAI);
 
-    if (!category || (categoryNameFromAI.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
-        logger.warn(`[Webhook] IA sugeriu '${categoryNameFromAI}', mas tentando fallback com texto original: '${baseDescription}'`);
-        const fallbackCategory = await Category.findOne({
-            where: {
-                profile_id: profileId,
-                [Op.and]: sequelize.where(
-                    sequelize.fn('LOWER', baseDescription), 
-                    { [Op.like]: sequelize.literal(`'%' || LOWER(name) || '%'`) }
-                )
-            },
-            order: [[sequelize.fn('LENGTH', sequelize.col('name')), 'DESC']]
-        });
-
-        if (fallbackCategory) {
-            logger.info(`[Webhook] Fallback bem-sucedido! Categoria encontrada: '${fallbackCategory.name}'`);
-            category = fallbackCategory;
-        }
+    if (!category && (categoryNameFromAI.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
+        // Fallback com texto original se IA retornou "Outros"
+        category = await this._fuzzyFindCategory(profileId, baseDescription);
     }
 
     if (category) {
-        // <<< INÍCIO DA LÓGICA DE VERIFICAÇÃO DE DUPLICIDADE >>>
-        const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-        const recentSimilarExpense = await Expense.findOne({
-            where: {
-                profile_id: profileId,
-                category_id: category.id,
-                createdAt: { [Op.gte]: fiveMinutesAgo }
-            },
-            order: [['createdAt', 'DESC']]
-        });
-
-        if (recentSimilarExpense && category.category_flow === 'expense') {
-            logger.info(`[Webhook] Gasto similar recente encontrado (ID: ${recentSimilarExpense.id}). Perguntando ao usuário.`);
-            
-            pendingData.value = value;
-            pendingData.description = baseDescription;
-            pendingData.suggested_category_id = category.id;
-            pendingData.expense_id = recentSimilarExpense.id; 
-            pendingData.action_expected = 'awaiting_duplicate_confirmation';
-            pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000);
-            await pendingData.save();
-
-            const message = `🤔 Um gasto na categoria *${category.name}* já foi registrado há pouco. Este é um novo gasto ou uma correção do anterior?`;
-            const buttons = [
-                { id: `duplicate_new_${pendingData.id}`, label: ' Novo Gasto' },
-                { id: `duplicate_update_${pendingData.id}`, label: ' Corrigir Anterior' }
-            ];
-            await whatsappService.sendButtonList(groupId, message, buttons);
-            return;
-        }
-        // <<< FIM DA LÓGICA DE VERIFICAÇÃO DE DUPLICIDADE >>>
-
+        // Categoria Encontrada - Salva direto sem perguntar de duplicidade
         const finalFlow = category.category_flow;
         const resolvedAnalysis = { ...analysisResult, flow: finalFlow, categoryName: category.name };
 
@@ -1085,7 +1084,8 @@ class WebhookService {
             await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
         }
     } else {
-        const categorySuggestion = baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria";
+        // Categoria Nova - Fluxo de decisão
+        const categorySuggestion = categoryNameFromAI !== 'Outros' ? categoryNameFromAI : (baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria");
         
         pendingData.value = value;
         pendingData.description = userContext ? `${baseDescription} (${userContext})` : baseDescription;
@@ -1093,17 +1093,16 @@ class WebhookService {
         pendingData.action_expected = 'awaiting_new_category_flow_decision';
         await pendingData.save();
 
-        const message = `🤔 A categoria "*${categorySuggestion}*" é nova. Ela deve ser registrada como uma *Despesa* ou *Receita*?`;
+        const message = `🤔 A categoria "*${categorySuggestion}*" é nova. \n\nEla é *Despesa* ou *Receita*? \n\n💡 _Se você já tem uma categoria parecida e eu não achei, basta **digitar o nome dela** agora._`;
         const buttons = [ 
             { id: `new_cat_flow_expense_${pendingData.id}`, label: '💸 Despesa' }, 
             { id: `new_cat_flow_revenue_${pendingData.id}`, label: '💰 Receita' } 
         ];
         await whatsappService.sendButtonList(groupId, message, buttons);
-        logger.info(`[Webhook] Nova categoria "${categorySuggestion}" sugerida. Aguardando decisão de fluxo do usuário.`);
+        logger.info(`[Webhook] Nova categoria "${categorySuggestion}" sugerida. Aguardando decisão de fluxo ou input manual.`);
     }
   }
 
-  // <<< FUNÇÃO MODIFICADA (Ajuste de terminologia na mensagem) >>>
   async createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, categoryId, creditCardId = null) {
     const { value, baseDescription, flow, isInstallment, installmentCount } = analysisResult;
     const finalDescriptionForDB = userContext ? `${baseDescription} (${userContext})` : baseDescription;
@@ -1172,6 +1171,7 @@ class WebhookService {
     pendingData.suggested_category_id = categoryId;
     pendingData.credit_card_id = creditCardId;
     pendingData.action_expected = 'awaiting_validation';
+    // Tempo estendido para edição
     pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
     await pendingData.save();
 
@@ -1190,7 +1190,6 @@ class WebhookService {
             installmentInfo = `\n*Cartão:* ${(await CreditCard.findByPk(creditCardId))?.name || 'N/A'}`;
         }
 
-        // <<< MUDANÇA DE TERMINOLOGIA APLICADA AQUI >>>
         message = `💸 *Despesa Registrada:* ${formattedValue}\n*Categoria:* ${category.name} (${baseDescription})${installmentInfo}\n*Total de Despesas:* ${formattedTotalExpenses}`;
         
         const now = new Date();
@@ -1244,7 +1243,6 @@ class WebhookService {
     } else {
         const totalRevenues = await Revenue.sum('value', { where: { profile_id: pendingData.profile_id } });
         const formattedTotalRevenues = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalRevenues || 0);
-        // <<< MUDANÇA DE TERMINOLOGIA APLICADA AQUI >>>
         message = `💰 *Receita Registrada:* ${formattedValue}\n*Categoria:* ${category.name} (${baseDescription})\n*Total de Receitas:* ${formattedTotalRevenues}\n\nReceita *já* salva! Para alterar a categoria, clique em *Corrigir*.`;
     }
 
@@ -1562,11 +1560,10 @@ class WebhookService {
                 return true;
             }
             
-            // Re-chama o fluxo de decisão com o nome da categoria resolvido
             const resolvedAnalysisResult = {
                 value: pendingAmbiguity.value,
                 baseDescription: pendingAmbiguity.suggested_new_category_name,
-                categoryName: chosenCategoryName, // Categoria resolvida
+                categoryName: chosenCategoryName,
                 isInstallment: !!pendingAmbiguity.installment_count,
                 installmentCount: pendingAmbiguity.installment_count,
                 cardName: null,
@@ -1777,66 +1774,18 @@ class WebhookService {
 const runPendingExpenseWorker = async () => {
     const now = new Date();
     try {
-        await PendingExpense.destroy({ 
-            where: { 
-                action_expected: { [Op.in]: ['awaiting_validation', 'awaiting_duplicate_confirmation'] },
-                expires_at: { [Op.lte]: now } 
-            } 
-        });
-        
-        const expiredCategoryActions = await PendingExpense.findAll({ 
-            where: { 
-                action_expected: { 
-                    [Op.in]: [
-                        'awaiting_category_reply', 
-                        'awaiting_new_category_decision', 
-                        'awaiting_new_category_type', 
-                        'awaiting_category_flow_decision', 
-                        'awaiting_new_category_goal'
-                    ] 
-                }, 
-                expires_at: { [Op.lte]: now } 
-            }, 
-            include: [
-                { model: Category, as: 'suggestedCategory' }, 
-                { model: Expense, as: 'expense' },
-                { model: Revenue, as: 'revenue' }
-            ] 
-        });
-
-        for (const pending of expiredCategoryActions) {
-            const entryValue = pending.value;
-            const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(entryValue);
-            let timeoutMessage = `⏰ *Edição Expirada*\n\nO tempo para ${pending.action_expected === 'awaiting_category_reply' ? 'selecionar uma nova categoria' : 'decidir sobre a categoria'} para o lançamento de *${formattedValue}* expirou.`;
-            
-            if (pending.expense_id || pending.revenue_id) {
-                timeoutMessage += ` O item foi mantido com a categoria original.`
-            } else {
-                 timeoutMessage += ` A ação foi cancelada.`
-            }
-
-            await whatsappService.sendWhatsappMessage(pending.whatsapp_group_id, timeoutMessage);
-            await pending.destroy();
-        }
-        
+        // Limpeza "preguiçosa". Não remove estados de espera longos ou interação do usuário.
         await PendingExpense.destroy({ 
             where: { 
                 action_expected: { 
                     [Op.in]: [
                         'awaiting_context', 
                         'awaiting_ai_analysis_complete', 
-                        'awaiting_credit_card_choice', 
-                        'awaiting_installment_count', 
-                        'awaiting_new_card_name', 
-                        'awaiting_new_card_closing_day', 
-                        'awaiting_new_card_due_day', 
-                        'awaiting_card_creation_confirmation'
                     ] 
                 }, 
                 expires_at: { [Op.lte]: now } 
             } 
         });
-
     } catch (error) {
         console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
     }

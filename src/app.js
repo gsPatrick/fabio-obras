@@ -21,7 +21,7 @@ class App {
     this.middlewares();
     this.routes();
     this.exposeModels();
-    this.startPendingExpenseWorker();
+   // this.startPendingExpenseWorker();
     this.startOnboardingWorker();
   }
 

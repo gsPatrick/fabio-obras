@@ -18,9 +18,9 @@ const path = require('path');
 const { startOfMonth, format, getMonth, getYear, addMonths, setDate, isAfter, endOfDay, startOfDay, subDays, eachDayOfInterval } = require('date-fns');
 
 // 24 Horas em minutos (Tempo "Ilimitado" na prática)
-const CONTEXT_WAIT_TIME_MINUTES = 1440; 
-const EXPENSE_EDIT_WAIT_TIME_MINUTES = 1440;
-const ONBOARDING_WAIT_TIME_MINUTES = 60; 
+const CONTEXT_WAIT_TIME_MINUTES = 525600; // 1 ano em minutos
+const EXPENSE_EDIT_WAIT_TIME_MINUTES = 525600; // 1 ano em minutos
+const ONBOARDING_WAIT_TIME_MINUTES = 60; // Esse pode manter normal
 const MENU_COMMAND = 'MENU';
 
 class WebhookService {

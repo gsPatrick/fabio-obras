@@ -723,7 +723,7 @@ class WebhookService {
     await this._processSingleContext(payload);
   }
 
-async _processSingleContext(payload) {
+ async _processSingleContext(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
     const profileId = payload.profileId;
@@ -740,23 +740,26 @@ async _processSingleContext(payload) {
             participant_phone: participantPhone, 
             whatsapp_group_id: groupId, 
             profile_id: profileId, 
-            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] }
+            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation'] } // Removemos 'awaiting_category_reply' daqui para ele ser encontrado pelo pendingFlow
         },
         order: [['createdAt', 'DESC']]
     });
 
-    // --- CORREÇÃO APLICADA AQUI ---
+    // --- CORREÇÃO DE LIMPEZA AGRESSIVA ---
     if (containsNumber && pendingFlow) {
-        // Lista de estados onde o usuário VAI digitar texto ou número e NÃO devemos cancelar o fluxo
+        // Estados onde o usuário PODE digitar números sem que isso seja considerado um "Novo Comando"
         const protectedStates = [
             'awaiting_new_category_name', 
             'awaiting_new_category_type',
             'awaiting_new_card_name',
             'awaiting_manual_category_search',
-            'awaiting_new_category_goal',      // <--- ADICIONADO (Meta)
-            'awaiting_new_card_closing_day',   // <--- ADICIONADO (Dia Fechamento)
-            'awaiting_new_card_due_day',       // <--- ADICIONADO (Dia Vencimento)
-            'awaiting_installment_count'       // <--- ADICIONADO (Parcelas)
+            'awaiting_new_category_goal',      
+            'awaiting_new_card_closing_day',   
+            'awaiting_new_card_due_day',       
+            'awaiting_installment_count',
+            'awaiting_category_reply',         // <--- ADICIONADO (Correção de Categoria)
+            'awaiting_ambiguous_category_choice', // <--- ADICIONADO (Escolha de Ambiguidade)
+            'awaiting_credit_card_choice'      // <--- ADICIONADO (Escolha de Cartão)
         ];
         
         if (!protectedStates.includes(pendingFlow.action_expected)) {
@@ -765,13 +768,13 @@ async _processSingleContext(payload) {
         }
     }
 
-    // Recarrega o fluxo (pode ter sido destruído acima ou ser null)
+    // Recarrega o fluxo (necessário pois pode ter sido destruído acima)
     const activeFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
             whatsapp_group_id: groupId, 
             profile_id: profileId,
-            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] }
+            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation'] } // Mantemos consistência na busca
         }
     });
 
@@ -784,13 +787,13 @@ async _processSingleContext(payload) {
 
     // Tratamento de respostas numéricas (Menus, Listas)
     if (textMessage && /^\d+$/.test(textMessage) && activeFlow) {
-         // Se for um estado onde o número é o próprio valor (dia, meta, parcelas), não processa como menu
+         // Estados onde o número é um DADO (ex: valor da meta) e não uma OPÇÃO de menu
          const statesExpectingRawNumbers = [
              'awaiting_new_card_closing_day', 
              'awaiting_new_card_due_day', 
              'awaiting_installment_count', 
              'awaiting_manual_category_search',
-             'awaiting_new_category_goal' // <--- Meta também é número puro
+             'awaiting_new_category_goal'
          ];
 
          if (!statesExpectingRawNumbers.includes(activeFlow.action_expected)) {

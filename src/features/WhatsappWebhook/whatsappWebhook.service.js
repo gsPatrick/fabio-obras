@@ -725,7 +725,7 @@ class WebhookService {
     await this._processSingleContext(payload);
   }
 
- // SUBSTITUA O MÉTODO _processSingleContext POR ESTE
+ // SUBSTITUA O MÉTODO _processSingleContext POR ESTE CÓDIGO FINAL
   async _processSingleContext(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
@@ -769,7 +769,7 @@ class WebhookService {
         }
     }
 
-    // 2. Recarrega fluxo ativo
+    // 2. Recarrega fluxo ativo (excluindo contexto de imagem, que trataremos separadamente)
     const activeFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
@@ -815,12 +815,59 @@ class WebhookService {
             return this.handleCreditCardCreationFlowFromPending(payload, activeFlow);
         }
     }
+
+    // 6. [NOVO] Tratamento de Contexto de Imagem (Awaiting Context)
+    // Se existe uma imagem esperando descrição, o texto/áudio enviado AGORA serve como descrição para ELA.
+    const pendingMedia = await PendingExpense.findOne({
+      where: { 
+          participant_phone: participantPhone, 
+          whatsapp_group_id: groupId, 
+          profile_id: profileId, 
+          action_expected: 'awaiting_context'
+      },
+      order: [['createdAt', 'DESC']]
+    });
+
+    if (pendingMedia && (textMessage || audioUrl)) {
+        await whatsappService.sendWhatsappMessage(groupId, `🤖 Combinando imagem com sua descrição...`);
+
+        let userContext = '';
+        if (audioUrl) {
+            const audioBuffer = await whatsappService.downloadZapiMedia(audioUrl);
+            userContext = audioBuffer ? await aiService.transcribeAudio(audioBuffer) : '';
+        } else {
+            userContext = textMessage;
+        }
+
+        const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
+
+        if (mediaBuffer && userContext) {
+            // Atualiza estado para evitar loops
+            pendingMedia.action_expected = 'awaiting_ai_analysis_complete';
+            await pendingMedia.save();
+
+            const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
+            // Chama IA passando IMAGEM + TEXTO (userContext)
+            const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, profileId, cardNames);
+
+            if (analysisResult) {
+                return this.decideAndSaveExpenseOrRevenue(pendingMedia, analysisResult, userContext);
+            } else {
+                 await whatsappService.sendWhatsappMessage(groupId, `❌ Não entendi a imagem com esse texto. Tente enviar tudo novamente.`);
+                 await pendingMedia.destroy();
+            }
+        } else {
+             await whatsappService.sendWhatsappMessage(groupId, `❌ Erro ao processar. Tente novamente.`);
+             await pendingMedia.destroy();
+        }
+        return; // Interrompe para não cair no fluxo de "Novo Texto" abaixo
+    }
     
-    // 6. Processamento de Mídia (Imagens/PDFs) - Sempre via IA
+    // 7. Processamento de Nova Mídia (Imagens/PDFs) - Sempre via IA
     const hasMediaInPayload = payload.image || payload.document;
     if (hasMediaInPayload) {
         await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando documento e sua descrição...`);
-        const userContext = textMessage;
+        const userContext = textMessage; // Pode vir na legenda
         const mediaUrl = payload.image?.imageUrl || payload.document?.documentUrl;
         const mimeType = payload.image?.mimeType || payload.document?.mimeType;
 
@@ -845,20 +892,18 @@ class WebhookService {
                 await tempPending.destroy();
             }
         } else {
-            await whatsappService.sendWhatsappMessage(groupId, `❌ Erro no arquivo.`);
+             // Se não tem legenda, cria pendência para esperar o texto (awaiting_context)
+            await this.handleMediaArrival(payload);
         }
         return;
     }
 
-    // 7. Processamento de Texto e Áudio
+    // 8. Processamento de Novo Texto/Áudio (IA ou Regex)
     if (textMessage || audioUrl) {
-        // Limpa pendências anteriores para iniciar novo comando
         await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId } });
 
-        // >>> FAST TRACK VIA REGEX COM SEGURANÇA <<<
+        // >>> FAST TRACK VIA REGEX <<<
         if (!audioUrl && textMessage) {
-            // Suporta: "500.50 desc", "500,50 desc", "1.000,00 desc", "desc 500"
-            // O regex ignora pontos de milhar e foca nos digitos finais
             const simpleRegex = /^R?\$?\s*([\d.,]+)\s+(.+)$/i; 
             const simpleRegexInverted = /^(.+)\s+R?\$?\s*([\d.,]+)$/i;
 
@@ -878,18 +923,14 @@ class WebhookService {
             }
 
             if (rawValue && fastDesc) {
-                // Normaliza o valor (troca vírgula por ponto, remove pontos de milhar se houver confusão)
-                // Ex: 1.000,00 -> 1000.00 | 500,00 -> 500.00
                 let normalizedValueStr = rawValue.replace(/\./g, '').replace(',', '.');
                 let fastValue = parseFloat(normalizedValueStr);
 
-                // --- PROTEÇÃO DE COMPLEXIDADE ---
-                // Se a descrição tiver palavras chave de parcelamento/cartão, NÃO usa o Fast Track (deixa pra IA)
                 const complexKeywords = [' x ', 'parcela', 'vezes', 'cartão', 'cartao', 'credito', 'crédito', 'debito', 'débito', '/'];
-                const isComplex = complexKeywords.some(keyword => fastDesc.toLowerCase().includes(keyword)) || /\d/.test(fastDesc); // Se tem número na descrição (ex: 3x), é complexo
+                const isComplex = complexKeywords.some(keyword => fastDesc.toLowerCase().includes(keyword)) || /\d/.test(fastDesc);
 
                 if (!isNaN(fastValue) && !isComplex) {
-                    logger.info(`[Webhook] Fast Track seguro ativado para: "${textMessage}". Valor: ${fastValue}, Desc: ${fastDesc}`);
+                    logger.info(`[Webhook] Fast Track seguro ativado para: "${textMessage}".`);
                     
                     const fastPending = await PendingExpense.create({
                         whatsapp_message_id: payload.messageId,
@@ -909,14 +950,13 @@ class WebhookService {
                         cardName: null,
                         ambiguousCategoryNames: []
                     };
-
                     return this.decideAndSaveExpenseOrRevenue(fastPending, analysisResult, textMessage);
                 }
             }
         }
         // >>> FIM DO FAST TRACK <<<
 
-        // Se não caiu no Regex (é áudio ou frase complexa), usa a IA
+        // IA
         await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando...`);
         let userContext = '';
         

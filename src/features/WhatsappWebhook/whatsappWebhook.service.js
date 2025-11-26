@@ -723,7 +723,8 @@ class WebhookService {
     await this._processSingleContext(payload);
   }
 
- async _processSingleContext(payload) {
+ // SUBSTITUA O MÉTODO _processSingleContext POR ESTE
+  async _processSingleContext(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
     const profileId = payload.profileId;
@@ -734,20 +735,18 @@ class WebhookService {
 
     const containsNumber = textMessage && /\d/.test(textMessage);
     
-    // Busca fluxo pendente para verificar se devemos interromper
+    // 1. Verificação de Fluxo Pendente (Proteção contra limpeza indevida)
     const pendingFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
             whatsapp_group_id: groupId, 
             profile_id: profileId, 
-            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation'] } // Removemos 'awaiting_category_reply' daqui para ele ser encontrado pelo pendingFlow
+            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation'] } 
         },
         order: [['createdAt', 'DESC']]
     });
 
-    // --- CORREÇÃO DE LIMPEZA AGRESSIVA ---
     if (containsNumber && pendingFlow) {
-        // Estados onde o usuário PODE digitar números sem que isso seja considerado um "Novo Comando"
         const protectedStates = [
             'awaiting_new_category_name', 
             'awaiting_new_category_type',
@@ -757,9 +756,9 @@ class WebhookService {
             'awaiting_new_card_closing_day',   
             'awaiting_new_card_due_day',       
             'awaiting_installment_count',
-            'awaiting_category_reply',         // <--- ADICIONADO (Correção de Categoria)
-            'awaiting_ambiguous_category_choice', // <--- ADICIONADO (Escolha de Ambiguidade)
-            'awaiting_credit_card_choice'      // <--- ADICIONADO (Escolha de Cartão)
+            'awaiting_category_reply',
+            'awaiting_ambiguous_category_choice', 
+            'awaiting_credit_card_choice'      
         ];
         
         if (!protectedStates.includes(pendingFlow.action_expected)) {
@@ -768,26 +767,24 @@ class WebhookService {
         }
     }
 
-    // Recarrega o fluxo (necessário pois pode ter sido destruído acima)
+    // 2. Recarrega fluxo ativo
     const activeFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
             whatsapp_group_id: groupId, 
             profile_id: profileId,
-            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation'] } // Mantemos consistência na busca
+            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation'] }
         }
     });
 
-    if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
-        return this.sendSpendingReport(groupId, participantPhone, profileId);
-    }
-    if (textMessage && textMessage.toLowerCase().trim() === '#exportardespesas') {
-        return this.sendExpensesExcelReport(groupId, participantPhone, profileId);
+    // 3. Comandos de Menu
+    if (textMessage) {
+        if (textMessage.toLowerCase().trim() === '#relatorio') return this.sendSpendingReport(groupId, participantPhone, profileId);
+        if (textMessage.toLowerCase().trim() === '#exportardespesas') return this.sendExpensesExcelReport(groupId, participantPhone, profileId);
     }
 
-    // Tratamento de respostas numéricas (Menus, Listas)
+    // 4. Tratamento de Respostas Numéricas (Menus)
     if (textMessage && /^\d+$/.test(textMessage) && activeFlow) {
-         // Estados onde o número é um DADO (ex: valor da meta) e não uma OPÇÃO de menu
          const statesExpectingRawNumbers = [
              'awaiting_new_card_closing_day', 
              'awaiting_new_card_due_day', 
@@ -795,23 +792,20 @@ class WebhookService {
              'awaiting_manual_category_search',
              'awaiting_new_category_goal'
          ];
-
          if (!statesExpectingRawNumbers.includes(activeFlow.action_expected)) {
              const handled = await this.handleNumericReply(payload, parseInt(textMessage, 10));
              if (handled) return;
          }
     }
 
-    // Processamento dos Fluxos Ativos
+    // 5. Continuação de Fluxos Ativos (Input de Texto)
     if (activeFlow) {
         if (activeFlow.action_expected === 'awaiting_manual_category_search' && textMessage) {
             return this._handleManualCategoryInputInFlow(payload, activeFlow, textMessage);
         }
-
         if (activeFlow.action_expected === 'awaiting_new_category_flow_decision' && textMessage) {
              return this._handleManualCategoryInputInFlow(payload, activeFlow, textMessage);
         }
-
         if (['awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'].includes(activeFlow.action_expected)) {
             return this.handleNewCategoryCreationFlowFromPending(payload, activeFlow);
         }
@@ -820,7 +814,7 @@ class WebhookService {
         }
     }
     
-    // Processamento de Mídia (IA)
+    // 6. Processamento de Mídia (Imagens/PDFs) - Sempre via IA
     const hasMediaInPayload = payload.image || payload.document;
     if (hasMediaInPayload) {
         await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando documento e sua descrição...`);
@@ -854,10 +848,76 @@ class WebhookService {
         return;
     }
 
-    // Novo Comando de Texto/Áudio (IA)
+    // 7. Processamento de Texto e Áudio
     if (textMessage || audioUrl) {
+        // Limpa pendências anteriores para iniciar novo comando
+        await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId } });
+
+        // >>> FAST TRACK VIA REGEX COM SEGURANÇA <<<
+        if (!audioUrl && textMessage) {
+            // Suporta: "500.50 desc", "500,50 desc", "1.000,00 desc", "desc 500"
+            // O regex ignora pontos de milhar e foca nos digitos finais
+            const simpleRegex = /^R?\$?\s*([\d.,]+)\s+(.+)$/i; 
+            const simpleRegexInverted = /^(.+)\s+R?\$?\s*([\d.,]+)$/i;
+
+            let fastMatch = textMessage.match(simpleRegex);
+            let rawValue = null;
+            let fastDesc = null;
+
+            if (fastMatch) {
+                rawValue = fastMatch[1];
+                fastDesc = fastMatch[2].trim();
+            } else {
+                fastMatch = textMessage.match(simpleRegexInverted);
+                if (fastMatch) {
+                    fastDesc = fastMatch[1].trim();
+                    rawValue = fastMatch[2];
+                }
+            }
+
+            if (rawValue && fastDesc) {
+                // Normaliza o valor (troca vírgula por ponto, remove pontos de milhar se houver confusão)
+                // Ex: 1.000,00 -> 1000.00 | 500,00 -> 500.00
+                let normalizedValueStr = rawValue.replace(/\./g, '').replace(',', '.');
+                let fastValue = parseFloat(normalizedValueStr);
+
+                // --- PROTEÇÃO DE COMPLEXIDADE ---
+                // Se a descrição tiver palavras chave de parcelamento/cartão, NÃO usa o Fast Track (deixa pra IA)
+                const complexKeywords = [' x ', 'parcela', 'vezes', 'cartão', 'cartao', 'credito', 'crédito', 'debito', 'débito', '/'];
+                const isComplex = complexKeywords.some(keyword => fastDesc.toLowerCase().includes(keyword)) || /\d/.test(fastDesc); // Se tem número na descrição (ex: 3x), é complexo
+
+                if (!isNaN(fastValue) && !isComplex) {
+                    logger.info(`[Webhook] Fast Track seguro ativado para: "${textMessage}". Valor: ${fastValue}, Desc: ${fastDesc}`);
+                    
+                    const fastPending = await PendingExpense.create({
+                        whatsapp_message_id: payload.messageId,
+                        whatsapp_group_id: groupId,
+                        participant_phone: participantPhone,
+                        profile_id: profileId,
+                        action_expected: 'awaiting_validation', 
+                        expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
+                    });
+
+                    const analysisResult = {
+                        value: fastValue,
+                        baseDescription: fastDesc,
+                        categoryName: fastDesc, 
+                        isInstallment: false,
+                        installmentCount: null,
+                        cardName: null,
+                        ambiguousCategoryNames: []
+                    };
+
+                    return this.decideAndSaveExpenseOrRevenue(fastPending, analysisResult, textMessage);
+                }
+            }
+        }
+        // >>> FIM DO FAST TRACK <<<
+
+        // Se não caiu no Regex (é áudio ou frase complexa), usa a IA
         await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando...`);
         let userContext = '';
+        
         if (audioUrl) {
           const audioBuffer = await whatsappService.downloadZapiMedia(audioUrl);
           userContext = audioBuffer ? await aiService.transcribeAudio(audioBuffer) : '';
@@ -866,8 +926,6 @@ class WebhookService {
         }
 
         if (userContext) {
-            await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId } });
-
             const tempPending = await PendingExpense.create({
                 whatsapp_message_id: payload.messageId,
                 whatsapp_group_id: groupId,

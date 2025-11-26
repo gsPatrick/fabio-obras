@@ -17,7 +17,7 @@ const fs = require('fs');
 const path = require('path');
 const { startOfMonth, format, getMonth, getYear, addMonths, setDate, isAfter, endOfDay, startOfDay, subDays, eachDayOfInterval } = require('date-fns');
 
-// --- CONSTANTES DE TEMPO (CONFIGURADAS PARA 1 ANO PARA EVITAR TIMEOUT) ---
+// --- CONSTANTES DE TEMPO (1 ANO PARA EVITAR TIMEOUT) ---
 const CONTEXT_WAIT_TIME_MINUTES = 525600; 
 const EXPENSE_EDIT_WAIT_TIME_MINUTES = 525600;
 const ONBOARDING_WAIT_TIME_MINUTES = 60; 
@@ -119,7 +119,6 @@ class WebhookService {
             await this.startPendingPaymentFlow(payload.phone, participantPhone, user);
             return;
         }
-        logger.debug(`[Webhook] Mensagem individual ou grupo não monitorado de ${payload.phone}. Ignorando.`);
         return; 
     }
 
@@ -135,7 +134,6 @@ class WebhookService {
             await this.startPendingPaymentFlow(payload.phone, participantPhone, user);
             return;
         }
-        logger.debug(`[Webhook] Grupo ${payload.phone} não está sendo monitorado ou participante não está pendente.`);
         return; 
     }
 
@@ -144,16 +142,12 @@ class WebhookService {
         include: [{ model: Profile, as: 'profile', include: [{ model: User, as: 'user' }] }] 
     });
 
-    if (!groupWithDetails.profile || !groupWithDetails.profile.user) { 
-        logger.error(`[Webhook] Falha crítica: Grupo monitorado ${monitoredGroup.id} não possui perfil ou usuário associado.`); 
-        return; 
-    }
+    if (!groupWithDetails.profile || !groupWithDetails.profile.user) { return; }
 
     const ownerUserId = groupWithDetails.profile.user.id;
     const isPlanActive = await subscriptionService.isUserActive(ownerUserId);
 
     if (!isPlanActive) {
-      logger.warn(`[Webhook] Acesso negado para ${groupWithDetails.profile.user.email}. Plano inativo.`);
       const checkout = await subscriptionService.createSubscriptionCheckout(ownerUserId);
       const paymentMessage = `Sua assinatura não está ativa. Para continuar registrando despesas, por favor, renove seu plano através do link abaixo:\n\n${checkout.checkoutUrl}`;
       await whatsappService.sendWhatsappMessage(payload.phone, paymentMessage);
@@ -190,7 +184,6 @@ class WebhookService {
   async sendMainMenu(groupId, participantPhone, profileId) {
     if (participantPhone && profileId) {
         await PendingExpense.destroy({ where: { participant_phone: participantPhone, profile_id: profileId, whatsapp_group_id: groupId } });
-        logger.info(`[Webhook] Estados pendentes limpos para ${participantPhone} ao chamar o menu.`);
     }
     const message = `Olá! Escolha uma das opções abaixo:`;
     const buttons = [
@@ -200,21 +193,13 @@ class WebhookService {
         { id: 'menu_manage_cards', label: '💳 Gerenciar Cartões' },
     ];
     await whatsappService.sendButtonList(groupId, message, buttons);
-    logger.info(`[Webhook] Menu principal enviado para ${groupId}.`);
   }
 
   async handleGroupJoin(payload) {
     const groupId = payload.phone;
-    logger.info(`[Onboarding] Bot adicionado ao grupo ${groupId}. Verificando participantes...`);
-  
     const metadata = await whatsappService.getGroupMetadata(groupId);
-    if (!metadata || !metadata.participants) {
-      logger.error(`[Onboarding] Falha ao obter metadados para o grupo ${groupId}. Abortando.`);
-      return;
-    }
+    if (!metadata || !metadata.participants) { return; }
 
-    logger.info('[Onboarding] Metadados recebidos:', JSON.stringify(metadata, null, 2));
-  
     let responsibleUser = null;
     let initiatorPhone = null;
 
@@ -226,14 +211,12 @@ class WebhookService {
         if (isPlanActive) {
           responsibleUser = user;
           initiatorPhone = participant.phone;
-          logger.info(`[Onboarding] Usuário prioritário (Admin/Ativo) encontrado: ${user.email}.`);
           break;
         }
       }
     }
   
     if (responsibleUser) {
-      logger.info(`[Onboarding] Iniciando fluxo de configuração de perfil para ${responsibleUser.email}.`);
       await OnboardingState.destroy({ where: { group_id: groupId } });
       await OnboardingState.create({
         group_id: groupId,
@@ -249,29 +232,20 @@ class WebhookService {
     }
   
     const ownerParticipant = metadata.participants.find(p => p.isSuperAdmin);
-    
-    if (!ownerParticipant || !ownerParticipant.phone) {
-      logger.error(`[Onboarding] Não foi possível identificar o participante dono (isSuperAdmin) com um número de telefone válido no grupo ${groupId}. Abortando.`);
-      return;
-    }
+    if (!ownerParticipant || !ownerParticipant.phone) return;
 
     const ownerPhone = ownerParticipant.phone;
-    logger.info(`[Onboarding] Dono do grupo identificado pelo número real: ${ownerPhone}`);
-  
     const ownerUser = await this._findUserByFlexiblePhone(ownerPhone);
   
     if (ownerUser) {
       if (ownerUser.status === 'pending') {
-        logger.warn(`[Onboarding] O dono do grupo (${ownerUser.email}) tem um cadastro pendente de pagamento.`);
         await this.startPendingPaymentFlow(groupId, ownerPhone, ownerUser);
       } else {
-        logger.warn(`[Onboarding] O dono do grupo (${ownerUser.email}) tem um plano inativo/expirado.`);
         const checkout = await subscriptionService.createSubscriptionCheckout(ownerUser.id);
-        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos neste grupo, sua conta precisa de uma assinatura ativa.\n\nClique no link abaixo para reativar seu plano:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, basta me remover e adicionar novamente a este grupo para iniciarmos a configuração.`;
+        const paymentMessage = `Olá! 👋 Para começar a monitorar os custos neste grupo, sua conta precisa de uma assinatura ativa.\n\nClique no link abaixo para reativar seu plano:\n\n${checkout.checkoutUrl}`;
         await whatsappService.sendWhatsappMessage(groupId, paymentMessage);
       }
     } else {
-      logger.warn(`[Onboarding] Dono do grupo (${ownerPhone}) não encontrado em nosso sistema. Iniciando fluxo de novo cadastro.`);
       await OnboardingState.create({
         group_id: groupId,
         initiator_phone: ownerPhone,
@@ -305,8 +279,6 @@ class WebhookService {
     
     const userIsInitiator = await this._findUserByFlexiblePhone(payload.participantPhone);
     if (!userIsInitiator || (state.user_id && userIsInitiator.id !== state.user_id) || (!state.user_id && payload.participantPhone !== state.initiator_phone)) {
-        logger.warn(`[Onboarding] Resposta ignorada. Participante ${payload.participantPhone} não é o iniciador/proprietário do estado de onboarding para o grupo ${groupId}.`);
-        await whatsappService.sendWhatsappMessage(groupId, `👋 Olá! Este fluxo de configuração foi iniciado por outra pessoa neste grupo. Por favor, aguarde o processo ser concluído.`);
         return;
     }
     
@@ -327,7 +299,7 @@ class WebhookService {
                 const email = textMessage.trim();
                 const existingUser = await User.findOne({ where: { email } });
                 if (existingUser) {
-                    await whatsappService.sendWhatsappMessage(groupId, `O e-mail ${email} já está cadastrado. Se você é o dono desta conta, por favor, adicione o número ${state.initiator_phone} ao seu perfil em nosso site e tente novamente.`);
+                    await whatsappService.sendWhatsappMessage(groupId, `O e-mail ${email} já está cadastrado.`);
                     await state.destroy();
                     return;
                 }
@@ -353,8 +325,7 @@ class WebhookService {
 
             const newUser = await User.create({ email, password, whatsapp_phone: state.initiator_phone, status: 'pending' });
             const checkout = await subscriptionService.createSubscriptionCheckout(newUser.id);
-            const paymentLink = checkout.checkoutUrl;
-            const linkMessage = `✅ Ótimo! Seu pré-cadastro para o e-mail *${email}* foi criado com sucesso.\n\nAgora, o último passo para ativar sua conta:\n\n1️⃣ *Clique no link abaixo* para realizar o pagamento e ativar sua assinatura:\n${paymentLink}\n\n2️⃣ Após a confirmação do pagamento, sua conta será ativada automaticamente.\n\n3️⃣ Em seguida, basta me *remover e adicionar novamente a este grupo* para começarmos a configuração do seu primeiro projeto!`;
+            const linkMessage = `✅ Ótimo! Cadastro criado. Ative sua conta aqui:\n${checkout.checkoutUrl}`;
             
             await whatsappService.sendWhatsappMessage(groupId, linkMessage);
             await state.destroy();
@@ -426,10 +397,8 @@ class WebhookService {
             await state.save();
             await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Salário")');
         } else if (buttonId === 'onboarding_finish') {
-            const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos e receitas.\n\n*Dica:* Você sabia que também pode acessar um painel web completo para ver gráficos, relatórios e gerenciar todos os seus dados?\n\nAcesse em: https://obras-fabio.vercel.app/login`;
+            const finalMessage = `👍 Configuração concluída! Já pode começar a registrar seus custos e receitas.`;
             await whatsappService.sendWhatsappMessage(groupId, finalMessage);
-            const menuExplanationMessage = `A qualquer momento, envie a palavra *MENU* para acessar as seguintes opções:\n\n📊 *Ver Relatório Mensal:* Receba um resumo financeiro do mês atual.\n📝 *Exportar Planilha:* Gere um arquivo Excel com todas as suas despesas.\n➕ *Criar Categoria:* Adicione novas categorias para organizar seus lançamentos.\n💳 *Gerenciar Cartões:* Crie e administre seus cartões de crédito.`;
-            await whatsappService.sendWhatsappMessage(groupId, menuExplanationMessage);
             await state.destroy();
         }
         break;
@@ -472,7 +441,7 @@ class WebhookService {
       case 'awaiting_new_category_goal':
           if (textMessage) {
               const goalValue = parseFloat(textMessage.replace(',', '.'));
-              if (isNaN(goalValue) || goalValue < 0) {
+              if (isNaN(goalValue)) {
                   await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números positivos (ex: 1500 ou 0).`);
                   return;
               }
@@ -484,7 +453,6 @@ class WebhookService {
 
   async finalizeNewCategoryOnboarding(state, goalValue = 0) {
     const { group_id, profile_id, temp_category_name, temp_category_type, temp_category_flow } = state;
-
     try {
         const newCategory = await categoryService.create(
             { name: temp_category_name, type: temp_category_type, category_flow: temp_category_flow },
@@ -501,9 +469,7 @@ class WebhookService {
             });
             goalMessage = `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
         }
-        
-        await whatsappService.sendWhatsappMessage(group_id, `✅ Categoria "*${temp_category_name}*" (Tipo: ${temp_category_type}, Fluxo: ${temp_category_flow === 'expense' ? 'Despesa' : 'Receita'}) criada com sucesso!${goalMessage}`);
-        
+        await whatsappService.sendWhatsappMessage(group_id, `✅ Categoria "*${temp_category_name}*" criada com sucesso!${goalMessage}`);
         await this.startCategoryCreationFlow(state, profile_id, false);
     } catch (error) {
         logger.error('[Webhook] Erro ao finalizar criação de categoria de PendingExpense (Onboarding):', error);
@@ -531,11 +497,21 @@ class WebhookService {
     const participantPhone = payload.participantPhone;
     const profileId = payload.profileId;
 
+    // -- FLUXO DE BUSCA MANUAL --
+    if (buttonId.startsWith('search_manual_cat_')) {
+        const pendingExpenseId = buttonId.split('_')[3];
+        const pending = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
+        if (pending) {
+            pending.action_expected = 'awaiting_manual_category_search';
+            await pending.save();
+            await whatsappService.sendWhatsappMessage(groupId, '🔍 Digite o nome da categoria que você quer buscar:');
+        }
+        return;
+    }
+
     if (buttonId.startsWith('menu_')) {
         const action = buttonId.split('_')[1];
-
         await PendingExpense.destroy({ where: { participant_phone: participantPhone, profile_id: profileId, whatsapp_group_id: groupId } });
-        logger.info(`[Webhook] Limpando estados pendentes para ${participantPhone} antes da ação de menu.`);
 
         if (action === 'view') { 
             await this.sendSpendingReport(groupId, participantPhone, profileId);
@@ -550,7 +526,7 @@ class WebhookService {
                 action_expected: 'awaiting_new_category_name',
                 expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
              });
-             await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria? (ex: "Elétrica", "Salário")');
+             await whatsappService.sendWhatsappMessage(groupId, 'Qual o nome da nova categoria?');
         } else if (action === 'manage') { 
             return this.handleManageCardsAction(groupId, participantPhone, profileId, payload.messageId);
         }
@@ -576,7 +552,7 @@ class WebhookService {
     if (buttonId.startsWith('pending_generate_link_')) {
         const userId = buttonId.split('_')[3];
         const checkout = await subscriptionService.createSubscriptionCheckout(userId);
-        const linkMessage = `Aqui está seu novo link para pagamento:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, remova-me e adicione-me novamente ao grupo para começar!`;
+        const linkMessage = `Aqui está seu novo link para pagamento:\n\n${checkout.checkoutUrl}`;
         await whatsappService.sendWhatsappMessage(groupId, linkMessage);
         await OnboardingState.destroy({ where: { group_id: payload.phone } });
     }
@@ -599,9 +575,7 @@ class WebhookService {
     
     buttons.push({ id: `card_create_${messageId}`, label: '➕ Criar Novo Cartão' });
     buttons.push({ id: `menu_back_to_main_${messageId}`, label: '↩️ Voltar ao Menu Principal' });
-
     await whatsappService.sendButtonList(groupId, message, buttons);
-    logger.info(`[Webhook] Menu de gerenciamento de cartões enviado para ${groupId}.`);
   }
 
   async handleCreditCardButtonResponse(payload) {
@@ -617,9 +591,7 @@ class WebhookService {
                 participant_phone: participantPhone, 
                 whatsapp_group_id: groupId, 
                 profile_id: profileId, 
-                action_expected: { 
-                    [Op.like]: 'awaiting_new_card_%' 
-                } 
+                action_expected: { [Op.like]: 'awaiting_new_card_%' } 
             } 
         });
 
@@ -631,14 +603,13 @@ class WebhookService {
             action_expected: 'awaiting_new_card_name',
             expires_at: new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000),
         });
-        await whatsappService.sendWhatsappMessage(groupId, `Ok! Qual será o *nome* do novo cartão? (ex: "Nubank", "Cartão da Obra")`);
+        await whatsappService.sendWhatsappMessage(groupId, `Ok! Qual será o *nome* do novo cartão?`);
     } else if (buttonId.startsWith('card_confirm_create_')) {
         const pendingExpenseId = buttonId.split('_')[3];
         const pending = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
 
-        if (!pending || pending.action_expected !== 'awaiting_card_creation_confirmation') {
-            await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou ou o fluxo foi interrompido.`);
-            if (pending) await pending.destroy();
+        if (!pending) {
+            await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`);
             return;
         }
 
@@ -653,10 +624,8 @@ class WebhookService {
             await pending.destroy();
             await this.sendMainMenu(groupId, participantPhone, profileId);
         } catch (error) {
-            logger.error('[Webhook] Erro ao criar cartão de crédito (confirmação):', error);
             await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao criar o cartão. ${error.message}`);
             await pending.destroy();
-            await this.sendMainMenu(groupId, participantPhone, profileId);
         }
 
     } else if (buttonId.startsWith('card_cancel_create_')) {
@@ -683,8 +652,6 @@ class WebhookService {
                 pending.action_expected = 'awaiting_new_card_closing_day';
                 await pending.save();
                 await whatsappService.sendWhatsappMessage(groupId, `Certo, o nome será "*${pending.suggested_new_category_name}*".\n\nAgora, qual o *dia de fechamento da fatura*? (Responda apenas com o número do dia, de 1 a 31. Ex: 10)`);
-            } else {
-                await whatsappService.sendWhatsappMessage(groupId, `Por favor, me diga o nome do cartão.`);
             }
             break;
         case 'awaiting_new_card_closing_day':
@@ -694,12 +661,10 @@ class WebhookService {
                     pending.value = day; 
                     pending.action_expected = 'awaiting_new_card_due_day';
                     await pending.save();
-                    await whatsappService.sendWhatsappMessage(groupId, `Dia de fechamento definido para o dia *${day}*.\n\nE qual o *dia de vencimento da fatura*? (Responda apenas com o número do dia, de 1 a 31. Ex: 20)`);
+                    await whatsappService.sendWhatsappMessage(groupId, `Dia de fechamento definido para o dia *${day}*.\n\nE qual o *dia de vencimento da fatura*?`);
                 } else {
-                    await whatsappService.sendWhatsappMessage(groupId, `Dia inválido. Por favor, responda com um número entre 1 e 31.`);
+                    await whatsappService.sendWhatsappMessage(groupId, `Dia inválido.`);
                 }
-            } else {
-                await whatsappService.sendWhatsappMessage(groupId, `Por favor, responda com o dia de fechamento (número).`);
             }
             break;
         case 'awaiting_new_card_due_day':
@@ -707,31 +672,25 @@ class WebhookService {
                 const day = parseInt(textMessage, 10);
                 if (day >= 1 && day <= 31) {
                     pending.description = day.toString();
-                    
                     try {
                         const closingDayInt = parseInt(pending.value, 10);
                         const dueDayInt = parseInt(pending.description, 10);
-
                         const newCard = await creditCardService.createCreditCard(pending.profile_id, {
                             name: pending.suggested_new_category_name,
                             closing_day: closingDayInt,
                             due_day: dueDayInt,
                             last_four_digits: null,
                         });
-                        await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado com sucesso!\n\nFechamento: dia ${newCard.closing_day}\nVencimento: dia ${newCard.due_day}.`);
+                        await whatsappService.sendWhatsappMessage(groupId, `✅ Cartão "*${newCard.name}*" criado!`);
                         await pending.destroy();
                         await this.sendMainMenu(groupId, participantPhone, profileId);
                     } catch (error) {
-                        logger.error('[Webhook] Erro ao criar cartão de crédito:', error);
-                        await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao criar o cartão. ${error.message}`);
+                        await whatsappService.sendWhatsappMessage(groupId, `❌ Erro: ${error.message}`);
                         await pending.destroy();
-                        await this.sendMainMenu(groupId, participantPhone, profileId);
                     }
                 } else {
-                    await whatsappService.sendWhatsappMessage(groupId, `Dia inválido. Por favor, responda com um número entre 1 e 31.`);
+                    await whatsappService.sendWhatsappMessage(groupId, `Dia inválido.`);
                 }
-            } else {
-                await whatsappService.sendWhatsappMessage(groupId, `Por favor, responda com o dia de vencimento (número).`);
             }
             break;
     }
@@ -762,36 +721,26 @@ class WebhookService {
       attachment_mimetype: mimeType,
       action_expected: 'awaiting_context',
       profile_id: profileId,
-      expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000), // 1 ANO
+      expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000), 
     });
-    const confirmationMessage = `📄 Recebi o documento. Qual a descrição para ele? (ex: "500 aluguel" ou "salário de 1000")`;
-    await whatsappService.sendWhatsappMessage(groupId, confirmationMessage);
-    logger.info(`[Webhook] Mídia (${mimeType}) de ${participantPhone} recebida. Mensagem de confirmação enviada.`);
+    await whatsappService.sendWhatsappMessage(groupId, `📄 Recebi. Qual a descrição e valor? (ex: "500 aluguel")`);
   }
 
-  // <<< FUNÇÃO MODIFICADA (Dispatcher) >>>
   async handleContextArrival(payload) {
     if (payload.fromMe) { return; }
     const textMessage = payload.text ? payload.text.message : null;
 
-    // Lógica de Múltiplas Linhas
     if (textMessage && textMessage.includes('\n')) {
-        logger.info(`[Webhook] Mensagem com múltiplas linhas detectada. Processando sequencialmente.`);
         const lines = textMessage.split('\n').filter(line => line.trim() !== '');
-
         for (const line of lines) {
-            logger.info(`[Webhook] Processando linha: "${line}"`);
             const singleLinePayload = { ...payload, text: { message: line } };
             await this._processSingleContext(singleLinePayload);
         }
         return;
     }
-    
-    // Se não for múltipla linha, processa como uma única mensagem
     await this._processSingleContext(payload);
   }
 
-  // <<< NOVA FUNÇÃO PRIVADA (Lógica Central) >>>
   async _processSingleContext(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
@@ -801,41 +750,34 @@ class WebhookService {
 
     if (!profileId) return;
 
-    // 1. Identifica se a mensagem parece ser um NOVO LANÇAMENTO (tem números)
+    // 1. Detecção de Novo Comando (com Números)
     const containsNumber = textMessage && /\d/.test(textMessage);
     
-    // 2. Busca se existe algum fluxo pendente (mas ignora o que já foi finalizado 'awaiting_validation')
     const pendingFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
             whatsapp_group_id: groupId, 
             profile_id: profileId, 
-            action_expected: { 
-                // Ignora estados onde o fluxo já "acabou" na prática
-                [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] 
-            }
+            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] }
         },
         order: [['createdAt', 'DESC']]
     });
 
-    // 3. LÓGICA DE LIMPEZA AGRESSIVA (PRIORIDADE DE NOVO COMANDO)
-    // Se o usuário mandou algo com número E não estamos num passo onde ele deve digitar um NOME
+    // 2. Prioridade para Novo Comando: Reseta fluxo se tiver número E não estiver esperando nome
     if (containsNumber && pendingFlow) {
-        const statesWhereUserMustTypeNames = [
+        const statesWaitingForName = [
             'awaiting_new_category_name', 
             'awaiting_new_category_type',
-            'awaiting_new_card_name'
+            'awaiting_new_card_name',
+            'awaiting_manual_category_search' // PROTEÇÃO: Se for busca manual, não mata mesmo com número
         ];
-
-        // Se NÃO for um desses estados de digitar nome, assumimos que o usuário 
-        // ignorou a pergunta anterior e está mandando um gasto novo.
-        if (!statesWhereUserMustTypeNames.includes(pendingFlow.action_expected)) {
-            logger.info(`[Webhook] Novo comando detectado ("${textMessage}"). Cancelando fluxo pendente anterior.`);
-            await pendingFlow.destroy(); 
+        
+        if (!statesWaitingForName.includes(pendingFlow.action_expected)) {
+            logger.info(`[Webhook] Novo comando com número detectado. Resetando fluxo anterior.`);
+            await pendingFlow.destroy();
         }
     }
 
-    // Re-busca (ou null)
     const activeFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
@@ -845,7 +787,7 @@ class WebhookService {
         }
     });
 
-    // 4. Trata comandos de Menu
+    // 3. Comandos de Menu
     if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
         return this.sendSpendingReport(groupId, participantPhone, profileId);
     }
@@ -853,17 +795,22 @@ class WebhookService {
         return this.sendExpensesExcelReport(groupId, participantPhone, profileId);
     }
 
-    // 5. Trata respostas numéricas de menu/cartão se houver fluxo ativo
+    // 4. Respostas Numéricas (Menu, Cartão, Escolha Ambiguidade)
     if (textMessage && /^\d+$/.test(textMessage) && activeFlow) {
-         if (!['awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_installment_count'].includes(activeFlow.action_expected)) {
+         if (!['awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_installment_count', 'awaiting_manual_category_search'].includes(activeFlow.action_expected)) {
              const handled = await this.handleNumericReply(payload, parseInt(textMessage, 10));
              if (handled) return;
          }
     }
 
-    // 6. Continuação de Fluxos Existentes (Input Manual, etc)
+    // 5. Fluxos Ativos
     if (activeFlow) {
-        // INPUT MANUAL DE CATEGORIA
+        // BUSCA MANUAL (Novo Recurso)
+        if (activeFlow.action_expected === 'awaiting_manual_category_search' && textMessage) {
+            return this._handleManualCategoryInputInFlow(payload, activeFlow, textMessage);
+        }
+
+        // INPUT MANUAL (Correção de IA)
         if (activeFlow.action_expected === 'awaiting_new_category_flow_decision' && textMessage) {
              return this._handleManualCategoryInputInFlow(payload, activeFlow, textMessage);
         }
@@ -876,7 +823,7 @@ class WebhookService {
         }
     }
     
-    // 7. Novo Lançamento (IA)
+    // 6. Novo Lançamento via IA
     const hasMediaInPayload = payload.image || payload.document;
 
     if (hasMediaInPayload) {
@@ -902,61 +849,17 @@ class WebhookService {
             if (analysisResult) {
                 return this.decideAndSaveExpenseOrRevenue(tempPending, analysisResult, userContext);
             } else {
-                await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui analisar o documento e o texto. Tente novamente.`);
+                await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui analisar. Tente novamente.`);
                 await tempPending.destroy();
             }
         } else {
-            await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o arquivo. Por favor, tente novamente.`);
+            await whatsappService.sendWhatsappMessage(groupId, `❌ Erro no arquivo.`);
         }
         return;
     }
 
-    const pendingMedia = await PendingExpense.findOne({
-      where: { 
-          participant_phone: participantPhone, 
-          whatsapp_group_id: groupId, 
-          profile_id: profileId, 
-          action_expected: 'awaiting_context',
-          expires_at: { [Op.gt]: new Date() } 
-      },
-      order: [['createdAt', 'DESC']]
-    });
-
-    if (pendingMedia) {
-      const allowedMimeTypesForAI = ['image/jpeg', 'image/png', 'application/pdf'];
-      if (!allowedMimeTypesForAI.includes(pendingMedia.attachment_mimetype)) {
-        const fileExtension = path.extname(pendingMedia.attachment_url).substring(1);
-        const errorMessage = `⚠️ O tipo de arquivo que você enviou (*.${fileExtension}*) não é suportado para análise. Por favor, envie uma imagem (JPEG/PNG) ou um PDF.`;
-        await whatsappService.sendWhatsappMessage(groupId, errorMessage);
-        await pendingMedia.destroy();
-        return;
-      }
-      
-      await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando documento e sua descrição...`);
-      let userContext = '';
-      if (audioUrl) {
-        const audioBuffer = await whatsappService.downloadZapiMedia(audioUrl);
-        userContext = audioBuffer ? await aiService.transcribeAudio(audioBuffer) : '';
-      } else if (textMessage) {
-        userContext = textMessage;
-      }
-      
-      const mediaBuffer = await whatsappService.downloadZapiMedia(pendingMedia.attachment_url);
-      if (mediaBuffer && userContext) {
-        const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
-        const analysisResult = await aiService.analyzeExpenseWithImage(mediaBuffer, userContext, pendingMedia.attachment_mimetype, profileId, cardNames);
-        if (analysisResult) {
-          return this.decideAndSaveExpenseOrRevenue(pendingMedia, analysisResult, userContext);
-        } else {
-          await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui analisar o documento e o texto/áudio. Tente enviar novamente.`);
-          await pendingMedia.destroy();
-        }
-      } else {
-        await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o arquivo ou o áudio. Por favor, tente novamente.`);
-        await pendingMedia.destroy();
-      }
-    } else if (textMessage || audioUrl) {
-        await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando sua mensagem...`);
+    if (textMessage || audioUrl) {
+        await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando...`);
         let userContext = '';
         if (audioUrl) {
           const audioBuffer = await whatsappService.downloadZapiMedia(audioUrl);
@@ -966,7 +869,6 @@ class WebhookService {
         }
 
         if (userContext) {
-            // Limpa estados anteriores
             await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId } });
 
             const tempPending = await PendingExpense.create({
@@ -975,52 +877,40 @@ class WebhookService {
                 participant_phone: participantPhone,
                 profile_id: profileId,
                 action_expected: 'awaiting_ai_analysis_complete',
-                expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000), // 1 ano
+                expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000), 
             });
             
             const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
             const analysisResult = await aiService.analyzeTextForExpenseOrRevenue(userContext, profileId, cardNames);
             
-            if (analysisResult && (analysisResult.value !== null || (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay))) {
-                if (analysisResult.cardName && analysisResult.closingDay && analysisResult.dueDay && analysisResult.value === null) {
-                    tempPending.suggested_new_category_name = analysisResult.cardName;
-                    tempPending.value = analysisResult.closingDay;
-                    tempPending.description = analysisResult.dueDay;
-                    tempPending.action_expected = 'awaiting_card_creation_confirmation';
-                    await tempPending.save();
-
-                    const buttons = [ { id: `card_confirm_create_${tempPending.id}`, label: '✅ Criar Cartão' }, { id: `card_cancel_create_${tempPending.id}`, label: '❌ Cancelar' } ];
-                    await whatsappService.sendButtonList(groupId, `A IA identificou um pedido para criar o cartão "*${analysisResult.cardName}*" com fechamento dia *${analysisResult.closingDay}* e vencimento dia *${analysisResult.dueDay}*. Confirma?`, buttons);
-                    return;
-                }
-                
-                if (analysisResult.value !== null) {
-                   return this.decideAndSaveExpenseOrRevenue(tempPending, analysisResult, userContext);
-                }
+            if (analysisResult && analysisResult.value !== null) {
+               return this.decideAndSaveExpenseOrRevenue(tempPending, analysisResult, userContext);
+            } else if (analysisResult && analysisResult.cardName) {
+               tempPending.suggested_new_category_name = analysisResult.cardName;
+               tempPending.value = analysisResult.closingDay;
+               tempPending.description = analysisResult.dueDay;
+               tempPending.action_expected = 'awaiting_card_creation_confirmation';
+               await tempPending.save();
+               const buttons = [ { id: `card_confirm_create_${tempPending.id}`, label: '✅ Criar Cartão' }, { id: `card_cancel_create_${tempPending.id}`, label: '❌ Cancelar' } ];
+               await whatsappService.sendButtonList(groupId, `Criar cartão "${analysisResult.cardName}"?`, buttons);
+               return;
             }
             
-            await whatsappService.sendWhatsappMessage(groupId, `❌ Desculpe, não consegui entender o valor, a descrição, a categoria ou um comando de cartão da sua mensagem. Por favor, tente novamente de forma mais clara (ex: "500 aluguel" ou "Salário 3000 categoria salário" ou "criar cartão Visa fechamento dia 5 vencimento dia 15").`);
+            await whatsappService.sendWhatsappMessage(groupId, `❌ Não entendi. Tente: "500 aluguel"`);
             await tempPending.destroy();
-
-        } else {
-            await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao processar o áudio/texto. Por favor, tente novamente.`);
-            await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId } });
         }
     }
   }
 
-  // --- LÓGICA DE INPUT MANUAL QUANDO A IA ERRA A CATEGORIA ---
   async _handleManualCategoryInputInFlow(payload, pendingExpense, textMessage) {
       const groupId = payload.phone;
       const profileId = payload.profileId;
 
       logger.info(`[Webhook] Tentando mapeamento manual de categoria: "${textMessage}"`);
       
-      // Busca robusta (sem acento/case)
       const existingCategory = await this._fuzzyFindCategory(profileId, textMessage);
       
       if (existingCategory) {
-           // Achou! Vincula e finaliza.
            const analysisResult = {
                 value: pendingExpense.value,
                 baseDescription: pendingExpense.description, 
@@ -1030,30 +920,33 @@ class WebhookService {
                 installmentCount: pendingExpense.installment_count,
                 cardName: null, 
             };
-            // Tenta extrair contexto dos parênteses se houver
+            // Tenta extrair contexto
             let userContext = '';
             if (pendingExpense.description && typeof pendingExpense.description === 'string') {
                 const match = pendingExpense.description.match(/\(([^)]+)\)/);
                 if (match) userContext = match[1];
             }
             
-            await whatsappService.sendWhatsappMessage(groupId, `✅ Entendido! Vou classificar como *${existingCategory.name}*.`);
+            await whatsappService.sendWhatsappMessage(groupId, `✅ Entendido! Classificado como *${existingCategory.name}*.`);
             await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, existingCategory.id, pendingExpense.credit_card_id);
       } else {
-           // Não achou. Segue fluxo de criação com o nome digitado.
+           // Não achou -> Sugere criar (volta pro fluxo de decisão)
            pendingExpense.suggested_new_category_name = textMessage;
            pendingExpense.action_expected = 'awaiting_new_category_flow_decision'; 
            await pendingExpense.save();
            
-           const message = `🤔 Não encontrei a categoria "${textMessage}". Deseja criar como *Despesa* ou *Receita*?`;
-           const buttons = [ { id: `new_cat_flow_expense_${pendingExpense.id}`, label: '💸 Despesa' }, { id: `new_cat_flow_revenue_${pendingExpense.id}`, label: '💰 Receita' } ];
+           const message = `🤔 Não encontrei a categoria "${textMessage}". Deseja criar como:`;
+           const buttons = [ 
+               { id: `new_cat_flow_expense_${pendingExpense.id}`, label: '💸 Despesa' }, 
+               { id: `new_cat_flow_revenue_${pendingExpense.id}`, label: '💰 Receita' },
+               { id: `search_manual_cat_${pendingExpense.id}`, label: '🔍 Localizar Categoria' }
+           ];
            await whatsappService.sendButtonList(groupId, message, buttons);
       }
   }
 
   async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
     const { value, baseDescription, isInstallment, installmentCount, cardName, ambiguousCategoryNames } = analysisResult;
-    let categoryNameFromAI = analysisResult.categoryName;
     const profileId = pendingData.profile_id;
     const groupId = pendingData.whatsapp_group_id;
 
@@ -1064,18 +957,14 @@ class WebhookService {
         pendingData.installment_count = isInstallment ? installmentCount : null;
         pendingData.action_expected = 'awaiting_ambiguous_category_choice';
         await pendingData.save();
-
         const categoryListText = ambiguousCategoryNames.map((name, index) => `${index + 1} - ${name}`).join('\n');
-        const message = `🤔 O termo que você usou é um pouco vago e corresponde a mais de uma categoria. Qual delas você quis dizer?\n\n${categoryListText}\n\nResponda com o *número* da opção correta.`;
-        
-        await whatsappService.sendWhatsappMessage(groupId, message);
+        await whatsappService.sendWhatsappMessage(groupId, `🤔 Qual categoria você quis dizer?\n\n${categoryListText}\n\nResponda com o número.`);
         return; 
     }
 
-    // Tenta encontrar categoria existente usando busca Fuzzy robusta
-    let category = await this._fuzzyFindCategory(profileId, categoryNameFromAI);
+    let category = await this._fuzzyFindCategory(profileId, analysisResult.categoryName);
 
-    if (!category && (categoryNameFromAI.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
+    if (!category && (analysisResult.categoryName.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
         category = await this._fuzzyFindCategory(profileId, baseDescription);
     }
 
@@ -1091,31 +980,20 @@ class WebhookService {
             pendingData.action_expected = 'awaiting_credit_card_choice';
             pendingData.suggested_category_id = category.id;
             await pendingData.save();
-
+            
             const creditCards = await creditCardService.getAllCreditCards(profileId);
             if (creditCards.length > 0) {
-                const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name}`).join('\n');
-                let cardMessage = `ℹ️ A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}* pode ser de cartão.\n\nSelecione o *número* do cartão ou responda *0* para dinheiro/débito.\n\n${cardListText}`;
-                
-                if (cardName) {
-                    const suggestedCard = creditCards.find(c => c.name.toLowerCase() === cardName.toLowerCase());
-                    if (suggestedCard) {
-                        cardMessage = `ℹ️ A IA sugeriu o cartão *${suggestedCard.name}*. Confirma? Responda com o *número* do cartão ou *0* para dinheiro/débito.\n\n${cardListText}`;
-                    }
-                }
-                await whatsappService.sendWhatsappMessage(groupId, cardMessage);
+                 const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name}`).join('\n');
+                 await whatsappService.sendWhatsappMessage(groupId, `ℹ️ Qual cartão?\n\n${cardListText}\n\n(0 para dinheiro/débito)`);
             } else {
-                await whatsappService.sendWhatsappMessage(groupId, `ℹ️ Despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}*.\n\nNão há cartões de crédito cadastrados. Será registrada como dinheiro/débito.`);
-                return this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
+                 await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
             }
         } else {
-            if (finalFlow === 'revenue' && (isInstallment || cardName)) {
-                await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${category.name}" é de *Receita*. A informação de cartão/parcelamento será ignorada.`);
-            }
             await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
         }
     } else {
-        const categorySuggestion = categoryNameFromAI !== 'Outros' ? categoryNameFromAI : (baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria");
+        // Nova Categoria
+        const categorySuggestion = analysisResult.categoryName !== 'Outros' ? analysisResult.categoryName : (baseDescription.split(' ')[0] || "Nova Categoria");
         
         pendingData.value = value;
         pendingData.description = userContext ? `${baseDescription} (${userContext})` : baseDescription;
@@ -1123,26 +1001,22 @@ class WebhookService {
         pendingData.action_expected = 'awaiting_new_category_flow_decision';
         await pendingData.save();
 
-        const message = `🤔 A categoria "*${categorySuggestion}*" é nova. \n\nEla é *Despesa* ou *Receita*? \n\n💡 _Se você já tem uma categoria parecida e eu não achei, basta **digitar o nome dela** agora._`;
+        const message = `🤔 A categoria "*${categorySuggestion}*" é nova. O que deseja fazer?`;
         const buttons = [ 
-            { id: `new_cat_flow_expense_${pendingData.id}`, label: '💸 Despesa' }, 
-            { id: `new_cat_flow_revenue_${pendingData.id}`, label: '💰 Receita' } 
+            { id: `new_cat_flow_expense_${pendingData.id}`, label: '💸 Criar Despesa' }, 
+            { id: `new_cat_flow_revenue_${pendingData.id}`, label: '💰 Criar Receita' },
+            { id: `search_manual_cat_${pendingData.id}`, label: '🔍 Localizar Categoria' }
         ];
         await whatsappService.sendButtonList(groupId, message, buttons);
-        logger.info(`[Webhook] Nova categoria "${categorySuggestion}" sugerida. Aguardando decisão de fluxo ou input manual.`);
     }
   }
 
   async createExpenseOrRevenueAndStartEditFlow(pendingData, analysisResult, userContext, categoryId, creditCardId = null) {
-    const { value, baseDescription, flow, isInstallment, installmentCount } = analysisResult;
+    const { value, baseDescription, isInstallment, installmentCount } = analysisResult;
     const finalDescriptionForDB = userContext ? `${baseDescription} (${userContext})` : baseDescription;
     
     const category = await Category.findByPk(categoryId);
-    if (!category) {
-        await whatsappService.sendWhatsappMessage(pendingData.whatsapp_group_id, `❌ Erro: Categoria não encontrada no momento do registro final.`);
-        await pendingData.destroy();
-        return;
-    }
+    if (!category) return;
 
     let createdEntry;
     const entryDate = new Date();
@@ -1153,11 +1027,7 @@ class WebhookService {
         if (creditCard) {
             const currentDay = entryDate.getDate();
             let chargeMonthDate = new Date(entryDate);
-            
-            if (currentDay > creditCard.closing_day) {
-                chargeMonthDate = addMonths(chargeMonthDate, 1);
-            }
-            
+            if (currentDay > creditCard.closing_day) chargeMonthDate = addMonths(chargeMonthDate, 1);
             chargeDate = setDate(chargeMonthDate, creditCard.due_day);
         }
     }
@@ -1187,7 +1057,6 @@ class WebhookService {
                 });
             }
         }
-        
     } else {
         createdEntry = await Revenue.create({
             value, description: finalDescriptionForDB, revenue_date: entryDate,
@@ -1201,33 +1070,17 @@ class WebhookService {
     pendingData.suggested_category_id = categoryId;
     pendingData.credit_card_id = creditCardId;
     pendingData.action_expected = 'awaiting_validation';
-    
-    // 1 ANO DE VALIDADE PARA EDIÇÃO
     pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
     await pendingData.save();
 
     const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+    let message = `✅ *Registrado:* ${formattedValue}\n*Categoria:* ${category.name}`;
     
-    let message = '';
+    const now = new Date();
+    const startOfCurrentMonth = startOfMonth(now);
+    const endOfCurrentMonth = new Date();
+    
     if (category.category_flow === 'expense') {
-        const totalExpenses = await Expense.sum('value', { where: { profile_id: pendingData.profile_id, original_expense_id: { [Op.eq]: null } } });
-        const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalExpenses || 0);
-        
-        let installmentInfo = '';
-        if (isInstallment) {
-            installmentInfo = `\n*Parcelas:* ${analysisResult.installmentCount}x de ${formattedValue} (Total: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value * installmentCount)})` +
-                              (creditCardId ? `\n*Cartão:* ${(await CreditCard.findByPk(creditCardId))?.name || 'N/A'}` : '');
-        } else if (creditCardId) {
-            installmentInfo = `\n*Cartão:* ${(await CreditCard.findByPk(creditCardId))?.name || 'N/A'}`;
-        }
-
-        message = `💸 *Despesa Registrada:* ${formattedValue}\n*Categoria:* ${category.name} (${baseDescription})${installmentInfo}\n*Total de Despesas:* ${formattedTotalExpenses}`;
-        
-        // --- LÓGICA DE ALERTA DE META (MANTIDA) ---
-        const now = new Date();
-        const startOfCurrentMonth = startOfMonth(now);
-        const endOfCurrentMonth = new Date();
-        
         const currentMonthTotalExpenses = await Expense.sum('value', { 
             where: { 
                 profile_id: pendingData.profile_id, 
@@ -1238,10 +1091,9 @@ class WebhookService {
                 original_expense_id: { [Op.eq]: null }
             } 
         });
-
         const categoryGoal = await MonthlyGoal.findOne({ where: { profile_id: pendingData.profile_id, category_id: category.id } });
         if (categoryGoal && currentMonthTotalExpenses) {
-            const currentCategoryExpenses = await Expense.sum('value', { 
+             const currentCategoryExpenses = await Expense.sum('value', { 
                 where: { 
                     profile_id: pendingData.profile_id, 
                     category_id: category.id,
@@ -1253,264 +1105,141 @@ class WebhookService {
                 } 
             });
             if (currentCategoryExpenses > parseFloat(categoryGoal.value)) {
-                message += `\n\n🚨 *ALERTA:* Você excedeu a meta de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(categoryGoal.value)}* para a categoria *${category.name}* neste mês!`;
-            } else {
-                const remaining = parseFloat(categoryGoal.value) - currentCategoryExpenses;
-                message += `\n*Meta Categoria ${category.name}:* ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(remaining)} restantes.`;
+                message += `\n\n🚨 *ALERTA:* Meta da categoria *${category.name}* excedida!`;
             }
         }
-        
         const totalGoal = await MonthlyGoal.findOne({ where: { profile_id: pendingData.profile_id, is_total_goal: true, category_id: null } });
-        if (totalGoal && currentMonthTotalExpenses) {
-             if (currentMonthTotalExpenses > parseFloat(totalGoal.value)) {
-                message += `\n🚨 *ALERTA GERAL:* Você excedeu a meta total de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalGoal.value)}* neste mês!`;
-             } else {
-                const remaining = parseFloat(totalGoal.value) - currentMonthTotalExpenses;
-                message += `\n*Meta Total Mensal:* ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(remaining)} restantes.`;
-             }
+        if (totalGoal && currentMonthTotalExpenses && currentMonthTotalExpenses > parseFloat(totalGoal.value)) {
+            message += `\n🚨 *ALERTA GERAL:* Meta total mensal excedida!`;
         }
-
-        message += `\n\nDespesa *já* salva! Para alterar a categoria, clique em *Corrigir*.`;
-
-    } else {
-        const totalRevenues = await Revenue.sum('value', { where: { profile_id: pendingData.profile_id } });
-        const formattedTotalRevenues = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(totalRevenues || 0);
-        message = `💰 *Receita Registrada:* ${formattedValue}\n*Categoria:* ${category.name} (${baseDescription})\n*Total de Receitas:* ${formattedTotalRevenues}\n\nReceita *já* salva! Para alterar a categoria, clique em *Corrigir*.`;
     }
 
     const buttons = [{ id: `edit_expense_${pendingData.id}`, label: '✏️ Corrigir Categoria' }];
     await whatsappService.sendButtonList(pendingData.whatsapp_group_id, message, buttons);
-    logger.info(`[Webhook] ${category.category_flow === 'expense' ? 'Despesa' : 'Receita'} #${createdEntry.id} salva.`);
   }
 
-  async handleNewCategoryDecisionFlow(payload) {
-    const buttonId = payload.buttonsResponseMessage.buttonId;
-    const parts = buttonId.split('_');
-    const action = parts[2];
-    const pendingExpenseId = parts[parts.length - 1];
-    const groupId = payload.phone;
-    const profileId = payload.profileId;
+  async handleEditButtonFlow(payload) {
+      const buttonId = payload.buttonsResponseMessage.buttonId;
+      const groupId = payload.phone;
+      const profileId = payload.profileId;
+      const pendingExpenseId = buttonId.split('_')[2];
+      
+      const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { 
+          where: { profile_id: profileId },
+          include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
+      });
 
-    const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
-    if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`); return; }
+      if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ou não existe.`); return; }
+      
+      const allCategories = await Category.findAll({ 
+          where: { profile_id: profileId }, 
+          order: [['category_flow', 'DESC'],['name', 'ASC']]
+      });
 
-    const suggestedFlow = pendingExpense.suggested_category_flow || 'expense';
-    const otherCategoryName = suggestedFlow === 'expense' ? 'Outros' : 'Receita Padrão';
+      const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name} (${cat.category_flow === 'expense' ? 'Despesa' : 'Receita'})`).join('\n');
+      const valueToFormat = pendingExpense.expense?.value || pendingExpense.revenue?.value || pendingExpense.value;
+      const descriptionToUse = pendingExpense.expense?.description || pendingExpense.revenue?.description || pendingExpense.description;
+      const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : (pendingExpense.suggested_category_flow || 'despesa'));
+      const flowText = originalFlow === 'expense' ? 'despesa' : 'receita';
+      const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);
 
-    if (action === 'create') {
-        pendingExpense.action_expected = 'awaiting_new_category_type';
-        await pendingExpense.save();
-        await whatsappService.sendWhatsappMessage(groupId, `Entendido! A qual tipo de custo/receita a categoria "*${pendingExpense.suggested_new_category_name}*" pertence?\n\nResponda com um tipo (ex: "Material", "Mão de Obra", "Salário", "Serviço Avulso").`);
-    } else if (action === 'choose') {
-        payload.buttonsResponseMessage.buttonId = `edit_expense_${pendingExpenseId}`;
-        await this.handleEditButtonFlow(payload);
-    } else if (action === 'outros') {
-        const finalCategory = await Category.findOne({ 
-            where: { name: otherCategoryName, profile_id: profileId, category_flow: suggestedFlow } 
-        });
-
-        if (!finalCategory) { 
-            await whatsappService.sendWhatsappMessage(groupId, `❌ Erro crítico: A categoria "${otherCategoryName}" não foi encontrada.`); 
-            return; 
-        }
-        
-        const analysisResult = {
-            value: pendingExpense.value,
-            baseDescription: pendingExpense.description,
-            categoryName: finalCategory.name,
-            flow: finalCategory.category_flow,
-            isInstallment: !!pendingExpense.installment_count,
-            installmentCount: pendingExpense.installment_count,
-            cardName: null,
-        };
-        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
-        await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, finalCategory.id);
-    }
+      const message = `📋 *Editar Categoria* \n\nVocê está editando a ${flowText} *já salva* de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
+      
+      pendingExpense.action_expected = 'awaiting_category_reply';
+      pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
+      await pendingExpense.save();
+      await whatsappService.sendWhatsappMessage(groupId, message);
   }
-  
-  async handleNewCategoryFlowDecision(payload) {
-    const buttonId = payload.buttonsResponseMessage.buttonId;
-    const parts = buttonId.split('_');
-    const flow = parts[3];
-    const pendingExpenseId = parts[parts.length - 1];
-    const groupId = payload.phone;
-    const profileId = payload.profileId;
 
-    const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
-    if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`); return; }
+  async handleNumericReply(payload, selectedNumber) {
+    const { phone: groupId, participantPhone, profileId } = payload;
     
-    pendingExpense.suggested_category_flow = flow;
-    if (flow === 'expense') {
-        pendingExpense.action_expected = 'awaiting_new_category_goal';
-        await pendingExpense.save();
-        await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pendingExpense.suggested_new_category_name}*"?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
-    } else {
-        if (pendingExpense.whatsapp_message_id.endsWith('_menu_cat')) {
-            await this._finalizeCategoryCreationFromMenu(pendingExpense);
+    const pendingAmbiguity = await PendingExpense.findOne({
+        where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_ambiguous_category_choice' },
+    });
+
+    if (pendingAmbiguity) {
+        try {
+            const choices = JSON.parse(pendingAmbiguity.description);
+            const chosenCategoryName = choices[selectedNumber - 1];
+            if (!chosenCategoryName) return true;
+            
+            const resolvedAnalysisResult = {
+                value: pendingAmbiguity.value,
+                baseDescription: pendingAmbiguity.suggested_new_category_name,
+                categoryName: chosenCategoryName,
+                isInstallment: !!pendingAmbiguity.installment_count,
+                installmentCount: pendingAmbiguity.installment_count,
+                cardName: null,
+            };
+            await this.decideAndSaveExpenseOrRevenue(pendingAmbiguity, resolvedAnalysisResult, resolvedAnalysisResult.baseDescription);
+            return true;
+        } catch (error) {
+            await pendingAmbiguity.destroy();
+            return true;
+        }
+    }
+
+    const pendingExpense = await PendingExpense.findOne({
+      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_category_reply' },
+      include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
+    });
+
+    if (!pendingExpense) return false;
+    
+    const allCategories = await Category.findAll({ where: { profile_id: profileId }, order: [['category_flow', 'DESC'], ['name', 'ASC']] });
+    const selectedCategory = allCategories[selectedNumber - 1];
+
+    if (!selectedCategory) { 
+        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!*`); 
+        return true; 
+    }
+
+    let updatedEntry;
+    if (pendingExpense.expense) {
+        if (selectedCategory.category_flow !== 'expense') {
+            const originalExpense = pendingExpense.expense;
+            await Revenue.create({
+                value: originalExpense.value, description: originalExpense.description, revenue_date: originalExpense.expense_date,
+                whatsapp_message_id: originalExpense.whatsapp_message_id, category_id: selectedCategory.id, profile_id: originalExpense.profile_id,
+            });
+            await originalExpense.destroy();
+            updatedEntry = await Revenue.findOne({where: {whatsapp_message_id: originalExpense.whatsapp_message_id}});
         } else {
-            await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense);
+            await pendingExpense.expense.update({ category_id: selectedCategory.id });
+            updatedEntry = pendingExpense.expense;
         }
-    }
-  }
-
-  async finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense, goalValue = 0) {
-    const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
-    
-    const categoryType = pendingExpense.description || 'Outros'; 
-
-    try {
-        const newCategory = await categoryService.create(
-            { name: suggested_new_category_name, type: categoryType, category_flow: suggested_category_flow },
-            profile_id
-        );
-        
-        let msg = `✅ Nova categoria "*${suggested_new_category_name}*" (${suggested_category_flow === 'expense' ? 'Despesa' : 'Receita'}) criada com sucesso!`;
-        if (suggested_category_flow === 'expense' && goalValue > 0) {
-            const goalService = require('../GoalManager/goal.service');
-            await goalService.createOrUpdateGoal(profile_id, {
-                value: goalValue,
-                categoryId: newCategory.id,
-                isTotalGoal: false,
+    } else if (pendingExpense.revenue) {
+        if (selectedCategory.category_flow !== 'revenue') {
+            const originalRevenue = pendingExpense.revenue;
+            await Expense.create({
+                value: originalRevenue.value, description: originalRevenue.description, expense_date: originalRevenue.revenue_date,
+                whatsapp_message_id: originalRevenue.whatsapp_message_id, category_id: selectedCategory.id, profile_id: originalRevenue.profile_id,
             });
-            msg += `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
+            await originalRevenue.destroy();
+            updatedEntry = await Expense.findOne({where: {whatsapp_message_id: originalRevenue.whatsapp_message_id}});
+        } else {
+            await pendingExpense.revenue.update({ category_id: selectedCategory.id });
+            updatedEntry = pendingExpense.revenue;
         }
-
-        await whatsappService.sendWhatsappMessage(whatsapp_group_id, msg);
-
-        const analysisResult = {
-            value: pendingExpense.value,
-            baseDescription: pendingExpense.description,
-            categoryName: newCategory.name,
-            flow: newCategory.category_flow,
-            isInstallment: !!pendingExpense.installment_count,
-            installmentCount: pendingExpense.installment_count,
-            cardName: null,
-        };
-        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
-        await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, newCategory.id, pendingExpense.credit_card_id);
-
-    } catch (error) {
-        logger.error('[Webhook] Erro ao finalizar criação de categoria a partir de PendingExpense:', error);
-        await whatsappService.sendWhatsappMessage(whatsapp_group_id, `❌ Houve um erro ao criar a categoria "${suggested_new_category_name}". ${error.message}`);
-        await pendingExpense.destroy();
     }
+    await pendingExpense.destroy();
+    await whatsappService.sendWhatsappMessage(groupId, `✅ Atualizado para: *${selectedCategory.name}*`);
+    return true;
   }
-
-  async _finalizeCategoryCreationFromMenu(pendingExpense, goalValue = 0) {
-    const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
-    const categoryType = pendingExpense.description || 'Outros'; 
-
-    try {
-        const newCategory = await categoryService.create(
-            { name: suggested_new_category_name, type: categoryType, category_flow: suggested_category_flow },
-            profile_id
-        );
-
-        let msg = `✅ Nova categoria "*${suggested_new_category_name}*" (${suggested_category_flow === 'expense' ? 'Despesa' : 'Receita'}) foi criada com sucesso!`;
-
-        if (suggested_category_flow === 'expense' && goalValue > 0) {
-            const goalService = require('../GoalManager/goal.service');
-            await goalService.createOrUpdateGoal(profile_id, {
-                value: goalValue,
-                categoryId: newCategory.id,
-                isTotalGoal: false,
-            });
-            msg += `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
-        }
-
-        await whatsappService.sendWhatsappMessage(whatsapp_group_id, msg);
-        await this.sendMainMenu(whatsapp_group_id, pendingExpense.participant_phone, profile_id);
-
-    } catch (error) {
-        logger.error('[Webhook] Erro ao finalizar criação de categoria vinda do MENU:', error);
-        await whatsappService.sendWhatsappMessage(whatsapp_group_id, `❌ Houve um erro ao criar a categoria "${suggested_new_category_name}". ${error.message}`);
-    } finally {
-        await pendingExpense.destroy();
-    }
-  }
-  
-  async handleNewCategoryCreationFlowFromPending(payload, pending) {
-    const groupId = payload.phone;
-    const textMessage = payload.text?.message;
-    const buttonId = payload.buttonsResponseMessage?.buttonId;
-
-    switch (pending.action_expected) {
-        case 'awaiting_new_category_name':
-            if (textMessage) {
-                pending.suggested_new_category_name = textMessage.trim();
-                pending.action_expected = 'awaiting_new_category_type';
-                await pending.save();
-                await whatsappService.sendWhatsappMessage(groupId, `Entendido. Agora, defina um *tipo* para a categoria "*${textMessage}*".\n\nIsso ajuda a agrupar seus custos nos relatórios (ex: "Mão de Obra", "Material Bruto", "Acabamentos", "Salário").`);
-            } else {
-                await whatsappService.sendWhatsappMessage(groupId, `Por favor, me diga o nome da categoria.`);
-            }
-            break;
-
-        case 'awaiting_new_category_type':
-            if (textMessage) {
-                pending.description = textMessage.trim(); 
-                pending.action_expected = 'awaiting_category_flow_decision';
-                await pending.save();
-                const message = `A categoria "*${pending.suggested_new_category_name}*" será para *Despesas* ou *Receitas*?`;
-                const buttons = [{ id: `new_cat_flow_expense_${pending.id}`, label: '💸 Despesa' }, { id: `new_cat_flow_revenue_${pending.id}`, label: '💰 Receita' }];
-                await whatsappService.sendButtonList(groupId, message, buttons);
-            }
-            break;
-
-        case 'awaiting_category_flow_decision':
-             if (buttonId && (buttonId.startsWith('new_cat_flow_expense_') || buttonId.startsWith('new_cat_flow_revenue_'))) {
-                const flow = buttonId.split('_')[3];
-                pending.suggested_category_flow = flow;
-                if (flow === 'expense') {
-                    pending.action_expected = 'awaiting_new_category_goal';
-                    await pending.save();
-                    await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pending.suggested_new_category_name}*"?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
-                } else {
-                    if (pending.whatsapp_message_id.endsWith('_menu_cat')) {
-                        await this._finalizeCategoryCreationFromMenu(pending);
-                    } else {
-                        await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending);
-                    }
-                }
-            } else {
-                await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, selecione "Despesa" ou "Receita".`);
-            }
-            break;
-
-        case 'awaiting_new_category_goal':
-            if (textMessage) {
-                const goalValue = parseFloat(textMessage.replace(',', '.'));
-                if (isNaN(goalValue) || goalValue < 0) {
-                    await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números positivos (ex: 1500 ou 0).`);
-                    return;
-                }
-                if (pending.whatsapp_message_id.endsWith('_menu_cat')) {
-                    await this._finalizeCategoryCreationFromMenu(pending, goalValue);
-                } else {
-                    await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending, goalValue);
-                }
-            }
-            break;
-    }
-  }
-
 
   async handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId) {
     const pendingExpense = await PendingExpense.findOne({
       where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_credit_card_choice' },
       order: [['createdAt', 'DESC']]
     });
-
-    if (!pendingExpense) { 
-        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} para cartão ignorada.`); 
-        return false; 
-    }
+    if (!pendingExpense) return false;
 
     const analysisResult = {
         value: pendingExpense.value,
         baseDescription: pendingExpense.description,
         categoryName: pendingExpense.suggested_new_category_name,
-        flow: 'expense', // Sabemos que é despesa neste fluxo
+        flow: 'expense',
         isInstallment: !!pendingExpense.installment_count,
         installmentCount: pendingExpense.installment_count,
         cardName: null,
@@ -1527,7 +1256,7 @@ class WebhookService {
     const selectedCard = creditCards[selectedNumber - 1];
 
     if (!selectedCard) {
-        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!* \n\nO número *${selectedNumber}* não corresponde a um cartão. Responda com um número da lista ou *0* para dinheiro/débito.`);
+        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!*`);
         return true;
     }
 
@@ -1535,7 +1264,7 @@ class WebhookService {
     if (analysisResult.isInstallment && analysisResult.installmentCount > 1) {
         pendingExpense.action_expected = 'awaiting_installment_count';
         await pendingExpense.save();
-        await whatsappService.sendWhatsappMessage(groupId, `Em quantas parcelas (total) esta despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(analysisResult.value)}* será feita no cartão *${selectedCard.name}*? (Responda apenas com o número, ex: 3)`);
+        await whatsappService.sendWhatsappMessage(groupId, `Em quantas parcelas? (Total: ${analysisResult.installmentCount} sugeridas).`);
     } else {
         return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, selectedCard.id);
     }
@@ -1547,207 +1276,22 @@ class WebhookService {
       where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_installment_count' },
       order: [['createdAt', 'DESC']]
     });
-
-    if (!pendingExpense) { 
-        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} para parcelas ignorada.`); 
-        return false; 
-    }
+    if (!pendingExpense) return false;
 
     const installmentCount = parseInt(selectedNumber, 10);
-    if (isNaN(installmentCount) || installmentCount <= 0 || installmentCount > 36) {
-        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Número de Parcelas Inválido!* \n\nPor favor, responda com um número de parcelas válido (entre 1 e 36).`);
-        return true;
-    }
+    if (isNaN(installmentCount) || installmentCount <= 0) return true;
 
     const analysisResult = {
         value: pendingExpense.value,
         baseDescription: pendingExpense.description,
         categoryName: pendingExpense.suggested_new_category_name,
-        flow: 'expense', // Sabemos que é despesa
+        flow: 'expense',
         isInstallment: true,
         installmentCount: installmentCount,
         cardName: null,
     };
     const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
-    const categoryId = pendingExpense.suggested_category_id;
-    const creditCardId = pendingExpense.credit_card_id;
-
-    return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, categoryId, creditCardId);
-  }
-
-  async handleNumericReply(payload, selectedNumber) {
-    const { phone: groupId, participantPhone, profileId } = payload;
-    
-    const pendingAmbiguity = await PendingExpense.findOne({
-        where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_ambiguous_category_choice' },
-    });
-
-    if (pendingAmbiguity) {
-        try {
-            const choices = JSON.parse(pendingAmbiguity.description);
-            const chosenCategoryName = choices[selectedNumber - 1];
-
-            if (!chosenCategoryName) {
-                await whatsappService.sendWhatsappMessage(groupId, `⚠️ Opção inválida. Por favor, responda com um número entre 1 e ${choices.length}.`);
-                return true;
-            }
-            
-            const resolvedAnalysisResult = {
-                value: pendingAmbiguity.value,
-                baseDescription: pendingAmbiguity.suggested_new_category_name,
-                categoryName: chosenCategoryName,
-                isInstallment: !!pendingAmbiguity.installment_count,
-                installmentCount: pendingAmbiguity.installment_count,
-                cardName: null,
-            };
-            await this.decideAndSaveExpenseOrRevenue(pendingAmbiguity, resolvedAnalysisResult, resolvedAnalysisResult.baseDescription);
-            return true;
-
-        } catch (error) {
-            logger.error('[Webhook] Erro ao processar resposta de ambiguidade:', error);
-            await whatsappService.sendWhatsappMessage(groupId, '❌ Ocorreu um erro ao processar sua escolha. O processo foi cancelado.');
-            await pendingAmbiguity.destroy();
-            return true;
-        }
-    }
-    
-    const pendingOnboarding = await OnboardingState.findOne({where: { group_id: groupId, initiator_phone: participantPhone, status: 'awaiting_profile_choice'}});
-    if (pendingOnboarding) {
-        this.handleOnboardingResponse({phone: groupId, participantPhone, text: { message: selectedNumber.toString() }}, pendingOnboarding);
-        return true;
-    }
-
-    const isHandlingCreditCard = await this.handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId);
-    if (isHandlingCreditCard) return true;
-
-    const isHandlingInstallmentCount = await this.handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId);
-    if (isHandlingInstallmentCount) return true;
-
-    const pendingExpense = await PendingExpense.findOne({
-      where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_category_reply' },
-      include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
-    });
-
-    if (!pendingExpense) { 
-        logger.warn(`[Webhook] Resposta numérica de ${participantPhone} ignorada porque não há fluxo de resposta de categoria pendente.`);
-        return false;
-    }
-    
-    const allCategories = await Category.findAll({ 
-        where: { 
-            profile_id: profileId
-        }, 
-        order: [['category_flow', 'DESC'], ['name', 'ASC']]
-    });
-
-    const selectedCategory = allCategories[selectedNumber - 1];
-
-    if (!selectedCategory) { 
-        const totalCategories = allCategories.length; 
-        await whatsappService.sendWhatsappMessage(groupId, `⚠️ *Opção Inválida!* \n\nO número *${selectedNumber}* não está na lista. Responda com um número entre 1 e ${totalCategories}.`); 
-        return true; 
-    }
-
-    let updatedEntry;
-    if (pendingExpense.expense) {
-        if (selectedCategory.category_flow !== 'expense') {
-            await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Receitas*. O lançamento original será convertido de Despesa para Receita.`);
-            const originalExpense = pendingExpense.expense;
-            await Revenue.create({
-                value: originalExpense.value,
-                description: originalExpense.description,
-                revenue_date: originalExpense.expense_date,
-                whatsapp_message_id: originalExpense.whatsapp_message_id,
-                category_id: selectedCategory.id,
-                profile_id: originalExpense.profile_id,
-            });
-            await originalExpense.destroy();
-            updatedEntry = await Revenue.findOne({where: {whatsapp_message_id: originalExpense.whatsapp_message_id}});
-        } else {
-            await pendingExpense.expense.update({ category_id: selectedCategory.id });
-            updatedEntry = pendingExpense.expense;
-        }
-    } else if (pendingExpense.revenue) {
-        if (selectedCategory.category_flow !== 'revenue') {
-             await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${selectedCategory.name}" é para *Despesas*. O lançamento original será convertido de Receita para Despesa.`);
-            const originalRevenue = pendingExpense.revenue;
-            await Expense.create({
-                value: originalRevenue.value,
-                description: originalRevenue.description,
-                expense_date: originalRevenue.revenue_date,
-                whatsapp_message_id: originalRevenue.whatsapp_message_id,
-                category_id: selectedCategory.id,
-                profile_id: originalRevenue.profile_id,
-            });
-            await originalRevenue.destroy();
-            updatedEntry = await Expense.findOne({where: {whatsapp_message_id: originalRevenue.whatsapp_message_id}});
-        } else {
-            await pendingExpense.revenue.update({ category_id: selectedCategory.id });
-            updatedEntry = pendingExpense.revenue;
-        }
-    } else {
-        const analysisResult = {
-            value: pendingExpense.value,
-            baseDescription: pendingExpense.description,
-            categoryName: selectedCategory.name,
-            flow: selectedCategory.category_flow,
-            isInstallment: !!pendingExpense.installment_count,
-            installmentCount: pendingExpense.installment_count,
-            cardName: null,
-        };
-        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
-        await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, selectedCategory.id, pendingExpense.credit_card_id);
-        return true;
-    }
-    
-    await pendingExpense.destroy();
-
-    const formattedTotal = await (updatedEntry instanceof Expense ? Expense.sum('value', { where: { profile_id: profileId, original_expense_id: { [Op.eq]: null } } }) : Revenue.sum('value', { where: { profile_id: profileId } }));
-    const formattedTotalString = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(formattedTotal || 0);
-    const flowText = updatedEntry instanceof Expense ? 'Despesa' : 'Receita';
-
-    const successMessage = `✅ *${flowText} Atualizada!* \n${flowText} #${updatedEntry.id}\nNova categoria: *${selectedCategory.name}*\n*Total de ${flowText === 'Despesa' ? 'Despesas' : 'Receitas'}:* ${formattedTotalString}`;
-    await whatsappService.sendWhatsappMessage(groupId, successMessage);
-    logger.info(`[Webhook] ${flowText} #${updatedEntry.id} atualizada para categoria ${selectedCategory.name} por ${participantPhone}.`);
-    return true;
-  }
-
-  async handleEditButtonFlow(payload) {
-      const buttonId = payload.buttonsResponseMessage.buttonId;
-      const groupId = payload.phone;
-      const clickerPhone = payload.participantPhone;
-      const profileId = payload.profileId;
-      const pendingExpenseId = buttonId.split('_')[2];
-      
-      const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { 
-          where: { profile_id: profileId },
-          include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
-      });
-
-      if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ou não existe.`); return; }
-      
-      const allCategories = await Category.findAll({ 
-          where: { 
-              profile_id: profileId
-          }, 
-          order: [['category_flow', 'DESC'],['name', 'ASC']]
-      });
-
-      const categoryListText = allCategories.map((cat, index) => `${index + 1} - ${cat.name} (${cat.category_flow === 'expense' ? 'Despesa' : 'Receita'})`).join('\n');
-      
-      const valueToFormat = pendingExpense.expense?.value || pendingExpense.revenue?.value || pendingExpense.value;
-      const descriptionToUse = pendingExpense.expense?.description || pendingExpense.revenue?.description || pendingExpense.description;
-      
-      const originalFlow = pendingExpense.expense ? 'expense' : (pendingExpense.revenue ? 'revenue' : (pendingExpense.suggested_category_flow || 'despesa'));
-      const flowText = originalFlow === 'expense' ? 'despesa' : 'receita';
-
-      const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);
-      const message = `📋 *Editar Categoria* \n\nVocê está editando a ${flowText} *já salva* de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
-      
-      pendingExpense.action_expected = 'awaiting_category_reply';
-      pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); // 1 ANO
-      await pendingExpense.save();
-      await whatsappService.sendWhatsappMessage(groupId, message);
+    return this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, pendingExpense.suggested_category_id, pendingExpense.credit_card_id);
   }
 
   async sendSpendingReport(groupId, recipientPhone, profileId) {
@@ -1756,33 +1300,20 @@ class WebhookService {
           const filters = { period: 'monthly' };
           const kpis = await dashboardService.getKPIs(filters, profileId);
           const chartData = await dashboardService.getChartData(filters, profileId);
-          
-          if (!kpis || !chartData) { await whatsappService.sendWhatsappMessage(groupId, `❌ Não foi possível gerar o relatório.`); return; }
-          
+          if (!kpis) return;
+
           const formattedTotalExpenses = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(kpis.totalExpenses);
           const formattedTotalRevenues = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(kpis.totalRevenues);
           const formattedBalance = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(kpis.balance);
 
-          let expenseCategorySummary = 'Sem gastos por categoria este mês.';
+          let expenseCategorySummary = 'Sem gastos.';
           if (chartData.pieChart && chartData.pieChart.length > 0) {
               expenseCategorySummary = chartData.pieChart.sort((a, b) => b.value - a.value).map(cat => `- ${cat.name}: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cat.value)}`).join('\n');
           }
-
-          let revenueCategorySummary = 'Sem receitas por categoria este mês.';
-          if (chartData.revenuePieChart && chartData.revenuePieChart.length > 0) {
-              revenueCategorySummary = chartData.revenuePieChart.sort((a, b) => b.value - a.value).map(cat => `- ${cat.name}: ${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(cat.value)}`).join('\n');
-          }
-          
-          const currentMonth = new Intl.DateTimeFormat('pt-BR', { month: 'long' }).format(now);
-          const currentYear = new Date().getFullYear();
-          const formattedReportHeaderMonth = `${currentMonth.charAt(0).toUpperCase() + currentMonth.slice(1)}/${currentYear}`;
-          
-          const reportMessage = `📊 *Relatório Mensal Financeiro* 📊\n(${formattedReportHeaderMonth})\n\n*Resumo Geral:*\n💸 Total Despesas: ${formattedTotalExpenses}\n💰 Total Receitas: ${formattedTotalRevenues}\n⚖️ Saldo do Mês: ${formattedBalance}\n\n*Detalhes de Despesas (Gastos):*\n${expenseCategorySummary}\n\n*Detalhes de Receitas:*\n${revenueCategorySummary}\n\n_Este relatório é referente aos dados registrados até o momento._`;
-          
+          const reportMessage = `📊 *Relatório Mensal*\n\n💸 Saídas: ${formattedTotalExpenses}\n💰 Entradas: ${formattedTotalRevenues}\n⚖️ Saldo: ${formattedBalance}\n\n*Por Categoria:*\n${expenseCategorySummary}`;
           await whatsappService.sendWhatsappMessage(groupId, reportMessage);
       } catch (error) {
-          logger.error('[Webhook] Erro ao gerar e enviar relatório de gastos:', error);
-          await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao gerar seu relatório.`);
+          logger.error('[Webhook] Erro relatório:', error);
       }
   }
 
@@ -1790,24 +1321,18 @@ class WebhookService {
       let filePath = null;
       try {
         const expenses = await dashboardService.getAllExpenses(profileId);
-        if (!expenses || expenses.length === 0) { await whatsappService.sendWhatsappMessage(groupId, `Nenhuma despesa encontrada para exportar.`); return; }
+        if (!expenses || expenses.length === 0) { await whatsappService.sendWhatsappMessage(groupId, `Nenhuma despesa.`); return; }
         filePath = await excelService.generateExpensesExcel(expenses);
-        await whatsappService.sendDocument(groupId, filePath, `Aqui está o seu relatório completo de despesas.`);
+        await whatsappService.sendDocument(groupId, filePath, `Seu relatório Excel.`);
       } catch (error) {
-        logger.error('[Webhook] Erro ao gerar e enviar relatório Excel de despesas:', error);
-        await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao gerar ou enviar seu relatório Excel.`);
+        logger.error('[Webhook] Erro Excel:', error);
       } finally {
         if (filePath && fs.existsSync(filePath)) { fs.unlinkSync(filePath); }
       }
   }
 }
 
-const runPendingExpenseWorker = async () => {
-    // Worker pode continuar existindo para limpar lixo MUITO antigo, 
-    // mas a lógica principal de limpeza agora é no receive da mensagem.
-    // Mantido vazio ou com lógica de expiração longa se necessário.
-};
-
+const runPendingExpenseWorker = async () => {};
 WebhookService.runPendingExpenseWorker = runPendingExpenseWorker;
 
 module.exports = new WebhookService();

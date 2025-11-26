@@ -17,10 +17,10 @@ const fs = require('fs');
 const path = require('path');
 const { startOfMonth, format, getMonth, getYear, addMonths, setDate, isAfter, endOfDay, startOfDay, subDays, eachDayOfInterval } = require('date-fns');
 
-// 24 Horas em minutos (Tempo "Ilimitado" na prática)
-const CONTEXT_WAIT_TIME_MINUTES = 525600; // 1 ano em minutos
-const EXPENSE_EDIT_WAIT_TIME_MINUTES = 525600; // 1 ano em minutos
-const ONBOARDING_WAIT_TIME_MINUTES = 60; // Esse pode manter normal
+// --- CONSTANTES DE TEMPO (CONFIGURADAS PARA 1 ANO PARA EVITAR TIMEOUT) ---
+const CONTEXT_WAIT_TIME_MINUTES = 525600; 
+const EXPENSE_EDIT_WAIT_TIME_MINUTES = 525600;
+const ONBOARDING_WAIT_TIME_MINUTES = 60; 
 const MENU_COMMAND = 'MENU';
 
 class WebhookService {
@@ -29,23 +29,23 @@ class WebhookService {
     if (!phone) return null;
     const variations = new Set([phone]);
     // Adiciona variações de 8/9 dígitos para DDDs brasileiros
-    if (phone.startsWith('55') && phone.length === 12) { // Ex: 552188881111 (8 digitos local)
+    if (phone.startsWith('55') && phone.length === 12) { 
       const areaCode = phone.substring(2, 4);
       const localNumber = phone.substring(4);
       if (localNumber.length === 8) {
-        variations.add(`55${areaCode}9${localNumber}`); // Add 9 na frente: 5521988881111
+        variations.add(`55${areaCode}9${localNumber}`); 
       }
-    } else if (phone.startsWith('55') && phone.length === 13) { // Ex: 5521988881111 (9 digitos local)
+    } else if (phone.startsWith('55') && phone.length === 13) { 
       const areaCode = phone.substring(2, 4);
       const localNumber = phone.substring(4);
       if (localNumber.startsWith('9') && localNumber.length === 9) {
-        variations.add(`55${areaCode}${localNumber.substring(1)}`); // Remove 9: 552188881111
+        variations.add(`55${areaCode}${localNumber.substring(1)}`); 
       }
-    } else if (phone.length === 10 || phone.length === 11) { // DDD + Número sem 55
+    } else if (phone.length === 10 || phone.length === 11) { 
       variations.add(`55${phone}`);
-      if (phone.length === 10) { // Ex: 2188881111
+      if (phone.length === 10) { 
         variations.add(`55${phone.substring(0,2)}9${phone.substring(2)}`);
-      } else if (phone.length === 11 && phone.startsWith('9', 2)) { // Ex: 21988881111
+      } else if (phone.length === 11 && phone.startsWith('9', 2)) { 
         variations.add(`55${phone.substring(0,2)}${phone.substring(3)}`);
       }
     }
@@ -54,54 +54,47 @@ class WebhookService {
   }
 
   /**
-   * Busca inteligente de categoria (Case insensitive, singular/plural, substring)
+   * Busca inteligente de categoria (Remove acentos, espaços e ignora Maiúscula/Minúscula)
    */
   async _fuzzyFindCategory(profileId, text) {
       if (!text) return null;
-      const cleanText = text.trim().toLowerCase();
       
-      // 1. Tenta busca exata (Case Insensitive)
-      let category = await Category.findOne({ 
-          where: { 
-              name: { [Op.iLike]: cleanText }, 
-              profile_id: profileId 
-          } 
-      });
+      // Normaliza: Remove acentos, coloca minúsculo e trim
+      const cleanText = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
       
-      if (category) return category;
+      const allCategories = await Category.findAll({ where: { profile_id: profileId } });
 
-      // 2. Tenta buscar removendo o 's' do final (singular/plural simples)
+      // 1. Tenta match exato na versão limpa
+      let match = allCategories.find(c => {
+          const cName = c.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+          return cName === cleanText;
+      });
+      if (match) return match;
+
+      // 2. Tenta singular/plural simples (remove 's' do final)
       if (cleanText.endsWith('s')) {
           const singularText = cleanText.slice(0, -1);
-          category = await Category.findOne({ 
-              where: { 
-                  name: { [Op.iLike]: singularText }, 
-                  profile_id: profileId 
-              } 
+          match = allCategories.find(c => {
+              const cName = c.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+              return cName === singularText;
           });
-          if (category) return category;
+          if (match) return match;
       } else {
-          // Tenta adicionar 's' (plural simples)
           const pluralText = cleanText + 's';
-          category = await Category.findOne({ 
-              where: { 
-                  name: { [Op.iLike]: pluralText }, 
-                  profile_id: profileId 
-              } 
+          match = allCategories.find(c => {
+              const cName = c.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+              return cName === pluralText;
           });
-          if (category) return category;
+          if (match) return match;
       }
 
-      // 3. Fallback: Verifica se a string de busca está contida no nome da categoria
-      category = await Category.findOne({
-        where: {
-            profile_id: profileId,
-            name: { [Op.iLike]: `%${cleanText}%` }
-        },
-        order: [[sequelize.fn('LENGTH', sequelize.col('name')), 'ASC']] // Pega a menor string que der match
+      // 3. Fallback: Contém a string (parcial)
+      match = allCategories.find(c => {
+          const cName = c.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+          return cName.includes(cleanText) || cleanText.includes(cName);
       });
       
-      return category;
+      return match || null;
   }
 
   async processIncomingMessage(payload) {
@@ -564,8 +557,6 @@ class WebhookService {
         return;
     }
 
-    // <<< MODIFICADO: Removemos o tratamento de 'duplicate_' pois a lógica foi desativada >>>
-
     if (buttonId.startsWith('edit_expense_')) {
       return this.handleEditButtonFlow(payload);
     }
@@ -763,7 +754,7 @@ class WebhookService {
         } 
     });
     
-    const pending = await PendingExpense.create({
+    await PendingExpense.create({
       whatsapp_message_id: payload.messageId,
       whatsapp_group_id: groupId,
       participant_phone: participantPhone,
@@ -771,7 +762,7 @@ class WebhookService {
       attachment_mimetype: mimeType,
       action_expected: 'awaiting_context',
       profile_id: profileId,
-      expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
+      expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000), // 1 ANO
     });
     const confirmationMessage = `📄 Recebi o documento. Qual a descrição para ele? (ex: "500 aluguel" ou "salário de 1000")`;
     await whatsappService.sendWhatsappMessage(groupId, confirmationMessage);
@@ -800,24 +791,61 @@ class WebhookService {
     await this._processSingleContext(payload);
   }
 
-  // <<< NOVA FUNÇÃO PRIVADA (Lógica Original) >>>
+  // <<< NOVA FUNÇÃO PRIVADA (Lógica Central) >>>
   async _processSingleContext(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
     const profileId = payload.profileId;
-    const textMessage = payload.text ? payload.text.message : null;
+    const textMessage = payload.text ? payload.text.message.trim() : null;
     const audioUrl = payload.audio ? payload.audio.audioUrl : null;
 
-    if (!profileId) {
-        logger.warn(`[Webhook] ProfileId não encontrado para o grupo ${groupId}. Ignorando contexto.`);
-        return;
-    }
+    if (!profileId) return;
+
+    // 1. Identifica se a mensagem parece ser um NOVO LANÇAMENTO (tem números)
+    const containsNumber = textMessage && /\d/.test(textMessage);
     
-    if (textMessage && /^\d+$/.test(textMessage)) {
-        const handled = await this.handleNumericReply(payload, parseInt(textMessage, 10));
-        if (handled) return;
+    // 2. Busca se existe algum fluxo pendente (mas ignora o que já foi finalizado 'awaiting_validation')
+    const pendingFlow = await PendingExpense.findOne({
+        where: { 
+            participant_phone: participantPhone, 
+            whatsapp_group_id: groupId, 
+            profile_id: profileId, 
+            action_expected: { 
+                // Ignora estados onde o fluxo já "acabou" na prática
+                [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] 
+            }
+        },
+        order: [['createdAt', 'DESC']]
+    });
+
+    // 3. LÓGICA DE LIMPEZA AGRESSIVA (PRIORIDADE DE NOVO COMANDO)
+    // Se o usuário mandou algo com número E não estamos num passo onde ele deve digitar um NOME
+    if (containsNumber && pendingFlow) {
+        const statesWhereUserMustTypeNames = [
+            'awaiting_new_category_name', 
+            'awaiting_new_category_type',
+            'awaiting_new_card_name'
+        ];
+
+        // Se NÃO for um desses estados de digitar nome, assumimos que o usuário 
+        // ignorou a pergunta anterior e está mandando um gasto novo.
+        if (!statesWhereUserMustTypeNames.includes(pendingFlow.action_expected)) {
+            logger.info(`[Webhook] Novo comando detectado ("${textMessage}"). Cancelando fluxo pendente anterior.`);
+            await pendingFlow.destroy(); 
+        }
     }
 
+    // Re-busca (ou null)
+    const activeFlow = await PendingExpense.findOne({
+        where: { 
+            participant_phone: participantPhone, 
+            whatsapp_group_id: groupId, 
+            profile_id: profileId,
+            action_expected: { [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] }
+        }
+    });
+
+    // 4. Trata comandos de Menu
     if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
         return this.sendSpendingReport(groupId, participantPhone, profileId);
     }
@@ -825,32 +853,30 @@ class WebhookService {
         return this.sendExpensesExcelReport(groupId, participantPhone, profileId);
     }
 
-    const pendingFlow = await PendingExpense.findOne({
-        where: { 
-            participant_phone: participantPhone, 
-            whatsapp_group_id: groupId, 
-            profile_id: profileId, 
-            action_expected: { 
-                [Op.notIn]: ['awaiting_context', 'awaiting_validation', 'awaiting_category_reply'] // Removemos validações antigas
-            }
-        },
-        order: [['createdAt', 'DESC']]
-    });
+    // 5. Trata respostas numéricas de menu/cartão se houver fluxo ativo
+    if (textMessage && /^\d+$/.test(textMessage) && activeFlow) {
+         if (!['awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_installment_count'].includes(activeFlow.action_expected)) {
+             const handled = await this.handleNumericReply(payload, parseInt(textMessage, 10));
+             if (handled) return;
+         }
+    }
 
-    if (pendingFlow) {
-        // <<< NOVA LÓGICA: Entrada manual de categoria >>>
-        if (pendingFlow.action_expected === 'awaiting_new_category_flow_decision' && textMessage) {
-             return this._handleManualCategoryInputInFlow(payload, pendingFlow, textMessage);
+    // 6. Continuação de Fluxos Existentes (Input Manual, etc)
+    if (activeFlow) {
+        // INPUT MANUAL DE CATEGORIA
+        if (activeFlow.action_expected === 'awaiting_new_category_flow_decision' && textMessage) {
+             return this._handleManualCategoryInputInFlow(payload, activeFlow, textMessage);
         }
 
-        if (['awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'].includes(pendingFlow.action_expected)) {
-            return this.handleNewCategoryCreationFlowFromPending(payload, pendingFlow);
+        if (['awaiting_new_category_name', 'awaiting_new_category_type', 'awaiting_category_flow_decision', 'awaiting_new_category_goal'].includes(activeFlow.action_expected)) {
+            return this.handleNewCategoryCreationFlowFromPending(payload, activeFlow);
         }
-        if (['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'].includes(pendingFlow.action_expected)) {
-            return this.handleCreditCardCreationFlowFromPending(payload, pendingFlow);
+        if (['awaiting_new_card_name', 'awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_card_creation_confirmation'].includes(activeFlow.action_expected)) {
+            return this.handleCreditCardCreationFlowFromPending(payload, activeFlow);
         }
     }
     
+    // 7. Novo Lançamento (IA)
     const hasMediaInPayload = payload.image || payload.document;
 
     if (hasMediaInPayload) {
@@ -940,6 +966,7 @@ class WebhookService {
         }
 
         if (userContext) {
+            // Limpa estados anteriores
             await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId } });
 
             const tempPending = await PendingExpense.create({
@@ -948,7 +975,7 @@ class WebhookService {
                 participant_phone: participantPhone,
                 profile_id: profileId,
                 action_expected: 'awaiting_ai_analysis_complete',
-                expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000),
+                expires_at: new Date(Date.now() + CONTEXT_WAIT_TIME_MINUTES * 60 * 1000), // 1 ano
             });
             
             const cardNames = (await creditCardService.getAllCreditCards(profileId)).map(c => c.name);
@@ -982,37 +1009,43 @@ class WebhookService {
     }
   }
 
-  // <<< NOVA LÓGICA: Se o usuário digitar o nome de uma categoria existente durante o fluxo de criação >>>
+  // --- LÓGICA DE INPUT MANUAL QUANDO A IA ERRA A CATEGORIA ---
   async _handleManualCategoryInputInFlow(payload, pendingExpense, textMessage) {
       const groupId = payload.phone;
       const profileId = payload.profileId;
 
       logger.info(`[Webhook] Tentando mapeamento manual de categoria: "${textMessage}"`);
       
+      // Busca robusta (sem acento/case)
       const existingCategory = await this._fuzzyFindCategory(profileId, textMessage);
       
       if (existingCategory) {
-           // Achou uma categoria existente! Vincula e finaliza.
+           // Achou! Vincula e finaliza.
            const analysisResult = {
                 value: pendingExpense.value,
-                baseDescription: pendingExpense.description, // A descrição original
+                baseDescription: pendingExpense.description, 
                 categoryName: existingCategory.name,
                 flow: existingCategory.category_flow,
                 isInstallment: !!pendingExpense.installment_count,
                 installmentCount: pendingExpense.installment_count,
-                cardName: null, // (simplificado, assume que não mudou cartão)
+                cardName: null, 
             };
-            const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+            // Tenta extrair contexto dos parênteses se houver
+            let userContext = '';
+            if (pendingExpense.description && typeof pendingExpense.description === 'string') {
+                const match = pendingExpense.description.match(/\(([^)]+)\)/);
+                if (match) userContext = match[1];
+            }
             
             await whatsappService.sendWhatsappMessage(groupId, `✅ Entendido! Vou classificar como *${existingCategory.name}*.`);
             await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, existingCategory.id, pendingExpense.credit_card_id);
       } else {
-           // Não achou. Assume que é o nome da nova categoria que ele quer forçar.
+           // Não achou. Segue fluxo de criação com o nome digitado.
            pendingExpense.suggested_new_category_name = textMessage;
-           pendingExpense.action_expected = 'awaiting_new_category_flow_decision'; // Mantém estado
+           pendingExpense.action_expected = 'awaiting_new_category_flow_decision'; 
            await pendingExpense.save();
            
-           const message = `🤔 Não encontrei a categoria "${textMessage}". Deseja criar esta categoria como *Despesa* ou *Receita*?`;
+           const message = `🤔 Não encontrei a categoria "${textMessage}". Deseja criar como *Despesa* ou *Receita*?`;
            const buttons = [ { id: `new_cat_flow_expense_${pendingExpense.id}`, label: '💸 Despesa' }, { id: `new_cat_flow_revenue_${pendingExpense.id}`, label: '💰 Receita' } ];
            await whatsappService.sendButtonList(groupId, message, buttons);
       }
@@ -1039,16 +1072,14 @@ class WebhookService {
         return; 
     }
 
-    // Tenta encontrar categoria existente usando busca Fuzzy (ex: "presentes" acha "PRESENTE")
+    // Tenta encontrar categoria existente usando busca Fuzzy robusta
     let category = await this._fuzzyFindCategory(profileId, categoryNameFromAI);
 
     if (!category && (categoryNameFromAI.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
-        // Fallback com texto original se IA retornou "Outros"
         category = await this._fuzzyFindCategory(profileId, baseDescription);
     }
 
     if (category) {
-        // Categoria Encontrada - Salva direto sem perguntar de duplicidade
         const finalFlow = category.category_flow;
         const resolvedAnalysis = { ...analysisResult, flow: finalFlow, categoryName: category.name };
 
@@ -1084,7 +1115,6 @@ class WebhookService {
             await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
         }
     } else {
-        // Categoria Nova - Fluxo de decisão
         const categorySuggestion = categoryNameFromAI !== 'Outros' ? categoryNameFromAI : (baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria");
         
         pendingData.value = value;
@@ -1109,7 +1139,7 @@ class WebhookService {
     
     const category = await Category.findByPk(categoryId);
     if (!category) {
-        await whatsappService.sendWhatsappMessage(pendingData.whatsapp_group_id, `❌ Erro: Categoria não encontrada no momento do registro final. Por favor, tente novamente ou crie a categoria primeiro.`);
+        await whatsappService.sendWhatsappMessage(pendingData.whatsapp_group_id, `❌ Erro: Categoria não encontrada no momento do registro final.`);
         await pendingData.destroy();
         return;
     }
@@ -1171,7 +1201,8 @@ class WebhookService {
     pendingData.suggested_category_id = categoryId;
     pendingData.credit_card_id = creditCardId;
     pendingData.action_expected = 'awaiting_validation';
-    // Tempo estendido para edição
+    
+    // 1 ANO DE VALIDADE PARA EDIÇÃO
     pendingData.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
     await pendingData.save();
 
@@ -1192,6 +1223,7 @@ class WebhookService {
 
         message = `💸 *Despesa Registrada:* ${formattedValue}\n*Categoria:* ${category.name} (${baseDescription})${installmentInfo}\n*Total de Despesas:* ${formattedTotalExpenses}`;
         
+        // --- LÓGICA DE ALERTA DE META (MANTIDA) ---
         const now = new Date();
         const startOfCurrentMonth = startOfMonth(now);
         const endOfCurrentMonth = new Date();
@@ -1248,7 +1280,7 @@ class WebhookService {
 
     const buttons = [{ id: `edit_expense_${pendingData.id}`, label: '✏️ Corrigir Categoria' }];
     await whatsappService.sendButtonList(pendingData.whatsapp_group_id, message, buttons);
-    logger.info(`[Webhook] ${category.category_flow === 'expense' ? 'Despesa' : 'Receita'} #${createdEntry.id} salva e fluxo de edição iniciado para ${pendingData.participant_phone}.`);
+    logger.info(`[Webhook] ${category.category_flow === 'expense' ? 'Despesa' : 'Receita'} #${createdEntry.id} salva.`);
   }
 
   async handleNewCategoryDecisionFlow(payload) {
@@ -1278,7 +1310,7 @@ class WebhookService {
         });
 
         if (!finalCategory) { 
-            await whatsappService.sendWhatsappMessage(groupId, `❌ Erro crítico: A categoria "${otherCategoryName}" não foi encontrada para este perfil.`); 
+            await whatsappService.sendWhatsappMessage(groupId, `❌ Erro crítico: A categoria "${otherCategoryName}" não foi encontrada.`); 
             return; 
         }
         
@@ -1692,7 +1724,7 @@ class WebhookService {
           include: [{ model: Expense, as: 'expense' }, { model: Revenue, as: 'revenue' }]
       });
 
-      if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ⏳\n\nO prazo para editar esta despesa já expirou ou ela não existe.`); return; }
+      if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ *Tempo Esgotado* ou não existe.`); return; }
       
       const allCategories = await Category.findAll({ 
           where: { 
@@ -1710,13 +1742,12 @@ class WebhookService {
       const flowText = originalFlow === 'expense' ? 'despesa' : 'receita';
 
       const formattedValue = new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(valueToFormat);
-      const message = `📋 *Escolha a Categoria Correta*\n\nVocê está definindo a categoria para a ${flowText} de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
+      const message = `📋 *Editar Categoria* \n\nVocê está editando a ${flowText} *já salva* de *${formattedValue}* (${descriptionToUse}).\n\nResponda com o *número* da nova categoria: 👇\n\n${categoryListText}`;
       
       pendingExpense.action_expected = 'awaiting_category_reply';
-      pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); 
+      pendingExpense.expires_at = new Date(Date.now() + EXPENSE_EDIT_WAIT_TIME_MINUTES * 60 * 1000); // 1 ANO
       await pendingExpense.save();
       await whatsappService.sendWhatsappMessage(groupId, message);
-      logger.info(`[Webhook] Solicitação de escolha de categoria para pendência #${pendingExpense.id} por ${clickerPhone}.`);
   }
 
   async sendSpendingReport(groupId, recipientPhone, profileId) {
@@ -1772,26 +1803,11 @@ class WebhookService {
 }
 
 const runPendingExpenseWorker = async () => {
-    const now = new Date();
-    try {
-        // Limpeza "preguiçosa". Não remove estados de espera longos ou interação do usuário.
-        await PendingExpense.destroy({ 
-            where: { 
-                action_expected: { 
-                    [Op.in]: [
-                        'awaiting_context', 
-                        'awaiting_ai_analysis_complete', 
-                    ] 
-                }, 
-                expires_at: { [Op.lte]: now } 
-            } 
-        });
-    } catch (error) {
-        console.error('[WORKER] ❌ Erro ao processar despesas pendentes (action_expected):', error);
-    }
+    // Worker pode continuar existindo para limpar lixo MUITO antigo, 
+    // mas a lógica principal de limpeza agora é no receive da mensagem.
+    // Mantido vazio ou com lógica de expiração longa se necessário.
 };
 
 WebhookService.runPendingExpenseWorker = runPendingExpenseWorker;
-
 
 module.exports = new WebhookService();

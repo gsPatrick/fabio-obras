@@ -723,7 +723,7 @@ class WebhookService {
     await this._processSingleContext(payload);
   }
 
-  async _processSingleContext(payload) {
+async _processSingleContext(payload) {
     const groupId = payload.phone;
     const participantPhone = payload.participantPhone;
     const profileId = payload.profileId;
@@ -734,6 +734,7 @@ class WebhookService {
 
     const containsNumber = textMessage && /\d/.test(textMessage);
     
+    // Busca fluxo pendente para verificar se devemos interromper
     const pendingFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
@@ -744,20 +745,27 @@ class WebhookService {
         order: [['createdAt', 'DESC']]
     });
 
+    // --- CORREÇÃO APLICADA AQUI ---
     if (containsNumber && pendingFlow) {
-        const statesWaitingForName = [
+        // Lista de estados onde o usuário VAI digitar texto ou número e NÃO devemos cancelar o fluxo
+        const protectedStates = [
             'awaiting_new_category_name', 
             'awaiting_new_category_type',
             'awaiting_new_card_name',
-            'awaiting_manual_category_search' 
+            'awaiting_manual_category_search',
+            'awaiting_new_category_goal',      // <--- ADICIONADO (Meta)
+            'awaiting_new_card_closing_day',   // <--- ADICIONADO (Dia Fechamento)
+            'awaiting_new_card_due_day',       // <--- ADICIONADO (Dia Vencimento)
+            'awaiting_installment_count'       // <--- ADICIONADO (Parcelas)
         ];
         
-        if (!statesWaitingForName.includes(pendingFlow.action_expected)) {
+        if (!protectedStates.includes(pendingFlow.action_expected)) {
             logger.info(`[Webhook] Novo comando com número detectado. Resetando fluxo anterior.`);
             await pendingFlow.destroy();
         }
     }
 
+    // Recarrega o fluxo (pode ter sido destruído acima ou ser null)
     const activeFlow = await PendingExpense.findOne({
         where: { 
             participant_phone: participantPhone, 
@@ -774,13 +782,24 @@ class WebhookService {
         return this.sendExpensesExcelReport(groupId, participantPhone, profileId);
     }
 
+    // Tratamento de respostas numéricas (Menus, Listas)
     if (textMessage && /^\d+$/.test(textMessage) && activeFlow) {
-         if (!['awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_manual_category_search'].includes(activeFlow.action_expected)) {
+         // Se for um estado onde o número é o próprio valor (dia, meta, parcelas), não processa como menu
+         const statesExpectingRawNumbers = [
+             'awaiting_new_card_closing_day', 
+             'awaiting_new_card_due_day', 
+             'awaiting_installment_count', 
+             'awaiting_manual_category_search',
+             'awaiting_new_category_goal' // <--- Meta também é número puro
+         ];
+
+         if (!statesExpectingRawNumbers.includes(activeFlow.action_expected)) {
              const handled = await this.handleNumericReply(payload, parseInt(textMessage, 10));
              if (handled) return;
          }
     }
 
+    // Processamento dos Fluxos Ativos
     if (activeFlow) {
         if (activeFlow.action_expected === 'awaiting_manual_category_search' && textMessage) {
             return this._handleManualCategoryInputInFlow(payload, activeFlow, textMessage);
@@ -798,6 +817,7 @@ class WebhookService {
         }
     }
     
+    // Processamento de Mídia (IA)
     const hasMediaInPayload = payload.image || payload.document;
     if (hasMediaInPayload) {
         await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando documento e sua descrição...`);
@@ -831,6 +851,7 @@ class WebhookService {
         return;
     }
 
+    // Novo Comando de Texto/Áudio (IA)
     if (textMessage || audioUrl) {
         await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando...`);
         let userContext = '';

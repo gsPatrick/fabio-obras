@@ -775,7 +775,7 @@ class WebhookService {
     }
 
     if (textMessage && /^\d+$/.test(textMessage) && activeFlow) {
-         if (!['awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_installment_count', 'awaiting_manual_category_search'].includes(activeFlow.action_expected)) {
+         if (!['awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_manual_category_search'].includes(activeFlow.action_expected)) {
              const handled = await this.handleNumericReply(payload, parseInt(textMessage, 10));
              if (handled) return;
          }
@@ -908,8 +908,8 @@ class WebhookService {
            
            const message = `🤔 Não encontrei a categoria "${textMessage}". Deseja criar como:`;
            const buttons = [ 
-               { id: `new_cat_flow_expense_${pendingExpense.id}`, label: '💸 Despesa' }, 
-               { id: `new_cat_flow_revenue_${pendingExpense.id}`, label: '💰 Receita' },
+               { id: `new_cat_flow_expense_${pendingExpense.id}`, label: '💸 Criar Despesa' }, 
+               { id: `new_cat_flow_revenue_${pendingExpense.id}`, label: '💰 Criar Receita' },
                { id: `search_manual_cat_${pendingExpense.id}`, label: '🔍 Localizar Categoria' }
            ];
            await whatsappService.sendButtonList(groupId, message, buttons);
@@ -1061,8 +1061,9 @@ class WebhookService {
                 original_expense_id: { [Op.eq]: null }
             } 
         });
+        
         const categoryGoal = await MonthlyGoal.findOne({ where: { profile_id: pendingData.profile_id, category_id: category.id } });
-        if (categoryGoal && currentMonthTotalExpenses) {
+        if (categoryGoal) {
              const currentCategoryExpenses = await Expense.sum('value', { 
                 where: { 
                     profile_id: pendingData.profile_id, 
@@ -1078,6 +1079,7 @@ class WebhookService {
                 message += `\n\n🚨 *ALERTA:* Meta da categoria *${category.name}* excedida!`;
             }
         }
+        
         const totalGoal = await MonthlyGoal.findOne({ where: { profile_id: pendingData.profile_id, is_total_goal: true, category_id: null } });
         if (totalGoal && currentMonthTotalExpenses && currentMonthTotalExpenses > parseFloat(totalGoal.value)) {
             message += `\n🚨 *ALERTA GERAL:* Meta total mensal excedida!`;
@@ -1124,6 +1126,7 @@ class WebhookService {
   async handleNumericReply(payload, selectedNumber) {
     const { phone: groupId, participantPhone, profileId } = payload;
     
+    // --- LÓGICA RESTAURADA DO CÓDIGO 01 ---
     const pendingAmbiguity = await PendingExpense.findOne({
         where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_ambiguous_category_choice' },
     });
@@ -1149,6 +1152,14 @@ class WebhookService {
             return true;
         }
     }
+    
+    // -- FLUXOS DE CARTÃO E PARCELAS (ESSENCIAL PARA FUNCIONAR) --
+    const isHandlingCreditCard = await this.handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId);
+    if (isHandlingCreditCard) return true;
+
+    const isHandlingInstallmentCount = await this.handleNumericReplyForInstallmentCount(groupId, selectedNumber, participantPhone, profileId);
+    if (isHandlingInstallmentCount) return true;
+    // -----------------------------------------------------------
 
     const pendingExpense = await PendingExpense.findOne({
       where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_category_reply' },
@@ -1460,7 +1471,8 @@ class WebhookService {
     if (!pendingExpense) return false;
 
     const installmentCount = parseInt(selectedNumber, 10);
-    if (isNaN(installmentCount) || installmentCount <= 0) return true;
+    // Validação extra de segurança do Código 01 (máximo 36 parcelas)
+    if (isNaN(installmentCount) || installmentCount <= 0 || installmentCount > 36) return true;
 
     const analysisResult = {
         value: pendingExpense.value,

@@ -54,15 +54,20 @@ class WebhookService {
 
   async _fuzzyFindCategory(profileId, text) {
       if (!text) return null;
+      
+      // Normaliza: Remove acentos, coloca minúsculo e trim
       const cleanText = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
+      
       const allCategories = await Category.findAll({ where: { profile_id: profileId } });
 
+      // 1. Tenta match exato na versão limpa
       let match = allCategories.find(c => {
           const cName = c.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
           return cName === cleanText;
       });
       if (match) return match;
 
+      // 2. Tenta singular/plural simples (remove 's' do final)
       if (cleanText.endsWith('s')) {
           const singularText = cleanText.slice(0, -1);
           match = allCategories.find(c => {
@@ -78,13 +83,10 @@ class WebhookService {
           });
           if (match) return match;
       }
-
-      match = allCategories.find(c => {
-          const cName = c.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
-          return cName.includes(cleanText) || cleanText.includes(cName);
-      });
       
-      return match || null;
+      // REMOVIDO: Busca por substring (.includes) causava falsos positivos
+      
+      return null;
   }
 
   async processIncomingMessage(payload) {
@@ -998,11 +1000,12 @@ class WebhookService {
       }
   }
 
-  async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
+async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
     const { value, baseDescription, isInstallment, installmentCount, cardName, ambiguousCategoryNames } = analysisResult;
     const profileId = pendingData.profile_id;
     const groupId = pendingData.whatsapp_group_id;
 
+    // 1. Caso de Ambiguidade (IA ficou em dúvida entre 2 categorias existentes)
     if (ambiguousCategoryNames && ambiguousCategoryNames.length > 0) {
         pendingData.value = value;
         pendingData.description = JSON.stringify(ambiguousCategoryNames);
@@ -1010,21 +1013,41 @@ class WebhookService {
         pendingData.installment_count = isInstallment ? installmentCount : null;
         pendingData.action_expected = 'awaiting_ambiguous_category_choice';
         await pendingData.save();
+
         const categoryListText = ambiguousCategoryNames.map((name, index) => `${index + 1} - ${name}`).join('\n');
-        await whatsappService.sendWhatsappMessage(groupId, `🤔 Qual categoria você quis dizer?\n\n${categoryListText}\n\nResponda com o número.`);
+        const message = `🤔 O termo que você usou corresponde a mais de uma categoria. Qual delas?\n\n${categoryListText}\n\nResponda com o *número* da opção correta.`;
+        
+        await whatsappService.sendWhatsappMessage(groupId, message);
         return; 
     }
 
+    // 2. Tenta encontrar categoria existente
     let category = await this._fuzzyFindCategory(profileId, analysisResult.categoryName);
 
+    // Se a IA retornou "Outros", tenta buscar pela descrição original (ex: "Almoço")
     if (!category && (analysisResult.categoryName.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
         category = await this._fuzzyFindCategory(profileId, baseDescription);
     }
+
+    // --- TRAVA DE SEGURANÇA PARA CATEGORIAS GENÉRICAS ---
+    if (category) {
+        const genericNames = ['outros', 'geral', 'diversos', 'despesas', 'receita padrão', 'despesa padrão', 'custos'];
+        const isGenericCategory = genericNames.includes(category.name.toLowerCase());
+        const isSpecificDescription = !genericNames.includes(baseDescription.toLowerCase());
+
+        // Se encontrou uma categoria Genérica (ex: Outros), mas o usuário escreveu algo específico (ex: "Cimento"),
+        // FORÇAMOS ser null para que o sistema pergunte se quer criar a categoria "Cimento".
+        if (isGenericCategory && isSpecificDescription) {
+            category = null; 
+        }
+    }
+    // ----------------------------------------------------
 
     if (category) {
         const finalFlow = category.category_flow;
         const resolvedAnalysis = { ...analysisResult, flow: finalFlow, categoryName: category.name };
 
+        // Lógica de Cartão de Crédito
         if (finalFlow === 'expense' && (isInstallment || cardName)) {
             pendingData.value = value;
             pendingData.description = baseDescription;
@@ -1033,19 +1056,33 @@ class WebhookService {
             pendingData.action_expected = 'awaiting_credit_card_choice';
             pendingData.suggested_category_id = category.id;
             await pendingData.save();
-            
+
             const creditCards = await creditCardService.getAllCreditCards(profileId);
             if (creditCards.length > 0) {
-                 const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name}`).join('\n');
-                 await whatsappService.sendWhatsappMessage(groupId, `ℹ️ Qual cartão?\n\n${cardListText}\n\n(0 para dinheiro/débito)`);
+                const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name}`).join('\n');
+                let cardMessage = `ℹ️ A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}* pode ser de cartão.\n\nSelecione o *número* do cartão ou responda *0* para dinheiro/débito.\n\n${cardListText}`;
+                
+                if (cardName) {
+                    const suggestedCard = creditCards.find(c => c.name.toLowerCase() === cardName.toLowerCase());
+                    if (suggestedCard) {
+                        cardMessage = `ℹ️ A IA sugeriu o cartão *${suggestedCard.name}*. Confirma? Responda com o *número* do cartão ou *0* para dinheiro/débito.\n\n${cardListText}`;
+                    }
+                }
+                await whatsappService.sendWhatsappMessage(groupId, cardMessage);
             } else {
-                 await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
+                // Se não tem cartão cadastrado, salva direto
+                await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
             }
         } else {
+            // Receita ou Despesa sem cartão -> Salva direto
+            if (finalFlow === 'revenue' && (isInstallment || cardName)) {
+                await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${category.name}" é de *Receita*. A informação de cartão/parcelamento será ignorada.`);
+            }
             await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
         }
     } else {
-        const categorySuggestion = analysisResult.categoryName !== 'Outros' ? analysisResult.categoryName : (baseDescription.split(' ')[0] || "Nova Categoria");
+        // Categoria não encontrada (ou era genérica e foi barrada)
+        const categorySuggestion = analysisResult.categoryName !== 'Outros' ? analysisResult.categoryName : (baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria");
         
         pendingData.value = value;
         pendingData.description = userContext ? `${baseDescription} (${userContext})` : baseDescription;
@@ -1053,11 +1090,11 @@ class WebhookService {
         pendingData.action_expected = 'awaiting_new_category_flow_decision';
         await pendingData.save();
 
-        const message = `🤔 A categoria "*${categorySuggestion}*" é nova. O que deseja fazer?`;
+        const message = `🤔 A categoria "*${categorySuggestion}*" é nova (ou não reconheci). \n\nEla é *Despesa* ou *Receita*? \n\n💡 _Se você já tem uma categoria parecida e eu não achei, basta **digitar o nome dela** agora._`;
         const buttons = [ 
-            { id: `new_cat_flow_expense_${pendingData.id}`, label: '💸 Criar Despesa' }, 
-            { id: `new_cat_flow_revenue_${pendingData.id}`, label: '💰 Criar Receita' },
-            { id: `search_manual_cat_${pendingData.id}`, label: '🔍 Localizar Categoria' }
+            { id: `new_cat_flow_expense_${pendingData.id}`, label: '💸 Despesa' }, 
+            { id: `new_cat_flow_revenue_${pendingData.id}`, label: '💰 Receita' },
+            { id: `search_manual_cat_${pendingData.id}`, label: '🔍 Localizar' }
         ];
         await whatsappService.sendButtonList(groupId, message, buttons);
     }

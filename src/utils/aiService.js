@@ -12,7 +12,7 @@ const { Poppler } = require('node-poppler');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
-  timeout: 60 * 1000, // 60 segundos para extração de planilha
+  timeout: 60 * 1000, // 60 segundos de timeout
 });
 
 class AIService {
@@ -44,10 +44,9 @@ class AIService {
    */
   async _convertPdfToImage(pdfBuffer) {
     logger.info('[AIService] PDF detectado. Iniciando conversão com node-poppler...');
-    // <<< INÍCIO DA CORREÇÃO >>>
-    // Permite configurar o caminho dos binários do Poppler via variável de ambiente.
+    // Caminho dos binários do Poppler (configurável via ENV ou padrão do sistema)
     const poppler = new Poppler(process.env.POPPLER_BIN_PATH);
-    // <<< FIM DA CORREÇÃO >>>
+    
     const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
     const tempOutputPath = path.join(os.tmpdir(), `img-${Date.now()}`);
 
@@ -64,58 +63,49 @@ class AIService {
       
       const imagePath = `${tempOutputPath}-1.jpg`;
 
-      const imageBuffer = fs.readFileSync(imagePath);
-      logger.info('[AIService] PDF convertido para imagem com sucesso.');
-      return imageBuffer;
+      if (fs.existsSync(imagePath)) {
+          const imageBuffer = fs.readFileSync(imagePath);
+          logger.info('[AIService] PDF convertido para imagem com sucesso.');
+          
+          // Limpeza
+          fs.unlinkSync(imagePath);
+          fs.unlinkSync(tempPdfPath);
+          
+          return imageBuffer;
+      } else {
+          throw new Error("Arquivo de imagem não gerado pelo Poppler.");
+      }
       
     } catch (error) {
       logger.error('[AIService] Erro crítico durante a conversão do PDF com node-poppler.', error);
-      return null;
-    } finally {
       if (fs.existsSync(tempPdfPath)) fs.unlinkSync(tempPdfPath);
-      const imagePath = `${tempOutputPath}-1.jpg`;
-      if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
+      return null;
     }
   }
 
   /**
-   * Analisa um arquivo XLSX (em formato CSV String) para extrair despesas e categorizá-las.
+   * Analisa um arquivo XLSX (em formato CSV String) para extrair despesas.
    */
   async analyzeExcelStructureAndExtractData(csvString, categoryList) {
-    logger.info('[AIService] Iniciando análise de estrutura de planilha universal...');
+    logger.info('[AIService] Iniciando análise de estrutura de planilha...');
     
-    const expenseCategoryNames = categoryList.filter(c => c.category_flow === 'expense').map(c => c.name.trim()).filter(c => c.length > 0);
-    const expenseCategoryOptions = `"${expenseCategoryNames.join('", "')}"`;
+    const expenseCategoryNames = categoryList.join('", "');
+    const expenseCategoryOptions = `"${expenseCategoryNames}"`;
 
     const prompt = `
-      Você é um especialista em análise de planilhas financeiras de CUSTOS (despesas). Sua missão é extrair dados de despesas de forma universal de uma planilha CSV (separada por pipe '|') desestruturada.
+      Você é um especialista em análise de dados financeiros.
+      Analise o CSV abaixo e extraia as despesas.
       
-      Regras CRÍTICAS Universais:
-      1.  **Foco APENAS em Despesas:** Ignore qualquer coluna ou valor que represente 'ENTRADA', 'RECEITA', ou valores positivos que não sejam despesas (a menos que a descrição indique um custo). **O sistema é APENAS para despesas.**
-      2.  **Identificação de Colunas:** A coluna de Valor de CUSTO é a que contém a maioria dos números monetários de SAÍDA. A coluna de Data é a que contém o formato de data mais consistente. A coluna de Descrição é a que possui o texto mais descritivo.
-      3.  **Consolidação de Despesas:** Para cada linha com uma DATA e DESCRIÇÃO, se houver um valor em UMA ou mais colunas de CUSTO, gere uma DESPESA SEPARADA para CADA valor de custo.
-      4.  **Descrição Final:** A descrição deve ser a DESCRIÇÃO ORIGINAL CONCATENADA com o NOME DO CABEÇALHO DA COLUNA DE CUSTO (Ex: 'COMPRA DE CIMENTO - FABIO').
-      5.  **Data:** Converta para o formato 'YYYY-MM-DD'. Use o ano atual (ou o ano mais provável, como 2024/2025) se o ano não estiver especificado (Ex: '12-abr.' -> '2025-04-12').
-      6.  **Categorização:** Mapeie para uma das categorias de DESPESA existentes: [${expenseCategoryOptions}]. Use "Outros" se não houver mapeamento claro.
+      Regras:
+      1. Identifique colunas de Data, Descrição e Valor (Saída/Custo).
+      2. Ignore entradas/receitas.
+      3. Mapeie cada linha para uma categoria da lista: [${expenseCategoryOptions}]. Se não houver correspondência clara, use "Outros".
+      4. Retorne JSON: { "expenses": [{ "date": "YYYY-MM-DD", "description": "string", "value": number, "categoryName": "string" }], "reason": "string se falhar" }
       
-      Estrutura do retorno JSON:
-      {
-          "expenses": [
-              {
-                  "value": number,
-                  "date": "YYYY-MM-DD",
-                  "description": "string (Consolidada e completa)",
-                  "categoryName": "string (da lista fornecida)"
-              }
-          ],
-          "reason": "string (motivo da falha se 'expenses' estiver vazio, ex: 'Nenhuma coluna de custo identificada')"
-      }
-      
-      Planilha CSV (Separador '|'):
-      --- PLANILHA INÍCIO ---
-      ${csvString}
-      --- PLANILHA FIM ---
+      CSV:
+      ${csvString.substring(0, 15000)} 
     `;
+    // Limitamos caracteres do CSV para não estourar token se for gigante
 
     try {
       const response = await openai.chat.completions.create({
@@ -125,27 +115,18 @@ class AIService {
           content: [{ type: 'text', text: prompt }],
         }],
         response_format: { type: "json_object" },
-        temperature: 0.1, 
+        temperature: 0, 
       });
 
-      const resultString = response.choices[0].message.content;
-      logger.info('[AIService] Análise de planilha concluída.');
-      return resultString; 
-      
+      return response.choices[0].message.content; 
     } catch (error) {
       logger.error('[AIService] Erro na análise de planilha:', error);
-      
-      if (error.status === 400 || error.status === 429) {
-          return JSON.stringify({ expenses: [], reason: `Erro da API OpenAI. Código: ${error.status}` });
-      }
-      
-      return JSON.stringify({ expenses: [], reason: `Erro crítico de comunicação/timeout com a IA. Tente novamente.` });
+      return JSON.stringify({ expenses: [], reason: `Erro API OpenAI: ${error.message}` });
     }
   }
 
   /**
    * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
-   * Retorna informações detalhadas incluindo parcelamento e cartão. O fluxo (despesa/receita) é determinado pelo sistema posteriormente.
    */
   async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg', profileId, cardNames = []) { 
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);
@@ -162,36 +143,32 @@ class AIService {
     }
     
     const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] }); 
-    const allCategoryNames = `"${categories.map(c => c.name).join('", "')}"`;
-
-    const creditCardNames = `"${cardNames.join('", "')}"`;
+    const allCategoryNames = categories.map(c => `"${c.name}"`).join(', ');
     const base64Image = finalImageBuffer.toString('base64');
     
     const prompt = `
-      Você é um especialista em análise de documentos financeiros (comprovantes, notas) e texto.
-      Sua missão é extrair informações da IMAGEM e do TEXTO fornecido pelo usuário.
+      Analise esta imagem de comprovante/nota e o texto do usuário: "${userText || ''}".
 
-      **Hierarquia de Informação CRÍTICA:**
-      1. O **TEXTO DO USUÁRIO** é a fonte de verdade **PRIMÁRIA** para a 'categoryName' e 'baseDescription'.
-      2. A **IMAGEM** é a fonte de verdade **PRIMÁRIA** para o 'value' e serve para complementar a descrição.
+      LISTA DE CATEGORIAS DO USUÁRIO: [${allCategoryNames}]
 
-      Retorne APENAS um objeto JSON válido com as chaves:
-      "value" (Número), "baseDescription" (String), "categoryName" (String, pode ser null), 
-      "ambiguousCategoryNames" (Array de strings, ou null), "isInstallment" (Booleano), 
-      "installmentCount" (Número, se for parcelado), "cardName" (String, se for cartão de crédito).
-      
-      Regras CRÍTICAS de Extração:
-      1.  **Valor:** Extraia o valor monetário principal da **IMAGEM**.
-      2.  **Descrição:** A 'baseDescription' deve ser o texto do usuário.
-      3.  **CategoryName & Ambiguidade (REGRA MAIS IMPORTANTE):**
-          a. Analise o texto do usuário (ex: "cimento", "99freela", "99") e compare-o semanticamente com a lista de categorias existentes: [${allCategoryNames}].
-          b. **PRIORIDADE 1: CORRESPONDÊNCIA EXATA.** Se o texto do usuário contiver o NOME EXATO de uma categoria existente (ex: usuário diz "gasolina para o carro" e a categoria "Gasolina" existe), use a categoria "Gasolina". Ignore ambiguidades com outras categorias parciais. Coloque o nome exato em "categoryName" e "ambiguousCategoryNames" como null.
-          c. **PRIORIDADE 2: AMBIGUIDADE REAL.** Apenas se o texto do usuário for curto e corresponder a MÚLTIPLAS categorias (ex: usuário diz "99", e existem "99pop" e "99freelas"), coloque "categoryName" como null e popule "ambiguousCategoryNames" com os nomes exatos das categorias correspondentes (ex: ["99pop", "99freelas"]). Este caso deve ser RARO.
-          d. **PRIORIDADE 3: NOVA CATEGORIA.** Se NENHUMA categoria existente corresponder, coloque o termo principal do usuário em "categoryName" para sinalizar uma nova categoria e deixe "ambiguousCategoryNames" como null.
-          e. **FALLBACK:** Se o texto não fornecer nenhuma pista de categoria, use "Outros" em "categoryName".
-      4.  **Parcelamento e Cartão:** Extraia 'isInstallment', 'installmentCount', e 'cardName' com base no texto e na imagem.
+      REGRAS RÍGIDAS DE EXTRAÇÃO:
+      1. **Valor:** Extraia o valor total da imagem.
+      2. **Descrição:** Use o texto do usuário como descrição base. Se vazio, use o nome do estabelecimento.
+      3. **CATEGORIZAÇÃO (CRÍTICO):**
+         - Se o texto do usuário ou o item da imagem for **EXATAMENTE IGUAL** a uma categoria da lista (ignorando maiúsculas), use-a.
+         - Se for um sinônimo óbvio (ex: "Uber" -> "Transporte"), use-a.
+         - **PROIBIDO ADIVINHAR:** Se o usuário digitou um termo (ex: "Servidor", "Vinho") e não existe essa categoria exata, **NÃO TENTE ASSOCIAR** a categorias não relacionadas (como associar "Servidor" a "Desenvolvedor").
+         - **AÇÃO PADRÃO:** Se não houver match exato, retorne o termo principal do usuário (ex: "Servidor") no campo 'categoryName'. Isso fará o sistema sugerir a criação dessa categoria.
 
-      Contexto do usuário: "${userText || 'Nenhum'}"
+      Retorne JSON:
+      {
+          "value": number, 
+          "baseDescription": "string", 
+          "categoryName": "string", 
+          "isInstallment": boolean, 
+          "installmentCount": number, 
+          "cardName": "string (se identificado)"
+      }
     `;
 
     try {
@@ -205,10 +182,11 @@ class AIService {
           ],
         }],
         response_format: { type: "json_object" },
+        temperature: 0, // ZERO criatividade
       });
 
       const result = JSON.parse(response.choices[0].message.content);
-      logger.info('[AIService] Análise detalhada concluída.', result);
+      logger.info('[AIService] Análise detalhada com imagem concluída.', result);
       return this._validateAnalysisResult(result, categories, cardNames);
     } catch (error) {
       logger.error('[AIService] Erro na análise detalhada:', error);
@@ -217,43 +195,45 @@ class AIService {
   }
 
   /**
-   * Analisa um texto puro (mensagem de WhatsApp) para extrair informações de lançamento.
-   * O fluxo (despesa/receita) é determinado pelo sistema posteriormente.
+   * Analisa um texto puro (mensagem de WhatsApp).
    */
   async analyzeTextForExpenseOrRevenue(userText, profileId, cardNames = []) {
     logger.info(`[AIService] Iniciando análise de texto puro: "${userText}"`);
 
     const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] }); 
-    const allCategoryNames = `"${categories.map(c => c.name).join('", "')}"`;
-
+    const allCategoryNames = categories.map(c => `"${c.name}"`).join(', ');
     const creditCardNames = `"${cardNames.join('", "')}"`;
 
     const prompt = `
-      Você é um especialista em análise de texto financeiro para um bot de WhatsApp.
-      Retorne APENAS um objeto JSON válido com as chaves:
-      "value" (Número, ou null), "baseDescription" (String), "categoryName" (String, ou null), 
-      "ambiguousCategoryNames" (Array de strings, ou null), "isInstallment" (Booleano), 
-      "installmentCount" (Número, se parcelado), "cardName" (String, se for cartão de crédito), 
-      "closingDay" (Número), "dueDay" (Número).
+      Você é um extrator de dados estritamente literal.
       
-      Regras CRÍTICAS:
-      1.  **Cenário 1: Lançamento Financeiro.**
-          *   Sua missão é identificar o "categoryName" com base no texto do usuário e na lista de categorias: [${allCategoryNames}]. O sistema definirá se é despesa ou receita baseado na sua escolha.
-          *   **CategoryName & Ambiguidade (REGRA MAIS IMPORTANTE):**
-              a. **PRIORIDADE 1: CORRESPONDÊNCIA EXATA.** Se o texto do usuário contiver o NOME EXATO de uma categoria existente (ex: usuário diz "gasolina para o carro" e a categoria "Gasolina" existe), use a categoria "Gasolina". Coloque o nome exato em "categoryName" e "ambiguousCategoryNames" como null.
-              b. **PRIORIDADE 2: AMBIGUIDADE REAL.** Apenas se o termo do usuário for curto e corresponder a MÚLTIPLAS categorias (ex: "99" e existem "99pop" e "99freelas"), coloque "categoryName" como null e popule "ambiguousCategoryNames" com os nomes exatos. Este caso deve ser RARO.
-              c. **PRIORIDADE 3: NOVA CATEGORIA.** Se NENHUMA categoria existente corresponder semanticamente, coloque o termo principal do usuário em "categoryName" para sinalizar uma nova categoria.
-              d. **FALLBACK:** Se o texto não der pista de categoria, use "Outros" em "categoryName".
-          *   Popule os demais campos (value, baseDescription, isInstallment, etc.) normalmente.
+      MENSAGEM DO USUÁRIO: "${userText}"
+      CATEGORIAS EXISTENTES NO BANCO: [${allCategoryNames}]
+      CARTÕES: [${creditCardNames}]
 
-      2.  **Cenário 2: Criação de Cartão.**
-          *   Se o texto contém "criar cartão", "novo cartão", etc.
-          *   Todos os campos de lançamento devem ser null.
-          *   Popule "cardName", "closingDay", e "dueDay".
+      SUA MISSÃO:
+      1. Extrair o valor monetário.
+      2. Extrair a descrição.
+      3. Definir o 'categoryName'.
 
-      3.  **Ambiguidade Geral:** Se for ambíguo, priorize o Cenário 1. Se nenhum se encaixar, retorne todos os campos como null, exceto "baseDescription" com o texto original.
+      REGRAS DE OURO PARA 'categoryName':
+      - **REGRA 1 (Match Exato):** Se o usuário digitou uma palavra que existe na lista de categorias (ex: digitou "Mercado" e existe "MERCADO"), use a categoria existente.
+      - **REGRA 2 (Sem Relações Indiretas):** Se o usuário digitou algo que NÃO está na lista (ex: "Servidor"), **NÃO** tente associar a uma categoria de pessoa ou profissão (ex: NÃO coloque em "Patrick.Developer").
+      - **REGRA 3 (Criação):** Se não houver match exato ou sinônimo universal (ex: Uber=Transporte), retorne a palavra chave do usuário (ex: "Servidor") no 'categoryName'. É preferível sugerir criar uma nova categoria do que errar a associação.
+      
+      CENÁRIO CARTÃO: Se a mensagem for "criar cartão Nubank dia 5", ignore o valor e preencha cardName, closingDay e dueDay.
 
-      Texto do usuário: "${userText}"
+      Retorne JSON:
+      {
+        "value": number | null,
+        "baseDescription": "string",
+        "categoryName": "string (Categoria existente ou a palavra chave do usuário)",
+        "isInstallment": boolean,
+        "installmentCount": number | null,
+        "cardName": string | null,
+        "closingDay": number | null,
+        "dueDay": number | null
+      }
     `;
 
     try {
@@ -264,7 +244,7 @@ class AIService {
           content: [{ type: 'text', text: prompt }],
         }],
         response_format: { type: "json_object" },
-        temperature: 0.1, 
+        temperature: 0, // ZERO criatividade para evitar alucinações de categoria
       });
 
       const result = JSON.parse(response.choices[0].message.content);
@@ -277,11 +257,13 @@ class AIService {
   }
 
   _validateAnalysisResult(result, categories, cardNames = []) {
-    // Se não for um lançamento de valor e nem uma criação de cartão válida, zera tudo.
-    if (result.value === null && (!result.cardName || !result.closingDay || !result.dueDay)) {
+    // Validação básica para não retornar lixo
+    if (result.value === null && (!result.cardName || !result.closingDay)) {
+        // Se não tem valor e não é criação de cartão, retorna nulo/vazio seguro
         return { value: null, baseDescription: result.baseDescription || '', categoryName: null, isInstallment: false, installmentCount: null, cardName: null, closingDay: null, dueDay: null, ambiguousCategoryNames: null };
     }
 
+    // Normaliza nome do cartão se encontrado
     if (result.cardName && cardNames.length > 0) {
         const lowerCaseCardName = result.cardName.toLowerCase();
         let foundCard = cardNames.find(c => c.toLowerCase() === lowerCaseCardName);
@@ -290,37 +272,24 @@ class AIService {
         }
         if(foundCard) {
             result.cardName = foundCard;
-            logger.info(`[AIService] Nome de cartão "${result.cardName}" normalizado para "${foundCard}".`);
         }
     }
 
+    // Valida parcelas
     if (result.isInstallment && (!result.installmentCount || result.installmentCount <= 0)) {
-        result.installmentCount = 2; // Default
+        result.installmentCount = 2; // Default seguro
     } else if (!result.isInstallment) {
         result.installmentCount = null;
     }
 
+    // Corrige formato numérico
     if (result.value !== null) {
-        result.value = parseFloat(String(result.value).replace(',', '.'));
+        // Remove R$, espaços e troca vírgula por ponto se necessário (embora a IA já devolva number geralmente)
+        const valStr = String(result.value).replace(/[^0-9.,-]/g, '').replace(',', '.');
+        result.value = parseFloat(valStr);
         if (isNaN(result.value)) {
-            logger.error(`[AIService] IA não conseguiu extrair um valor numérico válido.`);
             result.value = null;
             result.categoryName = null;
-        }
-    }
-
-    if (result.closingDay) {
-        result.closingDay = parseInt(result.closingDay, 10);
-        if (isNaN(result.closingDay) || result.closingDay < 1 || result.closingDay > 31) {
-            logger.warn(`[AIService] IA sugeriu closingDay inválido. Anulando.`);
-            result.closingDay = null;
-        }
-    }
-    if (result.dueDay) {
-        result.dueDay = parseInt(result.dueDay, 10);
-        if (isNaN(result.dueDay) || result.dueDay < 1 || result.dueDay > 31) {
-            logger.warn(`[AIService] IA sugeriu dueDay inválido. Anulando.`);
-            result.dueDay = null;
         }
     }
 

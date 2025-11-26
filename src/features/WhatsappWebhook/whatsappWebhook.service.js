@@ -28,7 +28,6 @@ class WebhookService {
   async _findUserByFlexiblePhone(phone) {
     if (!phone) return null;
     const variations = new Set([phone]);
-    // Adiciona variações de 8/9 dígitos para DDDs brasileiros
     if (phone.startsWith('55') && phone.length === 12) { 
       const areaCode = phone.substring(2, 4);
       const localNumber = phone.substring(4);
@@ -53,25 +52,17 @@ class WebhookService {
     return User.findOne({ where: { whatsapp_phone: { [Op.in]: Array.from(variations) } } });
   }
 
-  /**
-   * Busca inteligente de categoria (Remove acentos, espaços e ignora Maiúscula/Minúscula)
-   */
   async _fuzzyFindCategory(profileId, text) {
       if (!text) return null;
-      
-      // Normaliza: Remove acentos, coloca minúsculo e trim
       const cleanText = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
-      
       const allCategories = await Category.findAll({ where: { profile_id: profileId } });
 
-      // 1. Tenta match exato na versão limpa
       let match = allCategories.find(c => {
           const cName = c.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
           return cName === cleanText;
       });
       if (match) return match;
 
-      // 2. Tenta singular/plural simples (remove 's' do final)
       if (cleanText.endsWith('s')) {
           const singularText = cleanText.slice(0, -1);
           match = allCategories.find(c => {
@@ -88,7 +79,6 @@ class WebhookService {
           if (match) return match;
       }
 
-      // 3. Fallback: Contém a string (parcial)
       match = allCategories.find(c => {
           const cName = c.name.normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim().toLowerCase();
           return cName.includes(cleanText) || cleanText.includes(cName);
@@ -165,20 +155,13 @@ class WebhookService {
     }
     
     const caption = payload.image?.caption || payload.document?.caption;
-
     if ((payload.image || payload.document) && caption) {
-        logger.info(`[Webhook] Mídia com legenda "${caption}" recebida. Iniciando análise direta.`);
         payload.text = { message: caption };
         return this.handleContextArrival(payload);
     }
     
-    if (payload.image || payload.document) { 
-        return this.handleMediaArrival(payload); 
-    }
-    
-    if (payload.audio || payload.text) { 
-        return this.handleContextArrival(payload); 
-    }
+    if (payload.image || payload.document) { return this.handleMediaArrival(payload); }
+    if (payload.audio || payload.text) { return this.handleContextArrival(payload); }
   }
   
   async sendMainMenu(groupId, participantPhone, profileId) {
@@ -441,7 +424,7 @@ class WebhookService {
       case 'awaiting_new_category_goal':
           if (textMessage) {
               const goalValue = parseFloat(textMessage.replace(',', '.'));
-              if (isNaN(goalValue)) {
+              if (isNaN(goalValue) || goalValue < 0) {
                   await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números positivos (ex: 1500 ou 0).`);
                   return;
               }
@@ -458,7 +441,6 @@ class WebhookService {
             { name: temp_category_name, type: temp_category_type, category_flow: temp_category_flow },
             profile_id
         );
-        
         let goalMessage = '';
         if (temp_category_flow === 'expense' && goalValue > 0) {
             const goalService = require('../GoalManager/goal.service');
@@ -552,7 +534,7 @@ class WebhookService {
     if (buttonId.startsWith('pending_generate_link_')) {
         const userId = buttonId.split('_')[3];
         const checkout = await subscriptionService.createSubscriptionCheckout(userId);
-        const linkMessage = `Aqui está seu novo link para pagamento:\n\n${checkout.checkoutUrl}`;
+        const linkMessage = `Aqui está seu novo link para pagamento:\n\n${checkout.checkoutUrl}\n\nApós a confirmação, remova-me e adicione-me novamente ao grupo para começar!`;
         await whatsappService.sendWhatsappMessage(groupId, linkMessage);
         await OnboardingState.destroy({ where: { group_id: payload.phone } });
     }
@@ -750,7 +732,6 @@ class WebhookService {
 
     if (!profileId) return;
 
-    // 1. Detecção de Novo Comando (com Números)
     const containsNumber = textMessage && /\d/.test(textMessage);
     
     const pendingFlow = await PendingExpense.findOne({
@@ -763,13 +744,12 @@ class WebhookService {
         order: [['createdAt', 'DESC']]
     });
 
-    // 2. Prioridade para Novo Comando: Reseta fluxo se tiver número E não estiver esperando nome
     if (containsNumber && pendingFlow) {
         const statesWaitingForName = [
             'awaiting_new_category_name', 
             'awaiting_new_category_type',
             'awaiting_new_card_name',
-            'awaiting_manual_category_search' // PROTEÇÃO: Se for busca manual, não mata mesmo com número
+            'awaiting_manual_category_search' 
         ];
         
         if (!statesWaitingForName.includes(pendingFlow.action_expected)) {
@@ -787,7 +767,6 @@ class WebhookService {
         }
     });
 
-    // 3. Comandos de Menu
     if (textMessage && textMessage.toLowerCase().trim() === '#relatorio') {
         return this.sendSpendingReport(groupId, participantPhone, profileId);
     }
@@ -795,7 +774,6 @@ class WebhookService {
         return this.sendExpensesExcelReport(groupId, participantPhone, profileId);
     }
 
-    // 4. Respostas Numéricas (Menu, Cartão, Escolha Ambiguidade)
     if (textMessage && /^\d+$/.test(textMessage) && activeFlow) {
          if (!['awaiting_new_card_closing_day', 'awaiting_new_card_due_day', 'awaiting_installment_count', 'awaiting_manual_category_search'].includes(activeFlow.action_expected)) {
              const handled = await this.handleNumericReply(payload, parseInt(textMessage, 10));
@@ -803,14 +781,11 @@ class WebhookService {
          }
     }
 
-    // 5. Fluxos Ativos
     if (activeFlow) {
-        // BUSCA MANUAL (Novo Recurso)
         if (activeFlow.action_expected === 'awaiting_manual_category_search' && textMessage) {
             return this._handleManualCategoryInputInFlow(payload, activeFlow, textMessage);
         }
 
-        // INPUT MANUAL (Correção de IA)
         if (activeFlow.action_expected === 'awaiting_new_category_flow_decision' && textMessage) {
              return this._handleManualCategoryInputInFlow(payload, activeFlow, textMessage);
         }
@@ -823,9 +798,7 @@ class WebhookService {
         }
     }
     
-    // 6. Novo Lançamento via IA
     const hasMediaInPayload = payload.image || payload.document;
-
     if (hasMediaInPayload) {
         await whatsappService.sendWhatsappMessage(groupId, `🤖 Analisando documento e sua descrição...`);
         const userContext = textMessage;
@@ -920,7 +893,6 @@ class WebhookService {
                 installmentCount: pendingExpense.installment_count,
                 cardName: null, 
             };
-            // Tenta extrair contexto
             let userContext = '';
             if (pendingExpense.description && typeof pendingExpense.description === 'string') {
                 const match = pendingExpense.description.match(/\(([^)]+)\)/);
@@ -930,7 +902,6 @@ class WebhookService {
             await whatsappService.sendWhatsappMessage(groupId, `✅ Entendido! Classificado como *${existingCategory.name}*.`);
             await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, existingCategory.id, pendingExpense.credit_card_id);
       } else {
-           // Não achou -> Sugere criar (volta pro fluxo de decisão)
            pendingExpense.suggested_new_category_name = textMessage;
            pendingExpense.action_expected = 'awaiting_new_category_flow_decision'; 
            await pendingExpense.save();
@@ -992,7 +963,6 @@ class WebhookService {
             await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
         }
     } else {
-        // Nova Categoria
         const categorySuggestion = analysisResult.categoryName !== 'Outros' ? analysisResult.categoryName : (baseDescription.split(' ')[0] || "Nova Categoria");
         
         pendingData.value = value;
@@ -1228,6 +1198,217 @@ class WebhookService {
     return true;
   }
 
+  async handleNewCategoryDecisionFlow(payload) {
+    const buttonId = payload.buttonsResponseMessage.buttonId;
+    const parts = buttonId.split('_');
+    const action = parts[2];
+    const pendingExpenseId = parts[parts.length - 1];
+    const groupId = payload.phone;
+    const profileId = payload.profileId;
+
+    const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
+    if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`); return; }
+
+    const suggestedFlow = pendingExpense.suggested_category_flow || 'expense';
+    const otherCategoryName = suggestedFlow === 'expense' ? 'Outros' : 'Receita Padrão';
+
+    if (action === 'create') {
+        pendingExpense.action_expected = 'awaiting_new_category_type';
+        await pendingExpense.save();
+        await whatsappService.sendWhatsappMessage(groupId, `Entendido! A qual tipo de custo/receita a categoria "*${pendingExpense.suggested_new_category_name}*" pertence?\n\nResponda com um tipo (ex: "Material", "Mão de Obra", "Salário", "Serviço Avulso").`);
+    } else if (action === 'choose') {
+        payload.buttonsResponseMessage.buttonId = `edit_expense_${pendingExpenseId}`;
+        await this.handleEditButtonFlow(payload);
+    } else if (action === 'outros') {
+        const finalCategory = await Category.findOne({ 
+            where: { name: otherCategoryName, profile_id: profileId, category_flow: suggestedFlow } 
+        });
+
+        if (!finalCategory) { 
+            await whatsappService.sendWhatsappMessage(groupId, `❌ Erro crítico: A categoria "${otherCategoryName}" não foi encontrada.`); 
+            return; 
+        }
+        
+        const analysisResult = {
+            value: pendingExpense.value,
+            baseDescription: pendingExpense.description,
+            categoryName: finalCategory.name,
+            flow: finalCategory.category_flow,
+            isInstallment: !!pendingExpense.installment_count,
+            installmentCount: pendingExpense.installment_count,
+            cardName: null,
+        };
+        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+        await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, finalCategory.id);
+    }
+  }
+  
+  async handleNewCategoryFlowDecision(payload) {
+    const buttonId = payload.buttonsResponseMessage.buttonId;
+    const parts = buttonId.split('_');
+    const flow = parts[3];
+    const pendingExpenseId = parts[parts.length - 1];
+    const groupId = payload.phone;
+    const profileId = payload.profileId;
+
+    const pendingExpense = await PendingExpense.findByPk(pendingExpenseId, { where: { profile_id: profileId } });
+    if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`); return; }
+    
+    pendingExpense.suggested_category_flow = flow;
+    if (flow === 'expense') {
+        pendingExpense.action_expected = 'awaiting_new_category_goal';
+        await pendingExpense.save();
+        await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pendingExpense.suggested_new_category_name}*"?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+    } else {
+        if (pendingExpense.whatsapp_message_id.endsWith('_menu_cat')) {
+            await this._finalizeCategoryCreationFromMenu(pendingExpense);
+        } else {
+            await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense);
+        }
+    }
+  }
+
+  async finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense, goalValue = 0) {
+    const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
+    
+    const categoryType = pendingExpense.description || 'Outros'; 
+
+    try {
+        const newCategory = await categoryService.create(
+            { name: suggested_new_category_name, type: categoryType, category_flow: suggested_category_flow },
+            profile_id
+        );
+        
+        let msg = `✅ Nova categoria "*${suggested_new_category_name}*" (${suggested_category_flow === 'expense' ? 'Despesa' : 'Receita'}) criada com sucesso!`;
+        if (suggested_category_flow === 'expense' && goalValue > 0) {
+            const goalService = require('../GoalManager/goal.service');
+            await goalService.createOrUpdateGoal(profile_id, {
+                value: goalValue,
+                categoryId: newCategory.id,
+                isTotalGoal: false,
+            });
+            msg += `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
+        }
+
+        await whatsappService.sendWhatsappMessage(whatsapp_group_id, msg);
+
+        const analysisResult = {
+            value: pendingExpense.value,
+            baseDescription: pendingExpense.description,
+            categoryName: newCategory.name,
+            flow: newCategory.category_flow,
+            isInstallment: !!pendingExpense.installment_count,
+            installmentCount: pendingExpense.installment_count,
+            cardName: null,
+        };
+        const userContext = pendingExpense.description.match(/\(([^)]+)\)/)?.[1] || '';
+        await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, newCategory.id, pendingExpense.credit_card_id);
+
+    } catch (error) {
+        logger.error('[Webhook] Erro ao finalizar criação de categoria a partir de PendingExpense:', error);
+        await whatsappService.sendWhatsappMessage(whatsapp_group_id, `❌ Houve um erro ao criar a categoria "${suggested_new_category_name}". ${error.message}`);
+        await pendingExpense.destroy();
+    }
+  }
+
+  async _finalizeCategoryCreationFromMenu(pendingExpense, goalValue = 0) {
+    const { whatsapp_group_id, profile_id, suggested_new_category_name, suggested_category_flow } = pendingExpense;
+    const categoryType = pendingExpense.description || 'Outros'; 
+
+    try {
+        const newCategory = await categoryService.create(
+            { name: suggested_new_category_name, type: categoryType, category_flow: suggested_category_flow },
+            profile_id
+        );
+
+        let msg = `✅ Nova categoria "*${suggested_new_category_name}*" (${suggested_category_flow === 'expense' ? 'Despesa' : 'Receita'}) foi criada com sucesso!`;
+
+        if (suggested_category_flow === 'expense' && goalValue > 0) {
+            const goalService = require('../GoalManager/goal.service');
+            await goalService.createOrUpdateGoal(profile_id, {
+                value: goalValue,
+                categoryId: newCategory.id,
+                isTotalGoal: false,
+            });
+            msg += `\n🎯 Meta de gastos de *R$ ${goalValue.toFixed(2)}* definida.`;
+        }
+
+        await whatsappService.sendWhatsappMessage(whatsapp_group_id, msg);
+        await this.sendMainMenu(whatsapp_group_id, pendingExpense.participant_phone, profile_id);
+
+    } catch (error) {
+        logger.error('[Webhook] Erro ao finalizar criação de categoria vinda do MENU:', error);
+        await whatsappService.sendWhatsappMessage(whatsapp_group_id, `❌ Houve um erro ao criar a categoria "${suggested_new_category_name}". ${error.message}`);
+    } finally {
+        await pendingExpense.destroy();
+    }
+  }
+  
+  async handleNewCategoryCreationFlowFromPending(payload, pending) {
+    const groupId = payload.phone;
+    const textMessage = payload.text?.message;
+    const buttonId = payload.buttonsResponseMessage?.buttonId;
+
+    switch (pending.action_expected) {
+        case 'awaiting_new_category_name':
+            if (textMessage) {
+                pending.suggested_new_category_name = textMessage.trim();
+                pending.action_expected = 'awaiting_new_category_type';
+                await pending.save();
+                await whatsappService.sendWhatsappMessage(groupId, `Entendido. Agora, defina um *tipo* para a categoria "*${textMessage}*".\n\nIsso ajuda a agrupar seus custos nos relatórios (ex: "Mão de Obra", "Material Bruto", "Acabamentos", "Salário").`);
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `Por favor, me diga o nome da categoria.`);
+            }
+            break;
+
+        case 'awaiting_new_category_type':
+            if (textMessage) {
+                pending.description = textMessage.trim(); 
+                pending.action_expected = 'awaiting_category_flow_decision';
+                await pending.save();
+                const message = `A categoria "*${pending.suggested_new_category_name}*" será para *Despesas* ou *Receitas*?`;
+                const buttons = [{ id: `new_cat_flow_expense_${pending.id}`, label: '💸 Despesa' }, { id: `new_cat_flow_revenue_${pending.id}`, label: '💰 Receita' }];
+                await whatsappService.sendButtonList(groupId, message, buttons);
+            }
+            break;
+
+        case 'awaiting_category_flow_decision':
+             if (buttonId && (buttonId.startsWith('new_cat_flow_expense_') || buttonId.startsWith('new_cat_flow_revenue_'))) {
+                const flow = buttonId.split('_')[3];
+                pending.suggested_category_flow = flow;
+                if (flow === 'expense') {
+                    pending.action_expected = 'awaiting_new_category_goal';
+                    await pending.save();
+                    await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pending.suggested_new_category_name}*"?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+                } else {
+                    if (pending.whatsapp_message_id.endsWith('_menu_cat')) {
+                        await this._finalizeCategoryCreationFromMenu(pending);
+                    } else {
+                        await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending);
+                    }
+                }
+            } else {
+                await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, selecione "Despesa" ou "Receita".`);
+            }
+            break;
+
+        case 'awaiting_new_category_goal':
+            if (textMessage) {
+                const goalValue = parseFloat(textMessage.replace(',', '.'));
+                if (isNaN(goalValue) || goalValue < 0) {
+                    await whatsappService.sendWhatsappMessage(groupId, `Valor inválido. Por favor, responda apenas com números positivos (ex: 1500 ou 0).`);
+                    return;
+                }
+                if (pending.whatsapp_message_id.endsWith('_menu_cat')) {
+                    await this._finalizeCategoryCreationFromMenu(pending, goalValue);
+                } else {
+                    await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending, goalValue);
+                }
+            }
+            break;
+    }
+  }
+
   async handleNumericReplyForCreditCard(groupId, selectedNumber, participantPhone, profileId) {
     const pendingExpense = await PendingExpense.findOne({
       where: { whatsapp_group_id: groupId, participant_phone: participantPhone, profile_id: profileId, action_expected: 'awaiting_credit_card_choice' },
@@ -1321,11 +1502,12 @@ class WebhookService {
       let filePath = null;
       try {
         const expenses = await dashboardService.getAllExpenses(profileId);
-        if (!expenses || expenses.length === 0) { await whatsappService.sendWhatsappMessage(groupId, `Nenhuma despesa.`); return; }
+        if (!expenses || expenses.length === 0) { await whatsappService.sendWhatsappMessage(groupId, `Nenhuma despesa encontrada para exportar.`); return; }
         filePath = await excelService.generateExpensesExcel(expenses);
-        await whatsappService.sendDocument(groupId, filePath, `Seu relatório Excel.`);
+        await whatsappService.sendDocument(groupId, filePath, `Aqui está o seu relatório completo de despesas.`);
       } catch (error) {
-        logger.error('[Webhook] Erro Excel:', error);
+        logger.error('[Webhook] Erro ao gerar e enviar relatório Excel de despesas:', error);
+        await whatsappService.sendWhatsappMessage(groupId, `❌ Ocorreu um erro ao gerar ou enviar seu relatório Excel.`);
       } finally {
         if (filePath && fs.existsSync(filePath)) { fs.unlinkSync(filePath); }
       }

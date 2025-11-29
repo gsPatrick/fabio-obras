@@ -1130,11 +1130,11 @@ async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
         pendingData.action_expected = 'awaiting_new_category_flow_decision';
         await pendingData.save();
 
-        const message = `🤔 A categoria "*${categorySuggestion}*" é nova (ou não reconheci). \n\nEla é *Despesa* ou *Receita*? \n\n💡 _Se você já tem uma categoria parecida e eu não achei, basta **digitar o nome dela** agora._`;
+        const message = `🤔 A categoria "*${categorySuggestion}*" é nova (ou não reconheci). \n\nEla é *Despesa* ou *Receita*? \n\n💡 _Se você já tem uma categoria parecida e eu não achei, basta selecionar *Localizar Categoria Parecida**._`;
         const buttons = [ 
             { id: `new_cat_flow_expense_${pendingData.id}`, label: '💸 Despesa' }, 
             { id: `new_cat_flow_revenue_${pendingData.id}`, label: '💰 Receita' },
-            { id: `search_manual_cat_${pendingData.id}`, label: '🔍 Localizar' }
+            { id: `search_manual_cat_${pendingData.id}`, label: '🔍 Localizar Categoria Parecida' }
         ];
         await whatsappService.sendButtonList(groupId, message, buttons);
     }

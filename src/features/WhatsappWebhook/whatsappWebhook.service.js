@@ -1194,8 +1194,76 @@ class WebhookService {
                 // Fazer busca web
                 const webResult = await aiService.searchWebAndCategorize(termToSearch, categoryNames);
 
-                // Se encontrou categoria com confiança boa, usa!
-                if (webResult.categoryName && ['high', 'medium'].includes(webResult.categoryMatchConfidence)) {
+                // NOVA LÓGICA: Verificar se o match é realmente bom ou se é um "match forçado"
+                const isForcedMatch = webResult.categoryMatchReason && (
+                    webResult.categoryMatchReason.toLowerCase().includes('não é perfeita') ||
+                    webResult.categoryMatchReason.toLowerCase().includes('não é uma correspondência perfeita') ||
+                    webResult.categoryMatchReason.toLowerCase().includes('mais próxima') ||
+                    webResult.categoryMatchReason.toLowerCase().includes('categoria mais próxima') ||
+                    webResult.categoryMatchReason.toLowerCase().includes('not a perfect') ||
+                    webResult.categoryMatchReason.toLowerCase().includes('closest match') ||
+                    webResult.categoryMatchReason.toLowerCase().includes('ainda que não') ||
+                    webResult.categoryMatchReason.toLowerCase().includes('embora')
+                );
+
+                // Se é um match forçado ou confiança baixa, CRIA CATEGORIA AUTOMATICAMENTE
+                if (isForcedMatch || webResult.categoryMatchConfidence === 'low') {
+                    logger.info(`[Webhook] Match forçado detectado. Criando categoria automaticamente.`);
+
+                    // Determina qual seria a categoria GENÉRICA ideal baseado no que a IA descobriu
+                    let newCategoryName = 'Outros'; // fallback
+                    if (webResult.whatItIs) {
+                        const whatItIsLower = webResult.whatItIs.toLowerCase();
+                        // Ordem de prioridade de detecção
+                        if (whatItIsLower.includes('streaming') || whatItIsLower.includes('netflix') || whatItIsLower.includes('hbo') || whatItIsLower.includes('disney') || whatItIsLower.includes('amazon prime') || whatItIsLower.includes('spotify')) {
+                            newCategoryName = 'Entretenimento';
+                        } else if (whatItIsLower.includes('assinatura') || whatItIsLower.includes('subscription') || whatItIsLower.includes('mensalidade')) {
+                            newCategoryName = 'Assinaturas';
+                        } else if (whatItIsLower.includes('entretenimento') || whatItIsLower.includes('entertainment') || whatItIsLower.includes('vídeo') || whatItIsLower.includes('música') || whatItIsLower.includes('jogos') || whatItIsLower.includes('games')) {
+                            newCategoryName = 'Entretenimento';
+                        } else if (whatItIsLower.includes('remédio') || whatItIsLower.includes('medicamento') || whatItIsLower.includes('farmácia') || whatItIsLower.includes('saúde') || whatItIsLower.includes('health')) {
+                            newCategoryName = 'Farmácia';
+                        } else if (whatItIsLower.includes('transporte') || whatItIsLower.includes('uber') || whatItIsLower.includes('táxi') || whatItIsLower.includes('corrida')) {
+                            newCategoryName = 'Transporte';
+                        } else if (whatItIsLower.includes('restaurante') || whatItIsLower.includes('comida') || whatItIsLower.includes('alimentação') || whatItIsLower.includes('refeição')) {
+                            newCategoryName = 'Alimentação';
+                        } else if (whatItIsLower.includes('roupa') || whatItIsLower.includes('vestuário') || whatItIsLower.includes('calçado') || whatItIsLower.includes('moda')) {
+                            newCategoryName = 'Vestuário';
+                        } else if (whatItIsLower.includes('tecnologia') || whatItIsLower.includes('software') || whatItIsLower.includes('cloud') || whatItIsLower.includes('hosting')) {
+                            newCategoryName = 'Tecnologia';
+                        } else if (whatItIsLower.includes('educação') || whatItIsLower.includes('curso') || whatItIsLower.includes('escola') || whatItIsLower.includes('faculdade')) {
+                            newCategoryName = 'Educação';
+                        }
+                    }
+
+                    // Verificar se a categoria já existe antes de criar
+                    let newCategory = await Category.findOne({ where: { name: newCategoryName, profile_id: profileId } });
+
+                    if (!newCategory) {
+                        // CRIAR CATEGORIA AUTOMATICAMENTE
+                        newCategory = await Category.create({
+                            name: newCategoryName,
+                            type: newCategoryName, // tipo = nome da categoria
+                            category_flow: 'expense', // Por padrão cria como despesa
+                            profile_id: profileId
+                        });
+                        logger.info(`[Webhook] Categoria "${newCategoryName}" criada automaticamente.`);
+                    }
+
+                    // REGISTRAR O GASTO na nova categoria
+                    const resolvedAnalysis = { ...analysisResult, flow: 'expense', categoryName: newCategory.name };
+
+                    // Mensagem explicativa
+                    const explanation = webResult.whatItIs ? `✨ *${termToSearch}* é: ${webResult.whatItIs}\n\n` : '';
+                    await whatsappService.sendWhatsappMessage(groupId, `${explanation}📂 Criei a categoria *${newCategoryName}* e registrei o gasto!`);
+
+                    // Salvar o gasto diretamente
+                    await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, newCategory.id, null);
+                    return;
+                }
+
+                // Se encontrou categoria com confiança alta e match não forçado, usa!
+                if (webResult.categoryName && webResult.categoryMatchConfidence === 'high') {
                     const matchedCategory = allCategories.find(c => c.name.toLowerCase() === webResult.categoryName.toLowerCase());
 
                     if (matchedCategory) {

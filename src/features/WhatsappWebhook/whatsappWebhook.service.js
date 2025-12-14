@@ -411,13 +411,8 @@ class WebhookService {
             case 'awaiting_category_flow_decision':
                 if (buttonId && (buttonId === 'onboarding_flow_expense' || buttonId === 'onboarding_flow_revenue')) {
                     state.temp_category_flow = (buttonId === 'onboarding_flow_expense' ? 'expense' : 'revenue');
-                    if (state.temp_category_flow === 'expense') {
-                        state.status = 'awaiting_new_category_goal';
-                        await state.save();
-                        await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${state.temp_category_name}*" (Despesa)?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
-                    } else {
-                        await this.finalizeNewCategoryOnboarding(state);
-                    }
+                    // REMOVIDA PERGUNTA DE META - cria direto com meta=0 (ajusta no dashboard)
+                    await this.finalizeNewCategoryOnboarding(state, 0);
                 } else {
                     await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, selecione "Despesa" ou "Receita".`);
                 }
@@ -1610,16 +1605,11 @@ class WebhookService {
         if (!pendingExpense) { await whatsappService.sendWhatsappMessage(groupId, `⏳ O tempo para esta decisão expirou.`); return; }
 
         pendingExpense.suggested_category_flow = flow;
-        if (flow === 'expense') {
-            pendingExpense.action_expected = 'awaiting_new_category_goal';
-            await pendingExpense.save();
-            await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pendingExpense.suggested_new_category_name}*"?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+        // REMOVIDA PERGUNTA DE META - cria direto com meta=0 (ajusta no dashboard)
+        if (pendingExpense.whatsapp_message_id.endsWith('_menu_cat')) {
+            await this._finalizeCategoryCreationFromMenu(pendingExpense, 0);
         } else {
-            if (pendingExpense.whatsapp_message_id.endsWith('_menu_cat')) {
-                await this._finalizeCategoryCreationFromMenu(pendingExpense);
-            } else {
-                await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense);
-            }
+            await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pendingExpense, 0);
         }
     }
 
@@ -1731,16 +1721,11 @@ class WebhookService {
                 if (buttonId && (buttonId.startsWith('new_cat_flow_expense_') || buttonId.startsWith('new_cat_flow_revenue_'))) {
                     const flow = buttonId.split('_')[3];
                     pending.suggested_category_flow = flow;
-                    if (flow === 'expense') {
-                        pending.action_expected = 'awaiting_new_category_goal';
-                        await pending.save();
-                        await whatsappService.sendWhatsappMessage(groupId, `Qual a *meta mensal de gastos* para a categoria "*${pending.suggested_new_category_name}*"?\n\nResponda apenas com o número (ex: 1500).\n\nSe não quiser definir uma meta, responda com *0*.`);
+                    // REMOVIDA PERGUNTA DE META - cria direto com meta=0 (ajusta no dashboard)
+                    if (pending.whatsapp_message_id.endsWith('_menu_cat')) {
+                        await this._finalizeCategoryCreationFromMenu(pending, 0);
                     } else {
-                        if (pending.whatsapp_message_id.endsWith('_menu_cat')) {
-                            await this._finalizeCategoryCreationFromMenu(pending);
-                        } else {
-                            await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending);
-                        }
+                        await this.finalizeNewCategoryCreationFromPendingExpenseDecision(pending, 0);
                     }
                 } else {
                     await whatsappService.sendWhatsappMessage(groupId, `Opção inválida. Por favor, selecione "Despesa" ou "Receita".`);

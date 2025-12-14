@@ -46,7 +46,7 @@ class AIService {
     logger.info('[AIService] PDF detectado. Iniciando conversão com node-poppler...');
     // Caminho dos binários do Poppler (configurável via ENV ou padrão do sistema)
     const poppler = new Poppler(process.env.POPPLER_BIN_PATH);
-    
+
     const tempPdfPath = path.join(os.tmpdir(), `doc-${Date.now()}.pdf`);
     const tempOutputPath = path.join(os.tmpdir(), `img-${Date.now()}`);
 
@@ -60,22 +60,22 @@ class AIService {
       };
 
       await poppler.pdfToCairo(tempPdfPath, tempOutputPath, options);
-      
+
       const imagePath = `${tempOutputPath}-1.jpg`;
 
       if (fs.existsSync(imagePath)) {
-          const imageBuffer = fs.readFileSync(imagePath);
-          logger.info('[AIService] PDF convertido para imagem com sucesso.');
-          
-          // Limpeza
-          fs.unlinkSync(imagePath);
-          fs.unlinkSync(tempPdfPath);
-          
-          return imageBuffer;
+        const imageBuffer = fs.readFileSync(imagePath);
+        logger.info('[AIService] PDF convertido para imagem com sucesso.');
+
+        // Limpeza
+        fs.unlinkSync(imagePath);
+        fs.unlinkSync(tempPdfPath);
+
+        return imageBuffer;
       } else {
-          throw new Error("Arquivo de imagem não gerado pelo Poppler.");
+        throw new Error("Arquivo de imagem não gerado pelo Poppler.");
       }
-      
+
     } catch (error) {
       logger.error('[AIService] Erro crítico durante a conversão do PDF com node-poppler.', error);
       if (fs.existsSync(tempPdfPath)) fs.unlinkSync(tempPdfPath);
@@ -84,11 +84,130 @@ class AIService {
   }
 
   /**
+   * Pesquisa na internet para entender o que é um termo desconhecido e categorizar.
+   * Usa a OpenAI Responses API com web_search tool.
+   * @param {string} unknownTerm - O termo que a IA não reconheceu
+   * @param {string[]} categoryNames - Lista de categorias existentes do usuário
+   * @returns {Object} - { categoryName, confidence, reason }
+   */
+  async searchWebAndCategorize(unknownTerm, categoryNames) {
+    logger.info(`[AIService] Pesquisando na internet: "${unknownTerm}"`);
+
+    const categoryList = categoryNames.map(c => `"${c}"`).join(', ');
+
+    const prompt = `Eu tenho as seguintes categorias de gastos: [${categoryList}]
+
+O usuário mencionou "${unknownTerm}" em uma despesa. Eu não conheço esse termo.
+
+Por favor, pesquise na internet o que é "${unknownTerm}" e me diga:
+1. O que é esse termo/produto/serviço
+2. Qual categoria existente da minha lista melhor se encaixa
+
+Responda em JSON:
+{
+  "whatItIs": "breve descrição do que é",
+  "categoryName": "nome da categoria existente que melhor se encaixa (ou null se nenhuma)",
+  "categoryMatchConfidence": "high|medium|low",
+  "categoryMatchReason": "explicação da associação"
+}`;
+
+    try {
+      // Usando a Responses API com web_search tool
+      const response = await openai.responses.create({
+        model: 'gpt-4o',
+        tools: [{ type: 'web_search' }],
+        input: prompt,
+      });
+
+      // Extrair o texto da resposta
+      let responseText = '';
+      if (response.output) {
+        for (const item of response.output) {
+          if (item.type === 'message' && item.content) {
+            for (const content of item.content) {
+              if (content.type === 'output_text') {
+                responseText = content.text;
+              }
+            }
+          }
+        }
+      }
+
+      // Tentar parsear JSON da resposta
+      const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const result = JSON.parse(jsonMatch[0]);
+        logger.info(`[AIService] Busca web concluída: ${unknownTerm} → ${result.categoryName}`, result);
+        return result;
+      }
+
+      logger.warn('[AIService] Busca web não retornou JSON válido');
+      return { categoryName: null, categoryMatchConfidence: 'low', categoryMatchReason: 'Busca não conclusiva' };
+
+    } catch (error) {
+      // Se a Responses API falhar (versão antiga do SDK), tenta fallback
+      if (error.message?.includes('responses') || error.message?.includes('not a function')) {
+        logger.warn('[AIService] Responses API não disponível, usando fallback com chat completions');
+        return this._searchWebFallback(unknownTerm, categoryNames);
+      }
+      logger.error('[AIService] Erro na busca web:', error);
+      return { categoryName: null, categoryMatchConfidence: 'low', categoryMatchReason: `Erro: ${error.message}` };
+    }
+  }
+
+  /**
+   * Fallback para busca web usando chat completions (sem busca real, apenas conhecimento do modelo)
+   */
+  async _searchWebFallback(unknownTerm, categoryNames) {
+    logger.info(`[AIService] Fallback: tentando categorizar "${unknownTerm}" com conhecimento do modelo`);
+
+    const categoryList = categoryNames.map(c => `"${c}"`).join(', ');
+
+    const prompt = `Você é um especialista em categorização de gastos com conhecimento amplo sobre marcas, produtos e serviços.
+
+TERMO DO USUÁRIO: "${unknownTerm}"
+CATEGORIAS EXISTENTES: [${categoryList}]
+
+Use todo seu conhecimento para identificar o que é "${unknownTerm}" e qual categoria existente melhor se encaixa.
+
+Exemplos de associações:
+- Se for uma marca de remédio/medicamento → Farmácia ou Saúde
+- Se for uma empresa/app de streaming → Entretenimento ou Assinaturas
+- Se for uma marca de comida/restaurante → Alimentação ou Restaurante
+- Se for um serviço de cloud/hosting → Tecnologia ou Assinaturas
+- Se for uma marca de roupa/calçado → Vestuário ou Roupas
+
+Responda APENAS em JSON:
+{
+  "whatItIs": "breve descrição do que é",
+  "categoryName": "nome EXATO de uma categoria da lista (ou null se nenhuma encaixa)",
+  "categoryMatchConfidence": "high|medium|low",
+  "categoryMatchReason": "explicação"
+}`;
+
+    try {
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: "json_object" },
+        temperature: 0.2,
+      });
+
+      const result = JSON.parse(response.choices[0].message.content);
+      logger.info(`[AIService] Fallback concluído: ${unknownTerm} → ${result.categoryName}`, result);
+      return result;
+    } catch (error) {
+      logger.error('[AIService] Erro no fallback:', error);
+      return { categoryName: null, categoryMatchConfidence: 'low', categoryMatchReason: `Erro: ${error.message}` };
+    }
+  }
+
+  /**
    * Analisa um arquivo XLSX (em formato CSV String) para extrair despesas.
    */
   async analyzeExcelStructureAndExtractData(csvString, categoryList) {
     logger.info('[AIService] Iniciando análise de estrutura de planilha...');
-    
+
     const expenseCategoryNames = categoryList.join('", "');
     const expenseCategoryOptions = `"${expenseCategoryNames}"`;
 
@@ -109,16 +228,16 @@ class AIService {
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo-0125', 
+        model: 'gpt-3.5-turbo-0125',
         messages: [{
           role: 'user',
           content: [{ type: 'text', text: prompt }],
         }],
         response_format: { type: "json_object" },
-        temperature: 0, 
+        temperature: 0,
       });
 
-      return response.choices[0].message.content; 
+      return response.choices[0].message.content;
     } catch (error) {
       logger.error('[AIService] Erro na análise de planilha:', error);
       return JSON.stringify({ expenses: [], reason: `Erro API OpenAI: ${error.message}` });
@@ -128,9 +247,9 @@ class AIService {
   /**
    * Analisa um comprovante (imagem ou PDF) e um texto de contexto.
    */
-  async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg', profileId, cardNames = []) { 
+  async analyzeExpenseWithImage(mediaBuffer, userText, mimeType = 'image/jpeg', profileId, cardNames = []) {
     logger.info(`[AIService] Iniciando análise detalhada de mídia (${mimeType}).`);
-    
+
     let finalImageBuffer = mediaBuffer;
 
     if (mimeType.includes('pdf')) {
@@ -141,30 +260,53 @@ class AIService {
       }
       finalImageBuffer = convertedImage;
     }
-    
-    const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] }); 
+
+    const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] });
     const allCategoryNames = categories.map(c => `"${c.name}"`).join(', ');
     const base64Image = finalImageBuffer.toString('base64');
-    
+
     const prompt = `
       Analise esta imagem de comprovante/nota e o texto do usuário: "${userText || ''}".
 
       LISTA DE CATEGORIAS DO USUÁRIO: [${allCategoryNames}]
 
-      REGRAS RÍGIDAS DE EXTRAÇÃO:
+      REGRAS DE CATEGORIZAÇÃO INTELIGENTE (VOCÊ DEVE SER MUITO ESPERTO!):
+      
       1. **Valor:** Extraia o valor total da imagem.
       2. **Descrição:** Use o texto do usuário como descrição base. Se vazio, use o nome do estabelecimento.
-      3. **CATEGORIZAÇÃO (CRÍTICO):**
-         - Se o texto do usuário ou o item da imagem for **EXATAMENTE IGUAL** a uma categoria da lista (ignorando maiúsculas), use-a.
-         - Se for um sinônimo óbvio (ex: "Uber" -> "Transporte"), use-a.
-         - **PROIBIDO ADIVINHAR:** Se o usuário digitou um termo (ex: "Servidor", "Vinho") e não existe essa categoria exata, **NÃO TENTE ASSOCIAR** a categorias não relacionadas (como associar "Servidor" a "Desenvolvedor").
-         - **AÇÃO PADRÃO:** Se não houver match exato, retorne o termo principal do usuário (ex: "Servidor") no campo 'categoryName'. Isso fará o sistema sugerir a criação dessa categoria.
+      
+      3. **CATEGORIZAÇÃO COM INTELIGÊNCIA SEMÂNTICA (CRÍTICO):**
+         Use seu conhecimento sobre o mundo para SEMPRE encontrar a melhor categoria existente:
+         
+         EXEMPLOS DE ASSOCIAÇÕES QUE VOCÊ DEVE FAZER:
+         - "remédio", "medicamento", "dipirona", "paracetamol", "tylenol" → busque "Farmácia" ou "Saúde"
+         - "chiclete", "bala", "chocolate", "brigadeiro" → busque "Doces" ou "Mercado" 
+         - "uber", "99", "táxi", "cabify" → busque "Transporte"
+         - "pizza", "hambúrguer", "restaurante", "ifood", "almoço", "jantar" → busque "Alimentação" ou "Restaurante"
+         - "Netflix", "Spotify", "Disney+", "HBO", "Amazon Prime" → busque "Entretenimento" ou "Streaming" ou "Assinaturas"
+         - "gasolina", "álcool", "combustível", "posto" → busque "Combustível" ou "Transporte"
+         - "luz", "energia", "CPFL", "Enel" → busque "Conta de Luz" ou "Contas" ou "Utilidades"
+         - "água", "SABESP" → busque "Conta de Água" ou "Contas"
+         - "internet", "Vivo", "Claro", "Tim" → busque "Internet" ou "Telefone" ou "Contas"
+         
+         USE SEU CONHECIMENTO GERAL: Se o usuário digita uma marca/produto/serviço que você conhece,
+         associe à categoria mais adequada que exista na lista do usuário.
+         
+      4. **CONFIANÇA DO MATCH:**
+         - "high": Categoria existe E é match perfeito (ex: "Farmácia" para "remédio")
+         - "medium": Categoria existe E é semanticamente relacionada (ex: "Mercado" para "chiclete")  
+         - "low": Nenhuma categoria existente se encaixa bem
+         
+      5. **SE NENHUMA CATEGORIA SE ENCAIXA:** 
+         Retorne o termo principal do usuário em categoryName e confidence "low".
 
       Retorne JSON:
       {
           "value": number, 
           "baseDescription": "string", 
-          "categoryName": "string", 
+          "categoryName": "string (categoria existente que melhor se encaixa OU termo do usuário)", 
+          "categoryMatchConfidence": "high|medium|low",
+          "categoryMatchReason": "string explicando por que escolheu essa categoria",
           "isInstallment": boolean, 
           "installmentCount": number, 
           "cardName": "string (se identificado)"
@@ -182,7 +324,7 @@ class AIService {
           ],
         }],
         response_format: { type: "json_object" },
-        temperature: 0, // ZERO criatividade
+        temperature: 0.1, // Leve criatividade para associações semânticas
       });
 
       const result = JSON.parse(response.choices[0].message.content);
@@ -200,12 +342,12 @@ class AIService {
   async analyzeTextForExpenseOrRevenue(userText, profileId, cardNames = []) {
     logger.info(`[AIService] Iniciando análise de texto puro: "${userText}"`);
 
-    const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] }); 
+    const categories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['name', 'category_flow'] });
     const allCategoryNames = categories.map(c => `"${c.name}"`).join(', ');
     const creditCardNames = `"${cardNames.join('", "')}"`;
 
     const prompt = `
-      Você é um extrator de dados estritamente literal.
+      Você é um assistente SUPER INTELIGENTE de categorização de gastos.
       
       MENSAGEM DO USUÁRIO: "${userText}"
       CATEGORIAS EXISTENTES NO BANCO: [${allCategoryNames}]
@@ -214,12 +356,36 @@ class AIService {
       SUA MISSÃO:
       1. Extrair o valor monetário.
       2. Extrair a descrição.
-      3. Definir o 'categoryName'.
+      3. Escolher a MELHOR categoria existente usando INTELIGÊNCIA SEMÂNTICA.
 
-      REGRAS DE OURO PARA 'categoryName':
-      - **REGRA 1 (Match Exato):** Se o usuário digitou uma palavra que existe na lista de categorias (ex: digitou "Mercado" e existe "MERCADO"), use a categoria existente.
-      - **REGRA 2 (Sem Relações Indiretas):** Se o usuário digitou algo que NÃO está na lista (ex: "Servidor"), **NÃO** tente associar a uma categoria de pessoa ou profissão (ex: NÃO coloque em "Patrick.Developer").
-      - **REGRA 3 (Criação):** Se não houver match exato ou sinônimo universal (ex: Uber=Transporte), retorne a palavra chave do usuário (ex: "Servidor") no 'categoryName'. É preferível sugerir criar uma nova categoria do que errar a associação.
+      REGRAS DE CATEGORIZAÇÃO INTELIGENTE (VOCÊ DEVE SER MUITO ESPERTO!):
+      
+      Use seu conhecimento sobre o mundo para SEMPRE encontrar a melhor categoria existente:
+      
+      EXEMPLOS DE ASSOCIAÇÕES QUE VOCÊ DEVE FAZER:
+      - "remédio", "medicamento", "dipirona", "paracetamol", "tylenol", "drogaria" → busque "Farmácia" ou "Saúde"
+      - "chiclete", "bala", "chocolate", "brigadeiro", "sorvete" → busque "Doces" ou "Mercado" ou "Alimentação"
+      - "uber", "99", "táxi", "cabify", "corrida" → busque "Transporte"
+      - "pizza", "hambúrguer", "restaurante", "ifood", "almoço", "jantar", "lanche" → busque "Alimentação" ou "Restaurante"
+      - "Netflix", "Spotify", "Disney+", "HBO", "Amazon Prime", "YouTube Premium" → busque "Entretenimento" ou "Streaming" ou "Assinaturas"
+      - "AWS", "Google Cloud", "Azure", "servidor", "hospedagem" → busque "Tecnologia" ou "Serviços" ou "Assinaturas"
+      - "gasolina", "álcool", "combustível", "posto", "abastecimento" → busque "Combustível" ou "Transporte"
+      - "luz", "energia", "CPFL", "Enel", "conta de luz" → busque "Conta de Luz" ou "Contas" ou "Utilidades"
+      - "água", "SABESP", "conta de água" → busque "Conta de Água" ou "Contas"
+      - "internet", "Vivo", "Claro", "Tim", "celular" → busque "Internet" ou "Telefone" ou "Contas"
+      - "supermercado", "compras", "feira", "hortifruti" → busque "Mercado" ou "Supermercado"
+      - "roupa", "camisa", "calça", "tênis", "sapato" → busque "Vestuário" ou "Roupas" ou "Compras"
+      
+      USE SEU CONHECIMENTO GERAL: Se o usuário digita uma marca/produto/serviço que você conhece,
+      associe à categoria mais adequada que exista na lista do usuário.
+      
+      **CONFIANÇA DO MATCH:**
+      - "high": Categoria existe E é match perfeito (ex: "Farmácia" para "remédio")
+      - "medium": Categoria existe E é semanticamente relacionada (ex: "Mercado" para "chiclete")  
+      - "low": Nenhuma categoria existente se encaixa bem
+      
+      **SE NENHUMA CATEGORIA SE ENCAIXA:** 
+      Retorne o termo principal do usuário em categoryName e confidence "low".
       
       CENÁRIO CARTÃO: Se a mensagem for "criar cartão Nubank dia 5", ignore o valor e preencha cardName, closingDay e dueDay.
 
@@ -227,7 +393,9 @@ class AIService {
       {
         "value": number | null,
         "baseDescription": "string",
-        "categoryName": "string (Categoria existente ou a palavra chave do usuário)",
+        "categoryName": "string (categoria existente que melhor se encaixa OU termo do usuário)",
+        "categoryMatchConfidence": "high|medium|low",
+        "categoryMatchReason": "string explicando por que escolheu essa categoria",
         "isInstallment": boolean,
         "installmentCount": number | null,
         "cardName": string | null,
@@ -238,13 +406,13 @@ class AIService {
 
     try {
       const response = await openai.chat.completions.create({
-        model: 'gpt-4o', 
+        model: 'gpt-4o',
         messages: [{
           role: 'user',
           content: [{ type: 'text', text: prompt }],
         }],
         response_format: { type: "json_object" },
-        temperature: 0, // ZERO criatividade para evitar alucinações de categoria
+        temperature: 0.1, // Leve criatividade para associações semânticas
       });
 
       const result = JSON.parse(response.choices[0].message.content);
@@ -259,38 +427,38 @@ class AIService {
   _validateAnalysisResult(result, categories, cardNames = []) {
     // Validação básica para não retornar lixo
     if (result.value === null && (!result.cardName || !result.closingDay)) {
-        // Se não tem valor e não é criação de cartão, retorna nulo/vazio seguro
-        return { value: null, baseDescription: result.baseDescription || '', categoryName: null, isInstallment: false, installmentCount: null, cardName: null, closingDay: null, dueDay: null, ambiguousCategoryNames: null };
+      // Se não tem valor e não é criação de cartão, retorna nulo/vazio seguro
+      return { value: null, baseDescription: result.baseDescription || '', categoryName: null, isInstallment: false, installmentCount: null, cardName: null, closingDay: null, dueDay: null, ambiguousCategoryNames: null };
     }
 
     // Normaliza nome do cartão se encontrado
     if (result.cardName && cardNames.length > 0) {
-        const lowerCaseCardName = result.cardName.toLowerCase();
-        let foundCard = cardNames.find(c => c.toLowerCase() === lowerCaseCardName);
-        if (!foundCard) {
-            foundCard = cardNames.find(c => c.toLowerCase().includes(lowerCaseCardName) || lowerCaseCardName.includes(c.toLowerCase()));
-        }
-        if(foundCard) {
-            result.cardName = foundCard;
-        }
+      const lowerCaseCardName = result.cardName.toLowerCase();
+      let foundCard = cardNames.find(c => c.toLowerCase() === lowerCaseCardName);
+      if (!foundCard) {
+        foundCard = cardNames.find(c => c.toLowerCase().includes(lowerCaseCardName) || lowerCaseCardName.includes(c.toLowerCase()));
+      }
+      if (foundCard) {
+        result.cardName = foundCard;
+      }
     }
 
     // Valida parcelas
     if (result.isInstallment && (!result.installmentCount || result.installmentCount <= 0)) {
-        result.installmentCount = 2; // Default seguro
+      result.installmentCount = 2; // Default seguro
     } else if (!result.isInstallment) {
-        result.installmentCount = null;
+      result.installmentCount = null;
     }
 
     // Corrige formato numérico
     if (result.value !== null) {
-        // Remove R$, espaços e troca vírgula por ponto se necessário (embora a IA já devolva number geralmente)
-        const valStr = String(result.value).replace(/[^0-9.,-]/g, '').replace(',', '.');
-        result.value = parseFloat(valStr);
-        if (isNaN(result.value)) {
-            result.value = null;
-            result.categoryName = null;
-        }
+      // Remove R$, espaços e troca vírgula por ponto se necessário (embora a IA já devolva number geralmente)
+      const valStr = String(result.value).replace(/[^0-9.,-]/g, '').replace(',', '.');
+      result.value = parseFloat(valStr);
+      if (isNaN(result.value)) {
+        result.value = null;
+        result.categoryName = null;
+      }
     }
 
     return result;

@@ -689,11 +689,14 @@ class WebhookService {
         const mediaUrl = payload.image ? payload.image.imageUrl : payload.document.documentUrl;
         const mimeType = payload.image ? payload.image.mimeType : payload.document.mimeType;
 
+        // CORREÇÃO: Só remove estados "orphan", preservando fluxos ativos com interação pendente
+        const orphanStates = ['awaiting_context', 'awaiting_ai_analysis_complete'];
         await PendingExpense.destroy({
             where: {
                 participant_phone: participantPhone,
                 whatsapp_group_id: groupId,
                 profile_id: profileId,
+                action_expected: { [Op.in]: orphanStates }
             }
         });
 
@@ -900,7 +903,17 @@ class WebhookService {
 
         // 8. Processamento de Novo Texto/Áudio (IA ou Regex)
         if (textMessage || audioUrl) {
-            await PendingExpense.destroy({ where: { participant_phone: participantPhone, whatsapp_group_id: groupId, profile_id: profileId } });
+            // CORREÇÃO: Não destruir TODOS os PendingExpense! Apenas os "orphan" (sem fluxo ativo)
+            // Isso permite que o usuário tenha múltiplos lançamentos pendentes ao mesmo tempo
+            const orphanStates = ['awaiting_context', 'awaiting_ai_analysis_complete'];
+            await PendingExpense.destroy({
+                where: {
+                    participant_phone: participantPhone,
+                    whatsapp_group_id: groupId,
+                    profile_id: profileId,
+                    action_expected: { [Op.in]: orphanStates }  // Só remove os órfãos
+                }
+            });
 
             // >>> FAST TRACK VIA REGEX <<<
             if (!audioUrl && textMessage) {
@@ -1041,9 +1054,11 @@ class WebhookService {
     }
 
     async decideAndSaveExpenseOrRevenue(pendingData, analysisResult, userContext) {
-        const { value, baseDescription, isInstallment, installmentCount, cardName, ambiguousCategoryNames } = analysisResult;
+        const { value, baseDescription, isInstallment, installmentCount, cardName, ambiguousCategoryNames, categoryMatchConfidence, categoryMatchReason } = analysisResult;
         const profileId = pendingData.profile_id;
         const groupId = pendingData.whatsapp_group_id;
+
+        logger.info(`[Webhook] Decidindo categoria. Confidence: ${categoryMatchConfidence}, Reason: ${categoryMatchReason}`);
 
         // 1. Caso de Ambiguidade (IA ficou em dúvida entre 2 categorias existentes)
         if (ambiguousCategoryNames && ambiguousCategoryNames.length > 0) {
@@ -1061,33 +1076,26 @@ class WebhookService {
             return;
         }
 
-        // 2. Tenta encontrar categoria existente
+        // 2. Tenta encontrar categoria existente pelo nome retornado pela IA
         let category = await this._fuzzyFindCategory(profileId, analysisResult.categoryName);
 
         // Se a IA retornou "Outros", tenta buscar pela descrição original (ex: "Almoço")
-        if (!category && (analysisResult.categoryName.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
+        if (!category && (analysisResult.categoryName?.toLowerCase() === 'outros' && baseDescription.toLowerCase() !== 'outros')) {
             category = await this._fuzzyFindCategory(profileId, baseDescription);
         }
 
-        // --- TRAVA DE SEGURANÇA PARA CATEGORIAS GENÉRICAS ---
-        if (category) {
-            const genericNames = ['outros', 'geral', 'diversos', 'despesas', 'receita padrão', 'despesa padrão', 'custos'];
-            const isGenericCategory = genericNames.includes(category.name.toLowerCase());
-            const isSpecificDescription = !genericNames.includes(baseDescription.toLowerCase());
+        // 3. NOVA LÓGICA DE CONFIANÇA DA IA
+        // Se a IA tem alta/média confiança E encontrou categoria válida, salva direto!
+        const confidence = categoryMatchConfidence || 'low';
 
-            // Se encontrou uma categoria Genérica (ex: Outros), mas o usuário escreveu algo específico (ex: "Cimento"),
-            // FORÇAMOS ser null para que o sistema pergunte se quer criar a categoria "Cimento".
-            if (isGenericCategory && isSpecificDescription) {
-                category = null;
-            }
-        }
-        // ----------------------------------------------------
+        if (category && ['high', 'medium'].includes(confidence)) {
+            // A IA tem confiança que essa é a categoria certa - NÃO PERGUNTAR!
+            logger.info(`[Webhook] Confiança ${confidence} - salvando direto na categoria "${category.name}"`);
 
-        if (category) {
             const finalFlow = category.category_flow;
             const resolvedAnalysis = { ...analysisResult, flow: finalFlow, categoryName: category.name };
 
-            // Lógica de Cartão de Crédito
+            // Lógica de Cartão de Crédito (só se for despesa parcelada ou mencionou cartão)
             if (finalFlow === 'expense' && (isInstallment || cardName)) {
                 pendingData.value = value;
                 pendingData.description = baseDescription;
@@ -1120,8 +1128,117 @@ class WebhookService {
                 }
                 await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
             }
+            return;
+        }
+
+        // 4. Se categoria está em genérica E confiança baixa, forçar null para perguntar
+        if (category && confidence === 'low') {
+            const genericNames = ['outros', 'geral', 'diversos', 'despesas', 'receita padrão', 'despesa padrão', 'custos'];
+            const isGenericCategory = genericNames.includes(category.name.toLowerCase());
+            if (isGenericCategory) {
+                category = null;
+            }
+        }
+
+        // 5. Se encontrou categoria (mesmo com baixa confiança), tenta usar
+        if (category) {
+            const finalFlow = category.category_flow;
+            const resolvedAnalysis = { ...analysisResult, flow: finalFlow, categoryName: category.name };
+
+            // Lógica de Cartão de Crédito
+            if (finalFlow === 'expense' && (isInstallment || cardName)) {
+                pendingData.value = value;
+                pendingData.description = baseDescription;
+                pendingData.suggested_new_category_name = category.name;
+                pendingData.installment_count = isInstallment ? installmentCount : null;
+                pendingData.action_expected = 'awaiting_credit_card_choice';
+                pendingData.suggested_category_id = category.id;
+                await pendingData.save();
+
+                const creditCards = await creditCardService.getAllCreditCards(profileId);
+                if (creditCards.length > 0) {
+                    const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name}`).join('\n');
+                    let cardMessage = `ℹ️ A despesa de *${new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)}* na categoria *${category.name}* pode ser de cartão.\n\nSelecione o *número* do cartão ou responda *0* para dinheiro/débito.\n\n${cardListText}`;
+
+                    if (cardName) {
+                        const suggestedCard = creditCards.find(c => c.name.toLowerCase() === cardName.toLowerCase());
+                        if (suggestedCard) {
+                            cardMessage = `ℹ️ A IA sugeriu o cartão *${suggestedCard.name}*. Confirma? Responda com o *número* do cartão ou *0* para dinheiro/débito.\n\n${cardListText}`;
+                        }
+                    }
+                    await whatsappService.sendWhatsappMessage(groupId, cardMessage);
+                } else {
+                    await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
+                }
+            } else {
+                if (finalFlow === 'revenue' && (isInstallment || cardName)) {
+                    await whatsappService.sendWhatsappMessage(groupId, `⚠️ A categoria "${category.name}" é de *Receita*. A informação de cartão/parcelamento será ignorada.`);
+                }
+                await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, category.id, null);
+            }
         } else {
-            // Categoria não encontrada (ou era genérica e foi barrada)
+            // 6. Categoria não encontrada (ou era genérica com baixa confiança)
+            // ANTES de perguntar ao usuário, tentamos busca na internet!
+            const termToSearch = analysisResult.categoryName !== 'Outros'
+                ? analysisResult.categoryName
+                : (baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || null);
+
+            if (termToSearch) {
+                logger.info(`[Webhook] Termo desconhecido "${termToSearch}". Tentando busca na internet...`);
+                await whatsappService.sendWhatsappMessage(groupId, `🔍 Pesquisando na internet o que é "${termToSearch}"...`);
+
+                // Buscar todas as categorias para passar como opções
+                const allCategories = await Category.findAll({ where: { profile_id: profileId }, attributes: ['id', 'name', 'category_flow'] });
+                const categoryNames = allCategories.map(c => c.name);
+
+                // Fazer busca web
+                const webResult = await aiService.searchWebAndCategorize(termToSearch, categoryNames);
+
+                // Se encontrou categoria com confiança boa, usa!
+                if (webResult.categoryName && ['high', 'medium'].includes(webResult.categoryMatchConfidence)) {
+                    const matchedCategory = allCategories.find(c => c.name.toLowerCase() === webResult.categoryName.toLowerCase());
+
+                    if (matchedCategory) {
+                        logger.info(`[Webhook] Busca web encontrou: "${termToSearch}" → "${matchedCategory.name}" (${webResult.categoryMatchConfidence})`);
+
+                        const finalFlow = matchedCategory.category_flow;
+                        const resolvedAnalysis = { ...analysisResult, flow: finalFlow, categoryName: matchedCategory.name };
+
+                        // Mensagem explicando a descoberta
+                        const explanation = webResult.whatItIs ? `✨ Descobri que *${termToSearch}* é: ${webResult.whatItIs}\n\n` : '';
+                        await whatsappService.sendWhatsappMessage(groupId, `${explanation}📂 Categorizando em *${matchedCategory.name}*...`);
+
+                        // Lógica de Cartão de Crédito
+                        if (finalFlow === 'expense' && (isInstallment || cardName)) {
+                            pendingData.value = value;
+                            pendingData.description = baseDescription;
+                            pendingData.suggested_new_category_name = matchedCategory.name;
+                            pendingData.installment_count = isInstallment ? installmentCount : null;
+                            pendingData.action_expected = 'awaiting_credit_card_choice';
+                            pendingData.suggested_category_id = matchedCategory.id;
+                            await pendingData.save();
+
+                            const creditCards = await creditCardService.getAllCreditCards(profileId);
+                            if (creditCards.length > 0) {
+                                const cardListText = creditCards.map((card, index) => `${index + 1} - ${card.name}`).join('\n');
+                                await whatsappService.sendWhatsappMessage(groupId, `ℹ️ Selecione o *número* do cartão ou responda *0* para dinheiro/débito.\n\n${cardListText}`);
+                            } else {
+                                await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, matchedCategory.id, null);
+                            }
+                        } else {
+                            await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, matchedCategory.id, null);
+                        }
+                        return;
+                    }
+                }
+
+                // Se busca web não foi conclusiva, informa e pergunta ao usuário
+                if (webResult.whatItIs) {
+                    await whatsappService.sendWhatsappMessage(groupId, `ℹ️ Descobri que *${termToSearch}* é: ${webResult.whatItIs}\nMas não encontrei uma categoria adequada.`);
+                }
+            }
+
+            // Fallback: perguntar ao usuário
             const categorySuggestion = analysisResult.categoryName !== 'Outros' ? analysisResult.categoryName : (baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria");
 
             pendingData.value = value;

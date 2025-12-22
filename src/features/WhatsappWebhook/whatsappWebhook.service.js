@@ -23,7 +23,29 @@ const EXPENSE_EDIT_WAIT_TIME_MINUTES = 525600;
 const ONBOARDING_WAIT_TIME_MINUTES = 60;
 const MENU_COMMAND = 'MENU';
 
+// --- PALAVRAS-CHAVE QUE INDICAM RECEITA (entrada de dinheiro) ---
+const REVENUE_KEYWORDS = [
+    'salário', 'salario', 'pagamento recebido', 'recebimento', 'recebido',
+    'entrada', 'receita', 'venda', 'vendas', 'faturamento', 'comissão', 'comissao',
+    'freelance', 'bônus', 'bonus', 'dividendo', 'dividendos', 'rendimento',
+    'aluguel recebido', 'reembolso', 'prêmio', 'premio', 'lucro', 'ganho',
+    'honorário', 'honorario', 'pró-labore', 'pro labore', 'transferência recebida'
+];
+
 class WebhookService {
+
+    /**
+     * Verifica se o texto contém palavras-chave que indicam RECEITA (entrada de dinheiro)
+     */
+    _isRevenueKeyword(text) {
+        if (!text) return false;
+        const lowerText = text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+        return REVENUE_KEYWORDS.some(keyword => {
+            const normalizedKeyword = keyword.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            return lowerText.includes(normalizedKeyword);
+        });
+    }
+
 
     async _findUserByFlexiblePhone(phone) {
         if (!phone) return null;
@@ -1034,17 +1056,40 @@ class WebhookService {
             await whatsappService.sendWhatsappMessage(groupId, `✅ Entendido! Classificado como *${existingCategory.name}*.`);
             await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userContext, existingCategory.id, pendingExpense.credit_card_id);
         } else {
-            pendingExpense.suggested_new_category_name = textMessage;
-            pendingExpense.action_expected = 'awaiting_new_category_flow_decision';
-            await pendingExpense.save();
+            // AUTO-DETECTAR se é Receita ou Despesa (padrão = Despesa)
+            const isRevenue = this._isRevenueKeyword(textMessage) || this._isRevenueKeyword(pendingExpense.description);
+            const categoryFlow = isRevenue ? 'revenue' : 'expense';
+            const flowLabel = isRevenue ? 'Receita' : 'Despesa';
 
-            const message = `🤔 Não encontrei a categoria "${textMessage}". Deseja criar como:`;
-            const buttons = [
-                { id: `new_cat_flow_expense_${pendingExpense.id}`, label: '💸 Criar Despesa' },
-                { id: `new_cat_flow_revenue_${pendingExpense.id}`, label: '💰 Criar Receita' },
-                { id: `search_manual_cat_${pendingExpense.id}`, label: '🔍 Localizar Categoria Parecida' }
-            ];
-            await whatsappService.sendButtonList(groupId, message, buttons);
+            // Criar categoria automaticamente
+            try {
+                const newCategory = await categoryService.create(
+                    { name: textMessage, type: textMessage, category_flow: categoryFlow },
+                    profileId
+                );
+                logger.info(`[Webhook] Categoria "${textMessage}" criada automaticamente como ${flowLabel}.`);
+
+                const analysisResult = {
+                    value: pendingExpense.value,
+                    baseDescription: pendingExpense.description,
+                    categoryName: newCategory.name,
+                    flow: categoryFlow,
+                    isInstallment: !!pendingExpense.installment_count,
+                    installmentCount: pendingExpense.installment_count,
+                    cardName: null,
+                };
+                let userCtx = '';
+                if (pendingExpense.description && typeof pendingExpense.description === 'string') {
+                    const match = pendingExpense.description.match(/\(([^)]+)\)/);
+                    if (match) userCtx = match[1];
+                }
+
+                await whatsappService.sendWhatsappMessage(groupId, `✅ Categoria "*${textMessage}*" criada como *${flowLabel}*!`);
+                await this.createExpenseOrRevenueAndStartEditFlow(pendingExpense, analysisResult, userCtx, newCategory.id, pendingExpense.credit_card_id);
+            } catch (error) {
+                logger.error('[Webhook] Erro ao criar categoria automaticamente:', error);
+                await whatsappService.sendWhatsappMessage(groupId, `❌ Erro ao criar categoria: ${error.message}`);
+            }
         }
     }
 
@@ -1301,22 +1346,30 @@ class WebhookService {
                 }
             }
 
-            // Fallback: perguntar ao usuário
+            // AUTO-CRIAR categoria (padrão = Despesa, detecta Receita por palavras-chave)
             const categorySuggestion = analysisResult.categoryName !== 'Outros' ? analysisResult.categoryName : (baseDescription.replace(/[\d,.-]/g, '').trim().split(' ')[0] || "Nova Categoria");
 
-            pendingData.value = value;
-            pendingData.description = userContext ? `${baseDescription} (${userContext})` : baseDescription;
-            pendingData.suggested_new_category_name = categorySuggestion;
-            pendingData.action_expected = 'awaiting_new_category_flow_decision';
-            await pendingData.save();
+            const isRevenue = this._isRevenueKeyword(categorySuggestion) || this._isRevenueKeyword(baseDescription) || this._isRevenueKeyword(userContext);
+            const categoryFlow = isRevenue ? 'revenue' : 'expense';
+            const flowLabel = isRevenue ? 'Receita' : 'Despesa';
 
-            const message = `🤔 A categoria "*${categorySuggestion}*" é nova (ou não reconheci). \n\nEla é *Despesa* ou *Receita*? \n\n💡 _Se você já tem uma categoria parecida e eu não achei, basta selecionar *Localizar Categoria Parecida*._`;
-            const buttons = [
-                { id: `new_cat_flow_expense_${pendingData.id}`, label: '💸 Despesa' },
-                { id: `new_cat_flow_revenue_${pendingData.id}`, label: '💰 Receita' },
-                { id: `search_manual_cat_${pendingData.id}`, label: '🔍 Localizar Categoria Parecida' }
-            ];
-            await whatsappService.sendButtonList(groupId, message, buttons);
+            try {
+                const newCategory = await Category.create({
+                    name: categorySuggestion,
+                    type: categorySuggestion,
+                    category_flow: categoryFlow,
+                    profile_id: profileId
+                });
+                logger.info(`[Webhook] Categoria "${categorySuggestion}" criada automaticamente como ${flowLabel}.`);
+
+                const resolvedAnalysis = { ...analysisResult, flow: categoryFlow, categoryName: newCategory.name };
+
+                await whatsappService.sendWhatsappMessage(groupId, `✅ Categoria "*${categorySuggestion}*" criada como *${flowLabel}*!`);
+                await this.createExpenseOrRevenueAndStartEditFlow(pendingData, resolvedAnalysis, userContext, newCategory.id, null);
+            } catch (error) {
+                logger.error('[Webhook] Erro ao criar categoria automaticamente:', error);
+                await whatsappService.sendWhatsappMessage(groupId, `❌ Erro ao criar categoria: ${error.message}`);
+            }
         }
     }
 
